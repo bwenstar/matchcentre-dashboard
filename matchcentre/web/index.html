@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Match Centre dashboard</title>
+<meta name="description" content="Ladder, results, team and player statistics for
+one competition, built from a club's own exported scorecards.">
+<!--
+  The static shell, and nothing else. Every visible string that identifies a
+  competition (the club, the day, the grade, the season, the teams, the players)
+  arrives at runtime from the season document and is written in by app.js from
+  meta. Nothing about any competition is spelled here, because site.py copies this
+  one file into *every* competition directory: a heading typed in here would
+  mislabel every dashboard but one. That is not hypothetical. The predecessor
+  named its own grade in the title and the banner, which was harmless while there
+  was one grade and wrong for nine of ten the moment there were more.
+
+  The placeholder text below is therefore deliberately honest rather than
+  decorative: "Loading season" is true before the data arrives, and a plausible
+  name would be a lie the reader cannot detect.
+
+  Load order matters and is checked by the test suite: season-data.js assigns
+  window.SEASON_DATA, then app.js reads it. A browser refuses to fetch() a
+  sibling file over file://, so that script tag is the only way data reaches a
+  page opened by double-click, which is how a club opens it. app.js may still
+  prefer a fetched season.json when the folder happens to be served over http.
+
+  Hooks app.js and this page have agreed on. Each one exists to carry a caveat
+  rather than a number, so a missing one is silent and costly:
+
+    #brand-title #brand-sub  competition and season labels, from meta
+    #rules-banner            which scoring rules, set rule and format were used
+    #season-picker           other seasons; stays hidden unless multi-season
+    #entity-picker           jump to a team or player
+    #theme-toggle            light/dark/system
+    #health                  data-health summary
+    #rejected                cards seen and not scored (F4)
+    #view                    the router's mount point
+    #foot-note               generated stamp and source directory
+    .provenance-flag         marks a value that was worked out, not declared (F7)
+    .ladder-note             says on what basis the ladder is ordered (F10)
+
+  #rules-banner, #rejected and #season-picker ship *empty*, and styles.css hides
+  an empty one. That way they appear exactly when app.js has something to put in
+  them, and no step can be forgotten: there is no `hidden` attribute for the
+  script to remember to remove.
+-->
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip-link" href="#view">Skip to content</a>
+
+<header class="topbar">
+  <div class="brand">
+    <!-- Up to the picker. Correct as written for a single-season site, where a
+         competition directory sits one level under the root. app.js knows
+         meta.seasons_mode and can retarget this link (document.querySelector
+         ('.home-link')) for a multi-season tree, which is one level deeper. -->
+    <a class="home-link" href="../">&larr; All competitions</a>
+    <strong id="brand-title">Match Centre dashboard</strong>
+    <small id="brand-sub">Loading season&hellip;</small>
+  </div>
+
+  <nav class="tabs" aria-label="Views">
+    <a href="#/">Overview</a>
+    <a href="#/matches">Matches</a>
+    <a href="#/players">Players</a>
+  </nav>
+
+  <div class="controls">
+    <!-- Labelled with aria-label rather than a <label> element: this control is
+         hidden while it is empty, and a visually hidden <label> for a hidden
+         control is read out by a screen reader with nothing to point at. -->
+    <select id="season-picker" class="season-picker" aria-label="Jump to another season"></select>
+    <label class="sr-only" for="entity-picker">Jump to a team or player</label>
+    <select id="entity-picker">
+      <option value="">Jump to a team or player&hellip;</option>
+    </select>
+    <button class="btn" id="theme-toggle" type="button">Theme: system</button>
+  </div>
+</header>
+
+<!-- Quiet, permanent context: which scoring preset, which set rule, which match
+     format produced every number below. A club running the wrong preset has to
+     be able to see that without reading code. -->
+<div id="rules-banner" class="rules-banner"></div>
+
+<div class="health" id="health" aria-label="Data health"></div>
+
+<!-- Cards that were seen and not scored. Loud on purpose, and above the fold:
+     an unread scorecard is missing data, not a zero, and every number on the
+     page is provisional until it is dealt with. -->
+<section id="rejected" aria-label="Scorecards that could not be read"></section>
+
+<noscript>
+  <div class="health">
+    <p class="note critical"><span class="ico" aria-hidden="true">&#10007;</span>
+    <span>This dashboard builds the season in the browser from
+    <code>season.json</code>, so it needs JavaScript enabled. The scorecards it
+    was built from, and <code>season.json</code> itself, are plain files in this
+    same folder and can be read without it.</span></p>
+  </div>
+</noscript>
+
+<main id="view" tabindex="-1"></main>
+
+<footer class="meta"><span id="foot-note"></span></footer>
+
+<!--
+  The data carrier, then the app. A plain assignment, so a missing file costs one
+  console 404 and nothing else:
+    season-data.js   window.SEASON_DATA   written by build.py beside season.json
+-->
+<script src="season-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

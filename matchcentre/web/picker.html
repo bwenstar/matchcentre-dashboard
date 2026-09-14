@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title><!--TITLE--></title>
+<meta name="description" content="Ladders, results and player statistics for every
+competition a club runs, built from the club's own exported scorecards.">
+<!--
+  The root page: one card per competition, linked when there is a dashboard
+  behind it. This file is a template. site.py reads it, fills it in and writes the
+  result as index.html at the root of the site; nothing here names a club, a
+  grade, a season or a theme, because the predecessor did and a second club's
+  dashboard then announced the first club's name.
+
+  HOW SITE.PY FILLS THIS IN. By sentinel comment, replaced literally, everywhere
+  it occurs. Not str.format and not percent formatting, because this document is
+  full of braces and percent signs. A sentinel is an HTML comment whose whole body
+  is one upper-case name; they are written below without their comment delimiters,
+  because a real one here would end this comment early. The complete set site.py
+  substitutes lives in matchcentre/site.py as PICKER_SENTINELS, and a sentinel
+  used here that is not in that list would survive into the published page as
+  visible text, so the two are checked against each other by the test suite.
+  The five this template uses:
+
+    TITLE          the site heading; config title, else the club, else a generic
+                   one. Used twice: page title and brand.
+    SUBTITLE       one line of arithmetic under it, such as how many competitions
+                   have results.
+    COMPETITIONS   the whole list: an h2 per group, then a div.picks of a.pick
+                   cards. Rendered server-side, so the page is a working list of
+                   links with JavaScript switched off.
+    FOOTER         what generated this page, and when.
+    THEME-KEY      the localStorage key for the light/dark choice, derived per
+                   club so two clubs' sites served from one origin do not
+                   overwrite each other's choice.
+
+  Also written beside this page, and only because this template asks for it by
+  name: picker-data.js, assigning window.PICKER_DATA. It carries the same records
+  the list above was rendered from, which is what lets the season navigation be
+  built without re-reading the markup. Everything that page needs to *say* is
+  already in the HTML; the script only adds navigation.
+
+  SINGLE SEASON VERSUS MANY. One template, two shapes, and the difference is
+  entirely in the data:
+    single  the list is grouped by day and the word "season" appears nowhere,
+            because site.py emits no season in the headings and the navigation
+            below stays empty and hidden.
+    multi   the groups are headed by season, newest first, and the season
+            navigation appears so a reader can look at one season at a time.
+  There is no flag in this file to set. A page that had to be edited to match the
+  mode would eventually be edited wrongly.
+-->
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="picker">
+<a class="skip-link" href="#competitions">Skip to the list</a>
+
+<header class="topbar">
+  <div class="brand">
+    <strong><!--TITLE--></strong>
+    <small><!--SUBTITLE--></small>
+  </div>
+  <button class="btn" id="theme-toggle" type="button">Theme: system</button>
+</header>
+
+<main id="competitions" tabindex="-1">
+
+<!-- Empty, hidden, and filled only when the data says there is more than one
+     season. In single-season mode nothing fills it and nothing is shown. -->
+<nav id="season-picker" class="season-picker" aria-label="Choose a season" hidden></nav>
+
+<!--COMPETITIONS-->
+
+<!-- Shown only when the list above came out empty, which on a first run means
+     the tool found no PDFs at all. Two independent mechanisms reveal it, because
+     this is the one moment a club most needs help and the least likely to have a
+     console open: the script below removes `hidden` when the page holds no
+     competition card, and styles.css reveals it through :has() for a browser with
+     scripting switched off. Whichever fires first, the panel appears once. -->
+<section class="first-run" hidden aria-label="Nothing found yet">
+  <h2>No scorecards have been read yet</h2>
+  <p>This page lists one dashboard per competition. It is empty because the build
+  found no scorecard PDFs to read.</p>
+  <ol>
+    <li>Export the scorecards you want from the Match Centre site and copy the
+    PDFs into the <code>data/</code> folder beside <code>build.py</code>. Folders
+    inside it are fine, and in multi-season mode the first folder under
+    <code>data/</code> is what names the season.</li>
+    <li>Run <code>python3 build.py</code> again. It reports every PDF it read, and
+    names any it refused along with the reason.</li>
+    <li>To see a finished dashboard before your own cards arrive, run
+    <code>python3 tools/demo.py</code>. It writes a fictional club's season into
+    <code>data/</code>, so build again afterwards, and delete that folder when you
+    are done with it.</li>
+  </ol>
+  <p><code>README.md</code> in the project folder covers both paths, and what to
+  do about a card that could not be read.</p>
+</section>
+
+</main>
+
+<footer class="meta"><!--FOOTER--></footer>
+
+<script src="picker-data.js"></script>
+<script>
+/* Three small jobs, in plain ES5 so this opens in whatever browser is on the
+   clubhouse laptop, and each one guarded so that a missing or empty
+   picker-data.js costs nothing: the page is already complete without this
+   script. It renders as a list of links with scripting switched off. */
+(function () {
+  'use strict';
+
+  var data = window.PICKER_DATA || {};
+
+  /* --- theme ------------------------------------------------------------- */
+  /* The same three states and the same key as a competition dashboard, so a
+     choice made on either page is honoured on the other. The key is per club
+     site rather than fixed: two clubs' sites can end up under one origin, and a
+     shared key means either silently overwrites the other's choice. */
+  var KEY = data.theme_key || '<!--THEME-KEY-->';
+  var ORDER = ['system', 'light', 'dark'];
+  var button = document.getElementById('theme-toggle');
+
+  function applyTheme(mode) {
+    if (mode === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', mode);
+    try { localStorage.setItem(KEY, mode); } catch (e) { /* file:// or private */ }
+    if (button) {
+      button.textContent = 'Theme: ' + mode;
+      button.setAttribute('aria-label', 'Theme: ' + mode + '. Select to change.');
+    }
+  }
+
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) { stored = null; }
+  var current = ORDER.indexOf(stored) >= 0 ? stored : 'system';
+  applyTheme(current);
+  if (button) button.addEventListener('click', function () {
+    current = ORDER[(ORDER.indexOf(current) + 1) % ORDER.length];
+    applyTheme(current);
+  });
+
+  /* --- nothing to show --------------------------------------------------- */
+  /* Asked of the document rather than of the data, so it is right even if
+     picker-data.js is absent: no card on the page means nothing was found. */
+  var panel = document.querySelector('.first-run');
+  if (panel && !document.querySelector('.pick')) panel.removeAttribute('hidden');
+
+  /* --- seasons ----------------------------------------------------------- */
+  var nav = document.getElementById('season-picker');
+  var competitions = data.competitions || [];
+  if (!nav || data.seasons_mode !== 'multi') return;
+
+  /* hasOwnProperty rather than a truth test, because a season key is a folder
+     name a club chose and "constructor" is a legal folder name. */
+  function has(map, name) {
+    return Object.prototype.hasOwnProperty.call(map, name);
+  }
+
+  /* Whole class names only. A substring test for "pick" also matches "pick-top"
+     and "pick-facts", which are the spans inside a card. */
+  function hasClass(node, name) {
+    return (' ' + (node.className || '') + ' ').indexOf(' ' + name + ' ') >= 0;
+  }
+
+  /* Keeps the order the list is already in: site.py sorts newest season first,
+     so the buttons come out in the same order as the groups they refer to. */
+  var seasons = [];
+  var seen = {};
+  var i;
+  for (i = 0; i < competitions.length; i++) {
+    var key = competitions[i].season_key;
+    if (!key || has(seen, key)) continue;
+    seen[key] = true;
+    seasons.push({ key: key, label: competitions[i].season_label || key });
+  }
+  /* One season is not a choice, and offering it as one would imply there are
+     others. Two is the point at which this navigation earns its place. */
+  if (seasons.length < 2) return;
+
+  /* A season label is what the cards printed, so two seasons can carry the same
+     one: a run over two folders of generated cards produced "Season 1" twice,
+     and two buttons with one name is worse than none. The key is the folder name
+     under data/ and is unique by construction, so a colliding label defers to
+     it. */
+  var perLabel = {};
+  for (i = 0; i < seasons.length; i++) {
+    var label = seasons[i].label;
+    perLabel[label] = has(perLabel, label) ? perLabel[label] + 1 : 1;
+  }
+  for (i = 0; i < seasons.length; i++) {
+    if (perLabel[seasons[i].label] > 1) seasons[i].label = seasons[i].key;
+  }
+
+  /* Which season a card belongs to is read off its own link, never off the
+     heading above it: the link begins with the season key, which is unique,
+     while a heading begins with the label, which is not. Getting this wrong
+     would hide a competition and let the page imply it does not exist. */
+  function seasonOfCard(node) {
+    var href = node.getAttribute ? node.getAttribute('href') : null;
+    if (!href) return null;
+    for (var s = 0; s < seasons.length; s++) {
+      if (href.indexOf(seasons[s].key + '/') === 0) return seasons[s].key;
+    }
+    return null;
+  }
+
+  /* Each group is an h2 followed by its div.picks; site.py writes them in that
+     order, and the guard on the class is what skips the panel further down the
+     page, whose heading is followed by a paragraph. */
+  var groups = [];
+  var headings = document.querySelectorAll('#competitions h2');
+  for (i = 0; i < headings.length; i++) {
+    var heading = headings[i];
+    var list = heading.nextElementSibling;
+    if (!list || !hasClass(list, 'picks')) continue;
+    var cards = [];
+    for (var c = 0; c < list.children.length; c++) {
+      var node = list.children[c];
+      if (!hasClass(node, 'pick')) continue;
+      cards.push({ node: node, season: seasonOfCard(node) });
+    }
+    groups.push({ heading: heading, list: list, cards: cards });
+  }
+  if (!groups.length) return;
+
+  function show(key) {
+    for (var g = 0; g < groups.length; g++) {
+      var shown = 0;
+      for (var c2 = 0; c2 < groups[g].cards.length; c2++) {
+        var card = groups[g].cards[c2];
+        /* A competition with no results yet has no link and so no season on the
+           page. It stays visible in every view: showing a reader something they
+           did not ask for is the lesser fault, and hiding it on a guess is the
+           kind of invention this tool exists to avoid. */
+        var hide = !!key && !!card.season && card.season !== key;
+        if (hide) {
+          card.node.setAttribute('hidden', 'hidden');
+        } else {
+          card.node.removeAttribute('hidden');
+          shown++;
+        }
+      }
+      /* An empty group takes its heading with it, count and all, rather than
+         leaving a season heading over nothing. */
+      if (shown) {
+        groups[g].heading.removeAttribute('hidden');
+        groups[g].list.removeAttribute('hidden');
+      } else {
+        groups[g].heading.setAttribute('hidden', 'hidden');
+        groups[g].list.setAttribute('hidden', 'hidden');
+      }
+    }
+    for (var b = 0; b < buttons.length; b++) {
+      var mine = buttons[b].getAttribute('data-season') === key;
+      buttons[b].setAttribute('aria-pressed', mine ? 'true' : 'false');
+    }
+  }
+
+  function addButton(key, label) {
+    var element = document.createElement('button');
+    element.type = 'button';
+    element.className = 'btn';
+    element.setAttribute('data-season', key);
+    element.textContent = label;
+    element.setAttribute('aria-pressed', 'false');
+    element.addEventListener('click', function () { show(key); });
+    nav.appendChild(element);
+    buttons.push(element);
+  }
+
+  var buttons = [];
+  var caption = document.createElement('span');
+  caption.className = 'season-label';
+  caption.textContent = 'Season:';
+  nav.appendChild(caption);
+  addButton('', 'All');
+  for (i = 0; i < seasons.length; i++) addButton(seasons[i].key, seasons[i].label);
+  show('');
+  nav.removeAttribute('hidden');
+})();
+</script>
+</body>
+</html>

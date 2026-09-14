@@ -1,0 +1,328 @@
+# A worked example config, for reference. You do not have to copy it.
+#
+# The first run of `python3 build.py` writes a real config.toml for you, filled
+# in from your own scorecards, with a comment beside every value it had to work
+# out for itself. Editing that file is the intended way to configure the tool.
+# This file exists so you can see every setting in one place, with the
+# alternatives spelled out beside each one.
+#
+# Nothing in this file can change a score. Results only ever come from the
+# scorecards. This file supplies names, captains, season labels, the list of
+# teams, the draw, and which scoring scheme your competition uses. Get a setting
+# wrong here and you get a wrong label, never a wrong ladder.
+#
+# The club below is invented. Every name in it is made up.
+#
+# Every setting is optional. Delete any line you do not need. Anything you leave
+# out is worked out from the cards and marked on the dashboard as a guess.
+
+
+# --------------------------------------------------------------------------
+# [club] — who this dashboard belongs to
+# --------------------------------------------------------------------------
+
+[club]
+# Shown as the site heading. Read off the scorecard letterhead if you omit it,
+# which usually means it arrives SHOUTING, as letterheads do.
+name = "Willowbank Tennis Club"
+
+# Set this when every one of your teams is printed with the same leading word.
+# Cards here read "WILLOWBANK FALCONS", so with this set the dashboard says
+# "Falcons" and the team's internal id is `falcons` rather than
+# `willowbank-falcons`. Leave it out and the full printed name is kept.
+# One word, matched only at the start of a name, case-insensitively.
+strip_team_prefix = "Willowbank"
+
+
+# --------------------------------------------------------------------------
+# [build] — how the site is put together
+# --------------------------------------------------------------------------
+
+[build]
+# "single"  every card in data/ belongs to one season. Output goes to
+#           site/<competition>/. No season picker.
+# "multi"   the first folder level under data/ is the season, so
+#           data/2026-winter/round-3/card.pdf is season "2026-winter".
+#           Output goes to site/<season>/<competition>/, the site gains a
+#           season picker, and player career totals span seasons.
+# Switching to "multi" changes competition ids: they gain the season key as a
+# prefix, so any [competitions.*] section you have written needs its name and
+# its season_key updated to match.
+seasons = "single"
+
+# The heading on the front page, the one that lists your competitions.
+title = "Willowbank Tennis Club season dashboards"
+
+
+# --------------------------------------------------------------------------
+# [rules] — how sets become ladder points
+# --------------------------------------------------------------------------
+# These are the settings worth getting right. No scorecard records how its
+# competition awards points, and 6-3 looks the same whether the set was played
+# to 6 or to 8, so this section cannot be read off a card. It is printed at the
+# top of every run and shown on the dashboard, so a club running the wrong
+# preset can see that without reading any code.
+
+[rules]
+# scoring — the points scheme. One of:
+#   games-bonus   win 4, draw 3, loss 2, plus 0.1 for every game won; a match is
+#                 decided on total games, with sets as the tiebreak. The ladder
+#                 is ordered on points average, so a team that has played fewer
+#                 matches is not punished for it. The default.
+#   sets-first    win 2, draw 1, loss 0; a match is decided on sets won, with
+#                 games as the tiebreak. The common pennant scheme.
+#   rubbers       a team's points are simply the number of sets it won.
+#   simple        win 3, draw 1, loss 0; decided on sets, then games.
+scoring = "games-bonus"
+
+# sets — when a set counts as finished. One of:
+#   first-to-6          first to 6 games, 5-5 decided at 6. The default.
+#   advantage-6         first to 6 by a margin of two, no upper limit.
+#   six-game-tiebreak   first to 6 by two, tiebreak at 6-all, so 7-6 is a set.
+#   fast4               first to 4.
+#   short-sets-4        first to 4 by a margin of two, no upper limit.
+#   pro-8               a single set to 8.
+#   pro-8-tiebreak      a single set to 8, tiebreak at 8-all.
+#   pro-10              a single set to 10.
+# Getting this wrong is quiet and damaging in both directions: under first-to-6
+# a FAST4 card's 4-2 reads as a set still in progress, and under pro-8 a 6-3
+# reads as finished when it was not.
+sets = "first-to-6"
+
+# format — the shape of a match: how many sets, and which are doubles.
+# This *is* read off your cards, from the marker column beside each set row, so
+# you do not need to set it. Declare it only if you would rather a card that
+# lost a row be refused than believed. When a declared format and a card
+# disagree the run stops and names the card; neither reading wins quietly.
+# One of: doubles-2, doubles-3, doubles-4, doubles-singles-doubles, mixed-3,
+# mixed-5, singles-3, singles-4, singles-6, singles-doubles.
+# format = "doubles-singles-doubles"
+
+# slots — the same thing spelled out, for a format with no preset name. Each
+# entry is "singles" or "doubles" (or "s" / "d"), in the order the set rows are
+# printed on the card. If you set both, slots wins.
+# slots = ["doubles", "singles", "singles", "doubles"]
+
+# min_sets_for_result — how many sets must be finished before the match counts
+# for the ladder. Defaults to three quarters of the sets, rounded up: 3 of 4,
+# 5 of 6. No card states it.
+# min_sets_for_result = 3
+
+
+# --------------------------------------------------------------------------
+# [seasons] — readable names for the folders under data/
+# --------------------------------------------------------------------------
+# Only used when [build] seasons = "multi". The key is the folder name directly
+# under data/; the value is what the season picker shows. Any folder without an
+# entry here is shown by its folder name.
+
+[seasons]
+"2026-summer" = "2026 Summer Season"
+"2026-winter" = "2026 Winter Season"
+
+
+# --------------------------------------------------------------------------
+# [team_names] — how you write a team's name
+# --------------------------------------------------------------------------
+# Cards shout team names, so the tool un-shouts them and marks the result as a
+# guess. Correct any that read wrongly and the guess marker goes away.
+# The key is the team's id: its name, lower-cased, punctuation turned into
+# hyphens, with strip_team_prefix removed. A first run fills these in for you.
+
+[team_names]
+falcons = "Falcons"
+herons = "Herons"
+currawongs = "Currawongs"
+lorikeets = "Lorikeets"
+nightjars = "Nightjars"
+silvereyes = "Silvereyes"
+# All-caps words of three letters or fewer are taken for abbreviations and left
+# alone, so a team printed "WILLOWBANK RTC" comes out as "RTC" already and needs
+# no line here.
+
+
+# --------------------------------------------------------------------------
+# [player_names] — how you write a person's name
+# --------------------------------------------------------------------------
+# Normally empty. Player names are printed in mixed case on the roster block of
+# every card, so they are taken as printed. Add a line to correct a spelling the
+# association has wrong, or to write out a name the cards abbreviate.
+# The key is the printed name, lower-cased with hyphens in place of spaces and
+# punctuation; the value is what you want shown.
+
+[player_names]
+# Printed as "E MacAlister" on the cards; written out in full on the dashboard.
+"e-macalister" = "Eilidh MacAlister"
+# The association's record has no accent on it. This puts it back.
+"siobhan-mcgrath" = "Siobhán McGrath"
+
+
+# --------------------------------------------------------------------------
+# [aliases] — one person, two spellings
+# --------------------------------------------------------------------------
+# The left key becomes the right one, so both spellings count as one player and
+# their statistics add up instead of appearing twice at half strength.
+# Both sides are ids, not printed names. The dashboard lists anyone who appears
+# only once or twice under "players to check", which is where you will spot
+# these.
+
+[aliases]
+# One card printed the surname as two words.
+"eilidh-mac-alister" = "e-macalister"
+# And one round was entered with an initial instead of the first name.
+"s-mcgrath" = "siobhan-mcgrath"
+
+
+# --------------------------------------------------------------------------
+# [competitions.<id>] — one section per competition
+# --------------------------------------------------------------------------
+# The section name is the competition's id, which is also its folder name under
+# site/. A first run names them <day>-division-<division>, and in multi-season
+# mode <season>-<day>-division-<division>.
+#
+# The name is yours to choose. Cards are matched to a section by its `day` and
+# `division` fields, not by the section name, so both must be filled in for the
+# section to take effect. In multi-season mode `season_key` must match too.
+# If nothing matches a section, the run says so rather than letting its settings
+# quietly do nothing.
+
+[competitions.wednesday-division-3]
+# What the dashboard calls this competition.
+label = "Wednesday Division 3"
+
+# The night it is played, and the division as printed on the cards. These two
+# are how cards find this section. The day is otherwise taken from the weekday
+# of each card's own date.
+day = "Wednesday"
+division = "3"
+
+# What your association calls this season. Cards do not reliably print it.
+season = "2026 Season 2"
+
+# Which folder under data/ these cards are in. Only needed, and only used, when
+# [build] seasons = "multi".
+# season_key = "2026-winter"
+
+# Rounds in the full season, finals excluded. Without it the dashboard says
+# "4 rounds played" and shows no percentage, because a season three rounds into
+# ten would otherwise read as complete.
+rounds_total = 14
+
+# The full team list. This is the single most useful line in the file.
+# Filling it in tells the tool the list is closed, and that unlocks two things:
+# a round with a team missing can be credited as a bye to the right team, and a
+# misspelt team name on a card becomes an error instead of a seventh team.
+# Leave it out and both stay off, by design: with an open list, a card that
+# never arrived and a team that had the week off look identical.
+# Write the names as you write them; they are matched by id.
+teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
+         "Silvereyes"]
+
+# A competition can override any of the four [rules] settings, for a club that
+# runs one division under different rules from the others.
+# scoring = "sets-first"
+# sets = "fast4"
+# format = "singles-4"
+# slots = ["singles", "singles", "singles", "singles"]
+# min_sets_for_result = 3
+
+# Captains, keyed by team name or team id. Read from the (C) marks on the cards
+# when you leave this out. Declaring one settles the case where two players on
+# one team have a (C) against them on different cards.
+[competitions.wednesday-division-3.captains]
+"Falcons" = "Siobhán McGrath"
+"Herons" = "Eilidh MacAlister"
+"Currawongs" = "Bastian Vreeland"
+"Lorikeets" = "Ngozi Achterberg"
+"Nightjars" = "Wilfredo Santamaria"
+"Silvereyes" = "Marisol Ferreira-Kaye"
+
+# Each team's home court, if your club plays on numbered courts. Whole numbers.
+[competitions.wednesday-division-3.courts]
+"Falcons" = 1
+"Herons" = 2
+"Currawongs" = 3
+"Lorikeets" = 4
+"Nightjars" = 5
+"Silvereyes" = 6
+
+# Draw numbers, if your association publishes teams as "Team 3". Display only:
+# they are printed beside the team and are never used to identify it, because a
+# single added team renumbers every one of them.
+[competitions.wednesday-division-3.codes]
+"Falcons" = 1
+"Herons" = 2
+"Currawongs" = 3
+"Lorikeets" = 4
+"Nightjars" = 5
+"Silvereyes" = 6
+
+# Your published draw, one block per round. Optional, and worth typing in for
+# two reasons: the dashboard can then show fixtures that have not been played
+# yet, and a bye can be credited to the team that actually had the week off.
+# A draw read off the cards is a history, not a schedule, and cannot do either.
+#
+#   number    the round label as printed on the cards. A string, so "1" and
+#             "SF" and "GF" are all valid.
+#   date      the day it is played, yyyy-mm-dd. Optional.
+#   fixtures  a list of [home, away] pairs, using the names in `teams`.
+#   bye       the team resting this round, if any.
+#   finals    true for a finals round. A finals round never contributes ladder
+#             points. A round whose label is not a number is treated as finals
+#             whether or not you say so.
+#   note      a free line shown against the round, for a washout or a rescheduling.
+
+[[competitions.wednesday-division-3.rounds]]
+number = "1"
+date = "2026-07-15"
+fixtures = [["Falcons", "Herons"],
+            ["Currawongs", "Lorikeets"],
+            ["Nightjars", "Silvereyes"]]
+bye = ""
+finals = false
+
+[[competitions.wednesday-division-3.rounds]]
+number = "2"
+date = "2026-07-22"
+fixtures = [["Herons", "Currawongs"],
+            ["Lorikeets", "Nightjars"],
+            ["Silvereyes", "Falcons"]]
+note = "Courts 3 and 4 resurfaced; both matches moved to court 5 and 6."
+
+[[competitions.wednesday-division-3.rounds]]
+number = "SF"
+date = "2026-10-14"
+fixtures = [["Falcons", "Lorikeets"],
+            ["Herons", "Nightjars"]]
+finals = true
+
+
+# A second competition, to show that a club running several needs nothing more
+# than another section. Nothing is shared between them except [rules], which
+# each may override, and the name tables above.
+
+[competitions.thursday-division-a]
+label = "Thursday Division A"
+day = "Thursday"
+division = "A"
+season = "2026 Season 2"
+rounds_total = 14
+teams = ["Falcons", "Herons", "Nightjars", "Silvereyes"]
+# This division plays four singles rubbers rather than the club's usual
+# doubles-singles-doubles, and scores them as rubbers.
+scoring = "rubbers"
+format = "singles-4"
+
+[competitions.thursday-division-a.captains]
+"Falcons" = "Siobhán McGrath"
+"Herons" = "Eilidh MacAlister"
+"Nightjars" = "Wilfredo Santamaria"
+"Silvereyes" = "Marisol Ferreira-Kaye"
+
+[competitions.thursday-division-a.courts]
+"Falcons" = 1
+"Herons" = 2
+
+[competitions.thursday-division-a.codes]
+"Falcons" = 1
+"Herons" = 2
