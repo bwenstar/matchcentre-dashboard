@@ -37,7 +37,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from . import stats, validate
+from . import scoring, stats, validate
 from .card import Card, Rejection
 from .competition import (DRAW_DECLARED, Club, Competition, Provenance,
                           merge_provenance, round_sort_key)
@@ -206,6 +206,9 @@ def _rules(competition: Competition) -> dict:
         "min_sets_for_result": fmt.min_sets_for_result,
         "ladder_by": list(rules.ladder_by),
         "average_unplayed": rules.average_unplayed,
+        "unplayed": (scoring.UNPLAYED_AVERAGE if rules.average_unplayed
+                     else scoring.UNPLAYED_ZERO),
+        "unplayed_detail": scoring.unplayed_detail(rules.average_unplayed),
         "allows_draw": rules.allows_draw,
     }
 
@@ -458,10 +461,11 @@ def _rounds(matches: Sequence[Match], competition: Competition) -> list[dict]:
             "matches": [m.match_id for m in played if m.match_id],
             "cards": len(played),
             "is_finals": rnd.is_finals,
-            # Only ever set when the team list was declared (F1). Null here means
-            # "nobody said", not "nobody rested", and the dashboard needs the
-            # difference to explain a team's missing row.
-            "bye": rnd.bye,
+            # Only ever filled in when the team list was declared or the club
+            # stated the bye itself (F1). Empty here means "nobody said", not
+            # "nobody rested", and the dashboard needs the difference to explain a
+            # team's missing row. A list because a whole competition can rest.
+            "byes": list(rnd.byes),
             "note": rnd.note,
             "source": rnd.source,
         })

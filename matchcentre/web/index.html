@@ -54,11 +54,14 @@ one competition, built from a club's own exported scorecards.">
 
 <header class="topbar">
   <div class="brand">
-    <!-- Up to the picker. Correct as written for a single-season site, where a
-         competition directory sits one level under the root. app.js knows
+    <!-- Up to the picker page. Correct as written for a single-season site, where
+         a competition directory sits one level under the root. app.js knows
          meta.seasons_mode and can retarget this link (document.querySelector
-         ('.home-link')) for a multi-season tree, which is one level deeper. -->
-    <a class="home-link" href="../">&larr; All competitions</a>
+         ('.home-link')) for a multi-season tree, which is one level deeper.
+         Names the page rather than stopping at "../": with no server to resolve a
+         directory to its index, a browser opening this file shows a folder
+         listing instead of going home. -->
+    <a class="home-link" href="../index.html">&larr; All competitions</a>
     <strong id="brand-title">Match Centre dashboard</strong>
     <small id="brand-sub">Loading season&hellip;</small>
   </div>

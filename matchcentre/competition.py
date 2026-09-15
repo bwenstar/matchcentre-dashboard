@@ -17,6 +17,7 @@ right.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
@@ -26,7 +27,7 @@ from .scoring import Ruleset
 from .slugs import slugify
 
 __all__ = ["Provenance", "Player", "Team", "Round", "Competition", "Club",
-           "competition_id", "round_sort_key", "CompetitionError",
+           "competition_id", "infer_byes", "round_sort_key", "CompetitionError",
            "DRAW_DECLARED", "DRAW_FROM_CARDS"]
 
 
@@ -114,14 +115,21 @@ class Team:
 class Round:
     """One round of the draw.
 
-    ``fixtures`` are ``(home_slug, away_slug)`` pairs. ``bye`` is only ever set
-    when the team list was declared — see this module's docstring.
+    ``fixtures`` are ``(home_slug, away_slug)`` pairs. ``byes`` are the teams
+    resting, and are only ever filled in when the team list was declared or the
+    club stated the bye itself — see this module's docstring.
+
+    Plural because a competition can rest as a whole: a public holiday, a week
+    called off before anybody travelled, a break between the regular season and
+    the finals. One team resting is the common case and was for a while the only
+    case this carried, which meant the week a club had to write down five byes it
+    could write down one.
     """
 
     number: str
     date: str = ""
     fixtures: tuple[tuple[str, str], ...] = ()
-    bye: str | None = None
+    byes: tuple[str, ...] = ()
     is_finals: bool = False
     note: str = ""
     source: str = DRAW_FROM_CARDS
@@ -133,8 +141,9 @@ class Round:
             for slug in (home, away):
                 if slug not in out:
                     out.append(slug)
-        if self.bye and self.bye not in out:
-            out.append(self.bye)
+        for slug in self.byes:
+            if slug and slug not in out:
+                out.append(slug)
         return tuple(out)
 
 
@@ -217,9 +226,9 @@ class Competition:
     def round_order(self) -> list[str]:
         return sorted(self.rounds, key=round_sort_key)
 
-    def bye_for(self, number: str) -> str | None:
+    def byes_for(self, number: str) -> tuple[str, ...]:
         rnd = self.rounds.get(number)
-        return rnd.bye if rnd else None
+        return rnd.byes if rnd else ()
 
     def with_rounds(self, rounds: dict[str, Round], *,
                     draw_source: str | None = None) -> Competition:
@@ -253,21 +262,14 @@ class Competition:
             fixtures = tuple((m.home, m.away) for m in ordered
                              if m.away != NO_OPPONENT)
             date = next((m.date for m in ordered if m.date), "")
-            bye = None
-            if self.teams_declared:
-                present = {slug for fixture in fixtures for slug in fixture}
-                absent = [slug for slug in self.teams if slug not in present]
-                # Exactly one team unaccounted for in a declared field is a bye.
-                # Two or more is a missing card, and saying so is validate.py's
-                # job -- not something to resolve by picking the first one.
-                if len(absent) == 1:
-                    bye = absent[0]
+            byes = infer_byes(fixtures, self.teams,
+                              teams_declared=self.teams_declared)
             existing = self.rounds.get(number)
             out[number] = Round(
                 number=number,
                 date=date or (existing.date if existing else ""),
                 fixtures=fixtures,
-                bye=bye,
+                byes=byes,
                 is_finals=bool(existing and existing.is_finals) or _looks_final(number),
                 note=existing.note if existing else "",
                 source=DRAW_FROM_CARDS,
@@ -356,6 +358,33 @@ def _division_label(division: str) -> str:
     if any(word in lowered for word in ("division", "grade", "section", "div")):
         return division
     return f"Division {division}"
+
+
+def infer_byes(fixtures: Iterable[tuple[str, str]], teams: Iterable[str], *,
+               teams_declared: bool) -> tuple[str, ...]:
+    """The team resting in a round, worked out from who is missing from it.
+
+    Rule F1 as one function, so that every place which reconstructs a draw obeys
+    it identically. There are two such places — :meth:`Competition.rounds_from_matches`
+    here and ``discover._build_draw`` — and while each carried its own copy, only
+    one of them inferred anything: declaring a single round in ``config.toml``
+    silently dropped the byes worked out for every other round.
+
+    A bye is inferred **only** when the team list was declared. With a derived list
+    a round missing a team is far more likely to be a scorecard that has not
+    arrived than a rest, and guessing wrong pays a team for a match it played.
+
+    Exactly one team unaccounted for in a closed field is a bye. Two or more is
+    missing scorecards, and saying so is :mod:`~matchcentre.validate`'s job — not
+    something to resolve by picking the first one. A club whose whole competition
+    rested that week writes the byes down instead, which is a statement rather
+    than a guess.
+    """
+    if not teams_declared:
+        return ()
+    present = {slug for fixture in fixtures for slug in fixture}
+    absent = [slug for slug in teams if slug not in present]
+    return (absent[0],) if len(absent) == 1 else ()
 
 
 # Round labels a club uses for finals. Checked case-insensitively, whole-label.

@@ -19,7 +19,7 @@ uses rather than pulling in a general emitter.
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import format as fmt_mod
@@ -40,12 +40,20 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class RoundConfig:
-    """One declared round. Everything but ``number`` is optional."""
+    """One declared round. Everything but ``number`` is optional.
+
+    ``byes`` is plural, and reading it is forgiving: ``bye = "Rockets"`` and
+    ``bye = ["Rockets", "Falcons"]`` both land here as a tuple. The list form is
+    not a nicety — a whole competition can rest in the same week — and before it
+    was read properly a list was coerced with ``str()``, which produced one team
+    whose name was every resting team's name run together. A wrong answer with no
+    error, in a program that otherwise fails closed.
+    """
 
     number: str
     date: str = ""
     fixtures: tuple[tuple[str, str], ...] = ()
-    bye: str = ""
+    byes: tuple[str, ...] = ()
     finals: bool = False
     note: str = ""
 
@@ -72,8 +80,10 @@ class CompetitionConfig:
     courts: dict[str, int] = field(default_factory=dict)
     codes: dict[str, int] = field(default_factory=dict)
     rounds: tuple[RoundConfig, ...] = ()
+    byes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     scoring: str = ""
     sets: str = ""
+    unplayed: str = ""
     format: str = ""
     slots: tuple[str, ...] = ()
     min_sets_for_result: int | None = None
@@ -81,6 +91,20 @@ class CompetitionConfig:
     @property
     def teams_declared(self) -> bool:
         return bool(self.teams)
+
+    def byes_by_round(self) -> dict[str, tuple[str, ...]]:
+        """``byes`` transposed: round number to the teams resting in it.
+
+        Stored the way the club writes it — one line per team, the rounds it sits
+        out — because that is the shape of the sheet an association hands out, and
+        transcribing a grid is where mistakes get made. The draw wants the other
+        axis, so the turn happens here, once.
+        """
+        out: dict[str, list[str]] = {}
+        for team in sorted(self.byes):
+            for number in self.byes[team]:
+                out.setdefault(number, []).append(team)
+        return {number: tuple(teams) for number, teams in out.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +124,7 @@ class Config:
     title: str = ""
     scoring: str = scoring.DEFAULT_RULESET
     sets: str = fmt_mod.DEFAULT_SET_RULE
+    unplayed: str = ""
     format: str = ""
     slots: tuple[str, ...] = ()
     min_sets_for_result: int | None = None
@@ -113,8 +138,19 @@ class Config:
     # --- rules ----------------------------------------------------------
 
     def ruleset_for(self, comp: CompetitionConfig | None = None) -> scoring.Ruleset:
+        """The preset, with ``unplayed`` applied over it if the club set one.
+
+        Each preset carries an opinion about what a bye is worth, and it is only an
+        opinion: two associations running identical points schemes routinely differ
+        on this one line, so it has to be settable without inventing a preset per
+        pairing. Left unset, the preset's own value stands.
+        """
         name = (comp.scoring if comp and comp.scoring else self.scoring)
-        return scoring.ruleset(name)
+        base = scoring.ruleset(name)
+        mode = (comp.unplayed if comp and comp.unplayed else self.unplayed)
+        if not mode:
+            return base
+        return replace(base, average_unplayed=(mode == scoring.UNPLAYED_AVERAGE))
 
     def set_rule_for(self, comp: CompetitionConfig | None = None) -> fmt_mod.SetRule:
         name = (comp.sets if comp and comp.sets else self.sets)
@@ -202,7 +238,7 @@ def _from_raw(raw: dict, path: Path) -> Config:
 
     _reject_unknown(club, {"name", "strip_team_prefix"}, "club", warnings)
     _reject_unknown(build, {"seasons", "title"}, "build", warnings)
-    _reject_unknown(rules, {"scoring", "sets", "format", "slots",
+    _reject_unknown(rules, {"scoring", "sets", "unplayed", "format", "slots",
                             "min_sets_for_result"}, "rules", warnings)
 
     mode = str(build.get("seasons", "single")).strip().lower()
@@ -232,6 +268,7 @@ def _from_raw(raw: dict, path: Path) -> Config:
         title=str(build.get("title", "") or ""),
         scoring=scheme,
         sets=set_name,
+        unplayed=_unplayed(rules.get("unplayed"), "[rules] unplayed", path),
         format=str(rules.get("format", "") or ""),
         slots=tuple(str(s) for s in rules.get("slots", ()) or ()),
         min_sets_for_result=_optional_int(rules.get("min_sets_for_result"),
@@ -276,6 +313,25 @@ def _optional_int(value: object, label: str, path: Path) -> int | None:
     except (TypeError, ValueError):
         raise ConfigError(f"{path}: {label} must be a whole number, "
                           f"got {value!r}") from None
+
+
+def _unplayed(value: object, label: str, path: Path) -> str:
+    """``[rules] unplayed``: ``"average"``, ``"zero"``, or unset.
+
+    Rejected rather than warned about, unlike a misspelt section name. A typo here
+    would fall back to the preset's own convention, which is a points column that
+    is quietly not the one the club asked for — and the club asked precisely
+    because it had noticed the difference.
+    """
+    if value is None or value == "":
+        return ""
+    mode = str(value).strip().casefold()
+    if mode not in scoring.UNPLAYED_MODES:
+        raise ConfigError(
+            f"{path}: {label} must be one of "
+            f"{', '.join(repr(m) for m in scoring.UNPLAYED_MODES)}, "
+            f"got {value!r}")
+    return mode
 
 
 def _str_map(value: object, name: str, warnings: list[str]) -> dict[str, str]:
@@ -328,8 +384,8 @@ def _competitions(value: object, path: Path, prefix: str,
     if not isinstance(value, dict):
         raise ConfigError(f"{path}: [competitions] should be a section")
     known = {"label", "day", "division", "season", "season_key", "rounds_total",
-             "teams", "captains", "courts", "codes", "rounds", "scoring", "sets",
-             "format", "slots", "min_sets_for_result"}
+             "teams", "captains", "courts", "codes", "rounds", "byes", "scoring",
+             "sets", "unplayed", "format", "slots", "min_sets_for_result"}
     out: dict[str, CompetitionConfig] = {}
     for comp_id, table in value.items():
         if not isinstance(table, dict):
@@ -358,8 +414,11 @@ def _competitions(value: object, path: Path, prefix: str,
             codes=_int_map(table.get("codes"),
                            f"competitions.{comp_id}.codes", path),
             rounds=_rounds(table.get("rounds"), comp_id, path, warnings),
+            byes=_byes_table(table.get("byes"), comp_id, teams, path),
             scoring=str(table.get("scoring", "") or ""),
             sets=str(table.get("sets", "") or ""),
+            unplayed=_unplayed(table.get("unplayed"),
+                               f"[competitions.{comp_id}] unplayed", path),
             format=str(table.get("format", "") or ""),
             slots=tuple(str(s) for s in table.get("slots", ()) or ()),
             min_sets_for_result=_optional_int(
@@ -384,6 +443,119 @@ def _int_map(value: object, name: str, path: Path) -> dict[str, int]:
     return out
 
 
+def _round_byes(entry: dict, comp_id: str, number: str,
+                path: Path) -> tuple[str, ...]:
+    """``bye`` or ``byes`` inside one ``[[...rounds]]`` block, either shape.
+
+    Both spellings are read, because a club that has just typed ``fixtures = [...]``
+    will reasonably reach for either, and an ignored key here silently loses a
+    bye. Both at once is refused: two lists of resting teams in one round is a
+    contradiction to resolve by asking, not by picking one.
+    """
+    label = f"[competitions.{comp_id}] round {number}"
+    if "bye" in entry and "byes" in entry:
+        raise ConfigError(f"{path}: {label} sets both bye and byes. "
+                          f"They mean the same thing — keep one.")
+    value = entry.get("byes", entry.get("bye"))
+    if value is None or value == "":
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise ConfigError(f"{path}: {label}: bye must be a team name or a list "
+                          f"of team names, got {value!r}")
+    names: list[str] = []
+    for name in value:
+        if not isinstance(name, str):
+            raise ConfigError(f"{path}: {label} rests {name!r}, which is not a "
+                              f"team name")
+        text = name.strip()
+        if text and text not in names:
+            names.append(text)
+    return tuple(names)
+
+
+def _byes_table(value: object, comp_id: str, teams: tuple[str, ...],
+                path: Path) -> dict[str, tuple[str, ...]]:
+    """``[competitions.<id>.byes]``: one line per team, the rounds it sits out.
+
+    ::
+
+        [competitions.monday-division-b2.byes]
+        "Riverside Rockets" = [1, 6]
+        "Willowbank Falcons" = [4, 6]
+
+    Written this way round because that is the shape of the sheet an association
+    publishes — a grid of teams down the side and rounds across the top, with a
+    ``B`` in the cells. Reading it off by team is one pass down a column; by round
+    it is a pass across every row per line typed.
+
+    A club only needs the rounds this program cannot see for itself. One team
+    missing from a round it *has* cards for is already inferred, given a closed team
+    list; what needs writing down is the week nobody played, or a round whose cards
+    have not arrived yet.
+
+    A team here that is not in a declared ``teams`` list stops the run. The whole
+    value of closing the team list is that a name this program does not recognise
+    becomes an error instead of a new team, and a bye is the one thing that pays a
+    team points for playing nothing — a typo here would credit a team that does not
+    exist and quietly leave the real one a match short.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: [competitions.{comp_id}.byes] should be a "
+                          f"section of \"Team name\" = [rounds] lines")
+    known = {slugify_or_none(name) for name in teams} - {None}
+    out: dict[str, tuple[str, ...]] = {}
+    for team, rounds in value.items():
+        name = str(team)
+        label = f"[competitions.{comp_id}.byes] {name!r}"
+        if known and slugify_or_none(name) not in known:
+            listed = ", ".join(sorted(teams))
+            raise ConfigError(
+                f"{path}: {label} is not one of this competition's teams. "
+                f"A bye credits points for playing nothing, so an unrecognised "
+                f"name here is refused rather than guessed at. Declared: {listed}")
+        if isinstance(rounds, (str, int)) and not isinstance(rounds, bool):
+            # One round is the commonest line in the table, and requiring `[6]`
+            # for it is the sort of friction that ends in the table not being
+            # filled in at all.
+            rounds = [rounds]
+        if not isinstance(rounds, (list, tuple)):
+            raise ConfigError(
+                f"{path}: {label} should be a list of round numbers, "
+                f"like [1, 6], got {rounds!r}")
+        numbers: list[str] = []
+        for number in rounds:
+            # `bool` is an `int` in Python, so it has to be turned away by name or
+            # `Rockets = true` becomes a bye in a round called "True".
+            if isinstance(number, bool) or not isinstance(number, (str, int)):
+                raise ConfigError(
+                    f"{path}: {label} lists {number!r}, which is not a round "
+                    f"number. Rounds are written as in the draw: [1, 6] or "
+                    f"[\"SF\"].")
+            text = str(number).strip()
+            if text and text not in numbers:
+                numbers.append(text)
+        if numbers:
+            out[name] = tuple(numbers)
+    return out
+
+
+def slugify_or_none(name: str) -> str | None:
+    """``slugify``, with an unsluggable name as ``None`` instead of an exception.
+
+    A team name with no letters or digits in it cannot match anything, and here
+    that is a comparison that fails rather than an error in its own right: the
+    caller has a better message for it.
+    """
+    try:
+        return slugify(name)
+    except ValueError:
+        return None
+
+
 def _rounds(value: object, comp_id: str, path: Path,
             warnings: list[str]) -> tuple[RoundConfig, ...]:
     if value is None:
@@ -397,8 +569,8 @@ def _rounds(value: object, comp_id: str, path: Path,
             warnings.append(f"[[competitions.{comp_id}.rounds]] entry {index} "
                             f"is not a table; ignored")
             continue
-        _reject_unknown(entry, {"number", "date", "fixtures", "bye", "finals",
-                                "note"},
+        _reject_unknown(entry, {"number", "date", "fixtures", "bye", "byes",
+                                "finals", "note"},
                         f"competitions.{comp_id}.rounds", warnings)
         number = str(entry.get("number", "") or "").strip()
         if not number:
@@ -416,7 +588,7 @@ def _rounds(value: object, comp_id: str, path: Path,
             number=number,
             date=str(entry.get("date", "") or ""),
             fixtures=tuple(fixtures),
-            bye=str(entry.get("bye", "") or ""),
+            byes=_round_byes(entry, comp_id, number, path),
             finals=bool(entry.get("finals", False)),
             note=str(entry.get("note", "") or ""),
         ))
@@ -513,6 +685,17 @@ def render(config: Config, *, competitions: object = (),
     for name in sorted(fmt_mod.SET_RULES):
         lines.append(f"#   {name:<18} {fmt_mod.SET_RULES[name].describe()}")
     lines.append(f"sets = {toml_value(config.sets)}")
+    lines.append("# What a round a team did not play is worth — a bye, a washout, a")
+    lines.append("# week called off. This changes the points column of every team")
+    lines.append("# that has had a week off, and never the ladder order. Options:")
+    for mode in scoring.UNPLAYED_MODES:
+        lines.append(f"#   {mode:<9} "
+                     f"{scoring.unplayed_detail(mode == scoring.UNPLAYED_AVERAGE)}")
+    if config.unplayed:
+        lines.append(f"unplayed = {toml_value(config.unplayed)}")
+    else:
+        lines.append(f"# unplayed = {toml_value(scoring.UNPLAYED_ZERO)}"
+                     f"   # left off: whatever the preset above says")
     lines.append("# The shape of a match is read from your scorecards, so you only")
     lines.append("# need these to pin it down or to override what was read.")
     lines.append(f"# format = {toml_value(config.format or fmt_mod.DEFAULT_FORMAT)}"
@@ -682,16 +865,48 @@ def _competition_section(config: Config, comp) -> list[str]:
         for team_name in sorted(names)[:1]:
             lines.append(f"# {toml_key(team_name)} = 1")
 
+    lines.extend(_byes_lines(config, comp, names))
+
     lines.append("")
     lines.append("# Your published draw, if you have one. Declaring it lets the")
-    lines.append("# dashboard show fixtures that have not been played yet, and is")
-    lines.append("# the only way byes can be credited correctly.")
+    lines.append("# dashboard show fixtures that have not been played yet, and")
+    lines.append("# pins the season's length.")
     lines.append(f"# [[competitions.{toml_key(comp.id)}.rounds]]")
     lines.append('# number = "1"')
     lines.append('# date = "2026-08-18"')
     example = names[:2] if len(names) >= 2 else ["Home Team", "Away Team"]
     lines.append(f"# fixtures = [{toml_value(example)}]")
-    lines.append('# bye = ""')
+    lines.append('# bye = ""       # or a list, for a week the whole grade rests')
     lines.append('# finals = false')
     lines.append("")
+    return lines
+
+
+def _byes_lines(config: Config, comp, names: list[str]) -> list[str]:
+    """The ``[competitions.<id>.byes]`` block, pre-filled with what was worked out.
+
+    Written by team and by round number, which is how an association's own sheet
+    reads. A club only has to add the rounds this program could not see: the week
+    nobody played at all, or a round whose cards have not arrived. Everything
+    already inferred is written *commented*, so it is visible and confirmable
+    without changing what the next run does.
+    """
+    declared = config.competition(comp.id)
+    stated = dict(declared.byes) if declared else {}
+    worked_out: dict[str, list[str]] = {}
+    for number in comp.round_order:
+        for slug in comp.rounds[number].byes:
+            worked_out.setdefault(comp.team_name(slug), []).append(number)
+
+    lines = ["", f"[competitions.{toml_key(comp.id)}.byes]",
+             "# Which rounds each team sits out, as your association's sheet has",
+             "# them. Only the ones this program cannot see for itself: a round",
+             "# with cards and one team missing is already worked out, given the",
+             "# teams list above. A week the whole grade rests is not.",
+             f"#   {toml_key(names[0] if names else 'Team name')} = [1, 6]"]
+    for team in sorted(stated):
+        lines.append(f"{toml_key(team)} = {toml_value(list(stated[team]))}")
+    for team in sorted(set(worked_out) - set(stated)):
+        lines.append(f"# {toml_key(team)} = {toml_value(worked_out[team])}"
+                     f"   # already worked out from the cards")
     return lines

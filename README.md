@@ -32,6 +32,7 @@ name and rating comes off the cards themselves.
 - [The one command](#the-one-command)
 - [Reviewing config.toml](#reviewing-configtoml)
 - [Scoring presets, and picking yours](#scoring-presets-and-picking-yours)
+- [Byes, washouts and rounds nobody played](#byes-washouts-and-rounds-nobody-played)
 - [Several seasons](#several-seasons)
 - [Why it asks you to confirm the team list](#why-it-asks-you-to-confirm-the-team-list)
 - [Why it refuses a card instead of guessing](#why-it-refuses-a-card-instead-of-guessing)
@@ -250,12 +251,15 @@ The report starts with the rules it used:
 == rules in force ============================================================
   scoring      games-bonus             win 4, draw 3, loss 2, 0.1 per game; decided on games then sets
   sets         first-to-6              first to 6
+  unplayed     average                 a bye or a washout is credited the team's own average, and counts as a match played
   format       read from each card     the row bands and marker column of every card
 ```
 
-Read those three lines. They are the settings that decide who is top of the
-ladder, and they are the ones no scorecard can tell us. If they are not your
-competition, see [Scoring presets](#scoring-presets-and-picking-yours).
+Read those lines. They are the settings that decide who is top of the ladder, and
+they are the ones no scorecard can tell us. If they are not your competition, see
+[Scoring presets](#scoring-presets-and-picking-yours) — and, for the `unplayed`
+line, [Byes, washouts and rounds nobody
+played](#byes-washouts-and-rounds-nobody-played).
 
 Then what it found:
 
@@ -287,7 +291,7 @@ sanity-check it against the one your association publishes:
     1  Brindle Wombats       5  4  1  0    27.0   5.40    90-77
     2  Brindle Bunyips       5  3  2  0    26.5   5.30   105-72
     3  Brindle Quolls        5  3  2  0    25.5   5.10    95-88
-    4  Brindle Rosellas      4  2  2  0    23.2   4.65    66-73
+    4  Brindle Rosellas      4  2  2  0    23.3   4.65    66-73
     5  Brindle Magpies       4  1  3  0    19.8   3.95    58-69
     6  Brindle Kookaburras   5  1  4  0    19.4   3.88    74-109
   problems     0 error(s), 5 warning(s) -- see below
@@ -417,6 +421,88 @@ when the players were still on court.
 The **shape** of a match — how many sets, and which of them are doubles — is a
 different matter: that *is* printed on every card, in the marker column beside
 each set row, so it is read off your cards and you do not need to set it.
+
+---
+
+## Byes, washouts and rounds nobody played
+
+You do not have to type in your draw to get byes right. There are two questions
+here and they are separate: **who had the week off**, and **what that is worth**.
+
+### Who had the week off
+
+Most of the time the tool works this out. Once you have confirmed the team list —
+see [Why it asks you to confirm the team
+list](#why-it-asks-you-to-confirm-the-team-list) — a round whose cards account for
+every team but one has found its bye, and it is credited to the right team without
+you doing anything.
+
+What it cannot see is a round that left no cards behind:
+
+- a week nobody played at all — a long weekend, a washed-out round, a bye week for
+  the whole grade;
+- a round where *two or more* teams are missing, because that is far more likely
+  to be a card that never got exported than two byes in one week;
+- a round of a five-team grade where the missing card and the bye happen together.
+
+For those, tell it. One line per team, in the rounds column your association
+already publishes — here for a five-team grade, where somebody rests every week
+and round 6 was rained off entirely:
+
+```toml
+[competitions.saturday-division-a.byes]
+"Brindle Bunyips"     = [1, 6]
+"Brindle Kookaburras" = [4, 6]
+"Brindle Magpies"     = [5, 6]
+"Brindle Quolls"      = [3, 6]
+"Brindle Rosellas"    = [2, 6]
+```
+
+That is the whole job — find the `B` column on the association's sheet and copy it
+down. You do not have to enter any match, any fixture or any date. Rounds are
+written as they appear on the cards, so `[1, 6]` and `["SF"]` are both fine, and a
+single round needs no brackets: `"Brindle Quolls" = 3`.
+
+Anything you leave out is still worked out from the cards, exactly as before, so
+there is no penalty for filling in only the weeks the tool got wrong. A team you
+list that is not in `teams` stops the run and says so, because a bye is the one
+thing that pays a team for playing nothing, and a misspelt name there would pay a
+team that does not exist.
+
+The first run pre-fills this section for you with every bye it worked out,
+**commented out**, so you can check them against the sheet without typing them
+again. Uncomment nothing and nothing changes.
+
+### What a bye is worth
+
+Associations disagree about this, and the disagreement is worth a line in
+`config.toml`:
+
+```toml
+[rules]
+unplayed = "zero"
+```
+
+| `unplayed` | a bye or a washout | counts as a match played |
+|---|---|---|
+| `average` | is credited the team's own average over the matches it did play | yes |
+| `zero` | scores nothing | no |
+
+Leave it out and the scoring preset decides: `games-bonus` averages, the other
+three do not. Setting it here overrides the preset for every competition, and a
+`[competitions.<id>]` section can override it again for one grade.
+
+**This never changes the ladder order.** Crediting a team its own average cannot
+move its average, and the average is what the ladder is sorted on. All that
+changes is the points total printed against a team that has had a week off — which
+is exactly the number a club compares against its association's sheet. So if your
+order is right and your totals are close but not equal, this is the first line to
+try.
+
+The average column is rounded the way a spreadsheet rounds — a half goes up — so
+`6.225` prints as `6.23`, not as the `6.22` most programming languages would give
+you. That is deliberate, and it is why the column can be compared against a
+published ladder digit for digit.
 
 ---
 
@@ -580,6 +666,22 @@ Confirm the team list in `config.toml` — remove the `#` from the `teams = ` li
 Until you do, no bye is credited at all, and the report names the short round
 instead. See [Why it asks you to confirm the team
 list](#why-it-asks-you-to-confirm-the-team-list).
+
+If the list is confirmed and a bye is still on the wrong team, or a week nobody
+played is missing entirely, state the byes yourself in the
+`[competitions.<id>.byes]` table: a stated bye wins over a worked-out one. See
+[Byes, washouts and rounds nobody
+played](#byes-washouts-and-rounds-nobody-played).
+
+### My points totals are close to the association's sheet but not equal
+
+If the teams are in the same order, the difference is almost always what a bye or a
+washout is worth, and that is one line: `unplayed` under `[rules]`. See [What a bye
+is worth](#byes-washouts-and-rounds-nobody-played).
+
+If one team alone is out and it has had a week off, check that week's byes. If one
+team alone is out and it has not, compare its matches — that is a card, not a
+convention.
 
 ### There is a team on the ladder that does not exist
 

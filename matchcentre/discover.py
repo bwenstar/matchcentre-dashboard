@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import datetime
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -48,8 +48,8 @@ from . import format as fmt_mod
 from .card import Card, Rejection
 from .competition import (DRAW_DECLARED, DRAW_FROM_CARDS, Club, Competition,
                           CompetitionError, Player, Provenance, Round, Team,
-                          competition_id, is_finals_label, merge_provenance,
-                          round_sort_key)
+                          competition_id, infer_byes, is_finals_label,
+                          merge_provenance, round_sort_key)
 from .config import CompetitionConfig, Config
 from .model import Match, MatchStatus, Rating, SetResult
 from .scoring import Ruleset
@@ -642,8 +642,10 @@ def _closed_list(config: Config, declared: CompetitionConfig | None
         for rnd in declared.rounds:
             for pair in rnd.fixtures:
                 names.extend(pair)
-            if rnd.bye:
-                names.append(rnd.bye)
+            names.extend(rnd.byes)
+        # [competitions.<id>.byes] is keyed by team, so its keys are teams a club
+        # has named as surely as a fixture names them.
+        names.extend(declared.byes)
         from_draw = bool(names)
 
     closed: dict[str, str] = {}
@@ -1045,6 +1047,7 @@ def _build_draw(comp_id: str, matches: list[Match], *,
     """
     notes: list[str] = []
     played = {m.round for m in matches}
+    stated = _stated_byes(declared, teams)
 
     if declared and declared.rounds:
         rounds: dict[str, Round] = {}
@@ -1067,7 +1070,8 @@ def _build_draw(comp_id: str, matches: list[Match], *,
                 date=rnd.date or min((m.date for m in here if m.date),
                                      default=""),
                 fixtures=fixtures,
-                bye=_declared_slug(rnd.bye, teams) if rnd.bye else None,
+                byes=_byes_for(rnd.number, stated, rnd.byes, fixtures,
+                               teams, teams_declared),
                 is_finals=rnd.finals or is_finals_label(rnd.number),
                 note=rnd.note, source=source)
         extra = sorted(played - set(rounds), key=round_sort_key)
@@ -1076,11 +1080,15 @@ def _build_draw(comp_id: str, matches: list[Match], *,
             # or its matches would hang off nothing. It is marked as coming from
             # the cards, not from the draw.
             in_round = [m for m in matches if m.round == number]
+            fixtures = tuple((m.home, m.away) for m in in_round)
             rounds[number] = Round(
                 number=number,
                 date=min((m.date for m in in_round if m.date), default=""),
-                fixtures=tuple((m.home, m.away) for m in in_round),
+                fixtures=fixtures,
+                byes=_byes_for(number, stated, (), fixtures,
+                               teams, teams_declared),
                 is_finals=is_finals_label(number), source=DRAW_FROM_CARDS)
+        _add_bye_only_rounds(rounds, stated)
         if extra:
             listed = ", ".join(extra)
             notes.append(
@@ -1105,11 +1113,74 @@ def _build_draw(comp_id: str, matches: list[Match], *,
     scaffold = Competition(id=comp_id, day="", division="", fmt=fmt, rules=rules,
                            teams=teams, teams_declared=teams_declared)
     rounds = scaffold.rounds_from_matches(matches)
+    for number, rnd in list(rounds.items()):
+        byes = _byes_for(number, stated, (), rnd.fixtures, teams, teams_declared)
+        if byes != rnd.byes:
+            rounds[number] = replace(rnd, byes=byes)
+    _add_bye_only_rounds(rounds, stated)
     total = declared.rounds_total if declared else None
     source = Provenance.DECLARED if total is not None else Provenance.DERIVED
     return (rounds, DRAW_FROM_CARDS, total, source,
             notes + _shortfall_notes(comp_id, rounds, matches, teams,
                                      teams_declared))
+
+
+def _stated_byes(declared: CompetitionConfig | None,
+                 teams: dict[str, Team]) -> dict[str, tuple[str, ...]]:
+    """``[competitions.<id>.byes]`` turned round by round into slugs.
+
+    The club writes it by team, because that is the shape of the sheet an
+    association hands out — one row per team, a ``B`` in the weeks it rests. The
+    draw needs it by round, so it is transposed here rather than asking anybody to
+    transcribe a grid twice.
+    """
+    if declared is None:
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for number, names in declared.byes_by_round().items():
+        slugs = tuple(dict.fromkeys(
+            slug for slug in (_declared_slug(name, teams) for name in names)
+            if slug))
+        if slugs:
+            out[number] = slugs
+    return out
+
+
+def _byes_for(number: str, stated: dict[str, tuple[str, ...]],
+              in_round: tuple[str, ...], fixtures: tuple[tuple[str, str], ...],
+              teams: dict[str, Team], teams_declared: bool) -> tuple[str, ...]:
+    """Who rests in one round: what the club said, or failing that, who is missing.
+
+    A statement always wins, and a statement about *this* round switches inference
+    off for it entirely — the club has answered the question, and adding a team it
+    did not name would be second-guessing the answer rather than filling a gap.
+    Inference then covers every round the club said nothing about, which is the
+    point: a club that writes down the two weeks its draw has byes in should not
+    thereby lose the byes this program could already see in the other eight.
+    """
+    said = tuple(dict.fromkeys(
+        [slug for slug in (_declared_slug(name, teams) for name in in_round)
+         if slug] + list(stated.get(number, ()))))
+    if said:
+        return said
+    return infer_byes(fixtures, teams, teams_declared=teams_declared)
+
+
+def _add_bye_only_rounds(rounds: dict[str, Round],
+                         stated: dict[str, tuple[str, ...]]) -> None:
+    """Rounds that exist because the byes table names them and nothing else does.
+
+    A club transcribing its association's sheet will list the whole-competition
+    bye week — the public holiday, the break before finals — and that week has no
+    cards and no fixtures at all. It still belongs on the dashboard, so the round
+    exists carrying only the rest. F2 is untouched: no fixture is invented for it,
+    and :func:`~matchcentre.stats.with_byes` credits nothing for a round nobody has
+    played.
+    """
+    for number in sorted(set(stated) - set(rounds), key=round_sort_key):
+        rounds[number] = Round(number=number, byes=stated[number],
+                               is_finals=is_finals_label(number),
+                               source=DRAW_FROM_CARDS)
 
 
 def _declared_slug(name: str, teams: dict[str, Team]) -> str:
@@ -1156,8 +1227,7 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
             continue
         if teams_declared:
             present = {slug for pair in rnd.fixtures for slug in pair}
-            if rnd.bye:
-                present.add(rnd.bye)
+            present.update(rnd.byes)
             absent = sorted(slug for slug in teams if slug not in present)
             if len(absent) >= 2:
                 named = ", ".join(teams[slug].name for slug in absent)

@@ -39,6 +39,7 @@ import functools
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 
 from .competition import Competition, Player, round_sort_key
 from .format import MatchFormat
@@ -47,8 +48,9 @@ from .scoring import LADDER_KEYS
 from .slugs import unslug
 
 __all__ = ["PRECISION", "match_sort_key", "chronological", "rounds_present",
-           "round_display", "round_stored", "with_byes", "PointsLedger",
-           "points_ledger", "round_points", "head_to_head", "h2h_key", "ladder",
+           "round_display", "round_half_up", "round_stored", "with_byes",
+           "PointsLedger", "points_ledger", "round_points", "head_to_head",
+           "h2h_key", "ladder",
            "ladder_history", "ladder_complete", "team_stats", "player_stats",
            "player_names", "is_fill_in", "PointsBreakdown", "SideRecord",
            "SlotRecord", "DisciplineRecord", "PlayerSlotRecord", "Streak",
@@ -82,8 +84,35 @@ def rounds_present(matches: Iterable[Match]) -> list[str]:
     return sorted({m.round for m in matches}, key=round_sort_key)
 
 
+def round_half_up(value: float | None, digits: int = 2) -> float | None:
+    """*value* to *digits* places, rounding a half away from zero.
+
+    Not what ``round()`` does, and the difference is visible on a real ladder. Two
+    things are going on. Python rounds a stored half to *even*, so ``round(0.5)``
+    is 0; and a decimal that ends in a half is usually not stored as one anyway —
+    the nearest double to 6.225 is 6.22499999999999964, which every rounding rule
+    in the world sends down to 6.22.
+
+    Every association ladder this dashboard gets compared against lives in a
+    spreadsheet, and a spreadsheet rounds the *printed* decimal half up: 6.23.
+    Being a cent under the number a club reads off its own noticeboard is small and
+    expensive — it is the kind of difference that costs the whole page its
+    credibility, because nobody can tell it apart from a scoring bug.
+
+    Quantising ``str(value)`` is what makes 6.225 a half again: ``str`` gives the
+    shortest decimal string that round-trips to the double, which is the decimal the
+    club would have typed. ``app.js`` does the same to the same values with the same
+    reasoning, and the two have to agree — ``build.py`` prints this ladder to a
+    terminal and the dashboard prints it to a page.
+    """
+    if value is None:
+        return None
+    quantum = Decimal(1).scaleb(-digits)
+    return float(Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP))
+
+
 def round_display(value: float | None) -> float | None:
-    return None if value is None else round(value, 1)
+    return round_half_up(value, 1)
 
 
 def round_stored(value: float | None) -> float | None:
@@ -285,7 +314,7 @@ def with_byes(matches: Sequence[Match], competition: Competition) -> list[Match]
     scorecard, not as a scheduled rest.
 
     Rule F1 lives here as a refusal to guess: this function adds a bye **only**
-    where :attr:`~matchcentre.competition.Round.bye` already names one, and a
+    where :attr:`~matchcentre.competition.Round.byes` already names one, and a
     ``Round`` only ever carries one when the team list was declared by a human or
     came from a declared draw. Nothing in this module compares a round's cards
     against the team list and concludes that whoever is missing must be resting.
@@ -304,19 +333,21 @@ def with_byes(matches: Sequence[Match], competition: Competition) -> list[Match]
     extra: list[Match] = []
     for number in competition.round_order:
         rnd = competition.rounds[number]
-        team = rnd.bye
-        if not team or number not in played or (number, team) in already:
+        if number not in played:
             continue
-        # A card for the team the draw has resting means the two sources disagree
-        # -- a rescheduled fixture, most likely. Trust the card: it is evidence
-        # that the match was played, and awarding an average on top of a real
-        # result would pay the team twice. validate.py reports the disagreement.
-        if any(m.round == number and m.involves(team) for m in matches):
-            continue
-        extra.append(Match(competition=competition.id, round=number,
-                           home=team, away=NO_OPPONENT,
-                           fmt=competition.fmt, rules=competition.rules,
-                           date=rnd.date, sets=(), status=MatchStatus.BYE))
+        for team in rnd.byes:
+            if not team or (number, team) in already:
+                continue
+            # A card for the team the draw has resting means the two sources
+            # disagree -- a rescheduled fixture, most likely. Trust the card: it is
+            # evidence that the match was played, and awarding an average on top of
+            # a real result would pay the team twice. validate.py reports it.
+            if any(m.round == number and m.involves(team) for m in matches):
+                continue
+            extra.append(Match(competition=competition.id, round=number,
+                               home=team, away=NO_OPPONENT,
+                               fmt=competition.fmt, rules=competition.rules,
+                               date=rnd.date, sets=(), status=MatchStatus.BYE))
     return list(matches) + extra
 
 

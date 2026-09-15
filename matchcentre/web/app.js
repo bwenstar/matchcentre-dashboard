@@ -116,7 +116,32 @@ function textWidth(str, font) {
 
 function num(v, digits) {
   if (v === null || v === undefined || (typeof v === 'number' && !isFinite(v))) return '—';
-  return Number(v).toFixed(digits === undefined ? 0 : digits);
+  var d = digits === undefined ? 0 : digits;
+  return halfUp(Number(v), d).toFixed(d);
+}
+
+/* Round a half away from zero, on the decimal a reader would have typed.
+ *
+ * toFixed() rounds the stored double, and a decimal ending in a half is normally
+ * not stored as one: the nearest double to 6.225 is 6.22499999999999964, so
+ * toFixed(2) gives 6.22 where the spreadsheet every association keeps its ladder
+ * in prints 6.23. A cent under the number on a club's own noticeboard is
+ * indistinguishable, to the club, from a scoring bug.
+ *
+ * String(v) is the shortest decimal that round-trips to v, so shifting the
+ * exponent on *that string* rounds the decimal rather than the double. Python's
+ * side of this is stats.round_half_up, and the two must agree: build.py prints
+ * this ladder to a terminal and this prints the same ladder to a page.
+ *
+ * A value already in exponent form (1e-7, 1e21) is left alone — 'e' twice over is
+ * not a number, and nothing on a tennis ladder reaches either end of that range. */
+function halfUp(v, digits) {
+  if (!isFinite(v)) return v;
+  var sign = v < 0 ? -1 : 1, text = String(Math.abs(v));
+  if (text.indexOf('e') !== -1 || text.indexOf('E') !== -1) return v;
+  var lifted = Number(text + 'e' + digits);
+  if (!isFinite(lifted)) return v;
+  return sign * Number(Math.round(lifted) + 'e-' + digits);
 }
 
 function signed(v, digits) {
@@ -127,7 +152,9 @@ function signed(v, digits) {
   return s;
 }
 
-function pct(v) { return v === null || v === undefined ? '—' : Number(v).toFixed(1) + '%'; }
+/* Through num() rather than toFixed() so that every figure on the page rounds the
+ * one way — see halfUp() above. */
+function pct(v) { return v === null || v === undefined ? '—' : num(v, 1) + '%'; }
 
 function plural(n, one, many) { return n === 1 ? one : (many || one + 's'); }
 
@@ -2459,7 +2486,7 @@ function renderMatches(main) {
       var known = fixtures.some(function (f) { return f.match_id === id; });
       if (!known && IDX.matchById[id]) box.appendChild(matchCard(IDX.matchById[id]));
     });
-    if (r.bye) box.appendChild(byeRow(r.bye));
+    (r.byes || []).forEach(function (slug) { box.appendChild(byeRow(slug)); });
     main.appendChild(box);
   });
 }
@@ -2732,6 +2759,11 @@ function renderRulesBanner() {
   var pairs = [
     ['Scoring', r.scoring, r.scoring_detail],
     ['Sets', r.set_rule, r.set_rule_detail],
+    /* Spelled out because it is invisible in the ladder's order and plain in its
+     * points column: crediting every team its own average cannot move any team's
+     * average. A club comparing totals with its association has no other way to
+     * see which convention produced the number in front of it. */
+    ['Unplayed', r.unplayed, r.unplayed_detail],
     ['Format', r.format, r.format_detail]
   ];
   pairs.forEach(function (bits) {
@@ -2751,8 +2783,8 @@ function renderRulesBanner() {
   var formatFlag = provenanceFlag('format');
   if (formatFlag) host.appendChild(formatFlag);
   host.appendChild(el('span', { class: 'muted',
-    text: 'These three decide every points and ladder number on this page. ' +
-      'If they are not this competition’s rules, set scoring, sets and format in config.toml.' }));
+    text: 'These decide every points and ladder number on this page. ' +
+      'If they are not this competition’s rules, set scoring, sets, unplayed and format in config.toml.' }));
 }
 
 /* ============================================================ data health == */
@@ -3020,14 +3052,20 @@ function fillPicker() {
 
 /* ============================================================ season picker */
 
-/* Where the site's own root is, relative to this competition directory. site.py
- * writes site/<competition>/ in single mode and site/<season>/<competition>/ in
- * multi, so the picker page is one level up or two. Derived rather than assumed:
- * a hardcoded "../" sent every multi-season dashboard's "all competitions" link
- * to a directory with no page in it. */
+/* Where the site's own root page is, relative to this competition directory.
+ * site.py writes site/<competition>/ in single mode and
+ * site/<season>/<competition>/ in multi, so the picker is one level up or two.
+ * Derived rather than assumed: a hardcoded "../" sent every multi-season
+ * dashboard's "all competitions" link to a directory with no page in it.
+ *
+ * The page itself is named, not just the directory holding it. Ending at "../"
+ * relies on a server resolving the directory to its index page; opened as a file,
+ * which is how this dashboard is meant to be opened, the browser shows a listing
+ * of the folder instead. */
 function rootHref() {
   var m = meta();
-  return (m.seasons_mode === 'multi' && m.season_key) ? '../../' : '../';
+  return (m.seasons_mode === 'multi' && m.season_key) ? '../../index.html'
+                                                     : '../index.html';
 }
 
 /* In multi mode the reader needs to know which season this ladder belongs to and

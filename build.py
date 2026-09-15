@@ -69,6 +69,8 @@ if str(ROOT) not in sys.path:
 from matchcentre import config as config_mod                  # noqa: E402
 from matchcentre import discover as discover_mod              # noqa: E402
 from matchcentre import export, scorecard, site               # noqa: E402
+from matchcentre import scoring as scoring_mod                # noqa: E402
+from matchcentre import stats as stats_mod                    # noqa: E402
 from matchcentre.competition import (Competition,             # noqa: E402
                                      CompetitionError, Provenance)
 from matchcentre.config import ConfigError                    # noqa: E402
@@ -334,6 +336,14 @@ def _rules_section(report: _Report, cfg: config_mod.Config) -> None:
     report.head("rules in force")
     report.field("scoring", f"{rules.name:<24}{rules.describe()}")
     report.field("sets", f"{set_rule.name:<24}{set_rule.describe()}")
+    # Invisible in the ladder's order and plainly visible in its points column,
+    # which is the combination that makes it worth a line of its own: a club
+    # comparing totals against its association's sheet has no other way to tell
+    # which convention produced the number in front of it.
+    unplayed = (scoring_mod.UNPLAYED_AVERAGE if rules.average_unplayed
+                else scoring_mod.UNPLAYED_ZERO)
+    report.field("unplayed", f"{unplayed:<24}"
+                             f"{scoring_mod.unplayed_detail(rules.average_unplayed)}")
     if declared is None:
         report.field("format", f"{'read from each card':<24}"
                                f"the row bands and marker column of every card")
@@ -442,12 +452,17 @@ def _ladder(report: _Report, season: dict) -> None:
     report.line(f"   {'#':>2}  {'team':<{width}}  {'P':>2} {'W':>2} {'L':>2} "
                 f"{'D':>2}  {'pts':>6}  {'avg':>5}  {'games':>9}")
     for team in teams:
-        average = team.get("points_average")
+        # Half-up on the printed decimal, which is what the spreadsheet a club
+        # compares this against does. A plain format spec rounds the stored double
+        # instead, and 6.225 is stored a hair under a half: it prints 6.22 where the
+        # club's own noticeboard says 6.23.
+        average = stats_mod.round_half_up(team.get("points_average"), 2)
         shown = "    -" if average is None else f"{average:5.2f}"
+        points = stats_mod.round_half_up(team["points"], 1)
         report.line(f"   {team.get('position') or '-':>2}  "
                     f"{team['short'][:width]:<{width}}  "
                     f"{team['played']:>2} {team['won']:>2} {team['lost']:>2} "
-                    f"{team['drawn']:>2}  {team['points']:>6.1f}  {shown}  "
+                    f"{team['drawn']:>2}  {points:>6.1f}  {shown}  "
                     f"{team['games_won']:>4}-{team['games_lost']:<4}")
 
 
@@ -685,10 +700,17 @@ def _draw_lines(comp: Competition, key: str) -> list[str]:
         lines.append(f"fixtures = {config_mod.toml_value(pairs)}")
         if rnd.is_finals:
             # Kept out of the ladder either way (F11); declaring it is what stops
-            # a finals round being counted the moment the draw is pinned.
-            lines.append("is_finals = true")
-        if comp.teams_declared and rnd.bye:
-            lines.append(f"bye = {config_mod.toml_value(comp.team_name(rnd.bye))}")
+            # a finals round being counted the moment the draw is pinned. Spelled
+            # `finals`, which is the key the reader accepts: this block is meant to
+            # be pasted into config.toml, and `is_finals` -- the field name on the
+            # Round, and what this printed for a while -- is warned about and
+            # ignored there, so the declared draw lost its finals flag.
+            lines.append("finals = true")
+        if comp.teams_declared and rnd.byes:
+            resting = [comp.team_name(slug) for slug in rnd.byes]
+            lines.append(f"bye = {config_mod.toml_value(resting)}"
+                         if len(resting) > 1 else
+                         f"bye = {config_mod.toml_value(resting[0])}")
         lines.append("")
     if lines and lines[-1] == "":
         lines.pop()

@@ -437,5 +437,68 @@ class TestTheReadmeSaysWhereTheDataComesFrom(unittest.TestCase):
         self.assertFalse((ROOT / ".github").exists())
 
 
+class TestTheExampleConfigIsARealConfig(unittest.TestCase):
+    """``config.example.toml`` is documentation, and documentation drifts.
+
+    It is the one file a club reads to find out what a setting is called and what
+    it may be set to, and nothing else in the suite reads it, so a preset renamed
+    in `scoring.py` or a table the loader stopped accepting would leave a club
+    copying lines that no longer work. Loading it is the cheapest way to hold the
+    prose to the code.
+    """
+
+    PATH = ROOT / "config.example.toml"
+
+    def load(self):
+        from matchcentre import config as config_mod
+        return config_mod.load(self.PATH)
+
+    def test_the_example_a_club_copies_from_actually_loads(self):
+        config = self.load()
+        # A warning here is the loader saying it met a section or a key it does not
+        # know: the example naming something that no longer exists.
+        self.assertEqual(list(config.warnings), [])
+        self.assertTrue(config.competitions, "the example documents "
+                                             "[competitions.<id>] and the loader "
+                                             "found none")
+
+    def test_the_byes_table_it_documents_is_the_table_the_loader_reads(self):
+        # Written by team, read by round. The example shows a whole grade resting
+        # in one round, which is the case no scorecard can record and therefore the
+        # reason the table exists at all.
+        comp = self.load().competition("wednesday-division-3")
+        self.assertIsNotNone(comp, "the example's worked competition is gone, so "
+                                   "the rest of this class is testing nothing")
+        self.assertTrue(comp.byes, "the example no longer shows a byes table")
+        by_round = comp.byes_by_round()
+        self.assertEqual(sorted(by_round), sorted({r for rounds in comp.byes.values()
+                                                   for r in rounds}))
+        self.assertTrue(all(name in comp.teams for name in comp.byes),
+                        f"the byes table rests a team the example's own teams list "
+                        f"does not have: {sorted(set(comp.byes) - set(comp.teams))}")
+
+    def test_every_preset_it_names_is_a_preset_that_exists(self):
+        # Commented lines count. `# sets = "fast4"` is there to be uncommented, so a
+        # set rule renamed in the code and not here is a line that stops the run the
+        # first time a club takes the example at its word.
+        from matchcentre import format as fmt_mod, scoring
+        known = {"scoring": set(scoring.RULESETS),
+                 "sets": set(fmt_mod.SET_RULES),
+                 "unplayed": set(scoring.UNPLAYED_MODES),
+                 "format": set(fmt_mod.FORMATS)}
+        text = self.PATH.read_text(encoding="utf-8")
+        found = 0
+        for setting, value in re.findall(r'(?m)^\s*#?\s*([a-z_]+)\s*=\s*"([^"]+)"',
+                                        text):
+            if setting not in known:
+                continue
+            found += 1
+            with self.subTest(setting=setting, value=value):
+                self.assertIn(value, known[setting])
+        self.assertGreaterEqual(found, 4, f"only {found} preset assignment(s) were "
+                                          f"found to check, so this test has "
+                                          f"stopped reading the file it is for")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

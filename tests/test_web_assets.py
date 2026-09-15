@@ -109,6 +109,19 @@ class WebAssetCase(unittest.TestCase):
         return {"app.js": read(APP), "index.html": read(INDEX),
                 "styles.css": read(STYLES), "picker.html": read(PICKER)}
 
+    def body(self, name: str) -> str:
+        """One top-level function's source, comments and strings included.
+
+        Searching one function rather than the whole file is what makes a check
+        like "this calls that" mean anything: whole-file searches find the
+        definition and pass, which is the mistake being tested for one level up.
+        """
+        source = self.assets()["app.js"]
+        start = source.find(f"\nfunction {name}(")
+        self.assertGreater(start, 0, f"app.js defines no {name}()")
+        end = source.find("\nfunction ", start + 1)
+        return source[start:end if end > 0 else len(source)]
+
 
 class TestTheAssetsExist(WebAssetCase):
 
@@ -277,6 +290,62 @@ class TestTheDataIslandIsWiredUp(WebAssetCase):
             self.assertIn("SEASON_DATA", app)
 
 
+class TestNavigationNamesPagesRatherThanFolders(WebAssetCase):
+    """No link may stop at a directory, because nothing resolves it to a page.
+
+    ``build.py`` tells a club that double-clicking the dashboard works and that no
+    web server is needed. A server turns a link to ``foo/`` into ``foo/index.html``
+    by itself; opening the file directly, there is nobody to do that, and the
+    browser shows a listing of the folder. Both directions of navigation were
+    written that way and so both showed a file listing instead of a page.
+
+    ``tests/test_cli.py`` catches this end to end for the links that are in the
+    markup, by resolving every one against the disk. It cannot catch the ones
+    ``app.js`` builds at run time, because this suite runs no JavaScript -- the
+    project has no dependencies, a browser included -- so those are read as source
+    instead, the same way ``tests/jslint.py`` checks the rest of the file.
+    """
+
+    def test_the_root_link_the_script_builds_names_a_page(self):
+        app = self.assets()["app.js"]
+        body = re.search(r"function rootHref\(\)\s*\{(.*?)\n\}", app, re.S)
+        self.assertIsNotNone(body, "app.js no longer defines rootHref(), which is "
+                                   "what every 'all competitions' link is set from")
+        returned = re.findall(r"'((?:\.\./)+[^']*)'", body.group(1))
+        self.assertTrue(returned, f"rootHref() returns no relative path: "
+                                  f"{body.group(1)!r}")
+        for path in returned:
+            with self.subTest(returns=path):
+                self.assertTrue(
+                    path.endswith(".html"),
+                    f"rootHref() returns {path!r}, a directory. Opened as a file "
+                    f"that shows a folder listing rather than the front page; "
+                    f"name the page, as in {path + 'index.html'!r}")
+
+    def test_no_link_in_either_page_stops_at_a_directory(self):
+        for name in ("index.html", "picker.html"):
+            page = self.assets()[name]
+            for target in re.findall(r'href="([^"]*)"', page):
+                with self.subTest(page=name, href=target):
+                    if target.startswith("#") or ":" in target:
+                        continue        # a fragment, or an absolute URL
+                    self.assertFalse(
+                        target.endswith("/"),
+                        f"{name} links to {target!r}, a directory, so a browser "
+                        f"opening the file shows a folder listing instead of the "
+                        f"page it meant to go to")
+
+    def test_a_deeper_competition_gets_a_link_that_reaches_the_front_page(self):
+        # site.py rewrites this link on the way out, because a multi-season site
+        # nests one level further than the template assumes. Asserted here at the
+        # string level; test_cli.py resolves the built result against the disk.
+        from matchcentre import site
+        page = self.assets()["index.html"]
+        self.assertIn(site.HOME_LINK, page,
+                      f"index.html no longer carries {site.HOME_LINK!r} verbatim, "
+                      f"so site.py cannot aim it at the front page")
+
+
 class TestNoClubSpecificsInThePages(WebAssetCase):
 
     # The theme-related literals a generic page is allowed to contain:
@@ -340,14 +409,6 @@ class TestThePlayersToCheckList(WebAssetCase):
     notice -- unless the page says so. The README promises this list, which makes
     it a documented feature rather than a nicety.
     """
-
-    def body(self, name: str) -> str:
-        """One top-level function's source, comments and strings included."""
-        source = self.assets()["app.js"]
-        start = source.find(f"\nfunction {name}(")
-        self.assertGreater(start, 0, f"app.js defines no {name}()")
-        end = source.find("\nfunction ", start + 1)
-        return source[start:end if end > 0 else len(source)]
 
     def test_the_list_is_built_and_actually_placed_on_the_page(self):
         # A builder nothing calls is the failure this is aimed at: the code
@@ -418,6 +479,127 @@ class TestThePlayersToCheckList(WebAssetCase):
         # club to wait for something that is never going to happen.
         body = self.body("playersToCheckCard").lower()
         self.assertIn("merged", body)
+
+
+class TestThePageRoundsTheWayThePythonDoes(WebAssetCase):
+    """One convention, two implementations, and no engine here to run one of them.
+
+    A club checks this dashboard against a figure it worked out in a spreadsheet, so
+    the last digit has to match. 6.225 must print 6.23, and neither language gives
+    that by default: both round a half to even, and 6.225 is not stored as a half
+    anyway -- the nearest double is 6.22499999999999964, so even rounding half up on
+    the float rounds it down. A cent under the number on a club's own noticeboard is
+    indistinguishable, to the club, from a scoring bug.
+
+    The numeric half of this check is :mod:`test_pipeline`, against
+    ``stats.round_half_up``. Here the mechanism can only be read.
+    """
+
+    def test_the_page_has_a_rounder_of_its_own(self):
+        self.assertIn("function halfUp(",
+                      jslint.code_only(self.assets()["app.js"]))
+
+    def test_it_rounds_the_decimal_and_not_the_double(self):
+        # `Math.round(v * 100) / 100` reads as equivalent and is not: multiplying
+        # keeps 6.225 below the half and returns 6.22. Shifting the exponent on
+        # String(v) -- the shortest decimal that round-trips to v -- is what makes
+        # it a half again, so the string is the mechanism, not an incidental.
+        body = self.body("halfUp")
+        self.assertIn("String(", body)
+        self.assertRegex(body, r"\+\s*'e'\s*\+",
+                         "nothing shifts the exponent on the decimal string")
+        self.assertRegex(body, r"\+\s*'e-'\s*\+",
+                         "nothing shifts the exponent back")
+        self.assertNotRegex(body, r"\*\s*(100|Math\.pow)")
+
+    def test_every_number_the_page_prints_goes_through_it(self):
+        # num() is what every table cell calls, so a toFixed() reached anywhere
+        # else is a column that rounds differently from the one beside it.
+        self.assertRegex(self.body("num"), r"halfUp\s*\(")
+        code = jslint.code_only(self.assets()["app.js"])
+        stray = sorted({line.strip() for line in code.splitlines()
+                        if "toFixed(" in line and "halfUp(" not in line})
+        self.assertEqual(stray, [], f"toFixed() outside num(): {stray}")
+
+    def test_a_value_it_cannot_round_is_left_alone_rather_than_mangled(self):
+        # A team with nothing decided has no average, and NaN or 1e21 through the
+        # exponent trick would produce '1e21e2', which is not a number.
+        body = self.body("halfUp")
+        self.assertIn("isFinite", body)
+        self.assertRegex(body, r"indexOf\('e'\)")
+
+
+class TestTheBannerAndTheDrawAgreeWithTheExporter(WebAssetCase):
+    """Two fields the season document grew, and the page has to have grown with it.
+
+    Neither failure is visible: a field the page does not read is a line the banner
+    does not print, and a field it reads under the wrong name is `undefined`, which
+    renders as an empty cell. Both leave a page that looks finished.
+    """
+
+    def test_the_banner_says_what_a_bye_or_a_washout_is_worth(self):
+        # It is the one rule in force that changes the points column without
+        # changing anybody's position, so a reader comparing this table against an
+        # association sheet has no other way to account for the difference.
+        body = self.body("renderRulesBanner")
+        self.assertIn("unplayed", body)
+        self.assertIn("unplayed_detail", body)
+
+    def test_the_footnote_names_every_setting_the_banner_shows(self):
+        # The footnote is the only place on the page that tells a club which config
+        # keys these came from. It named three while the banner showed four, which
+        # sends a club looking for a setting it has been told does not exist.
+        body = self.body("renderRulesBanner")
+        shown = re.findall(r"\['([A-Z][a-z_]+)',\s*r\.", body)
+        self.assertGreaterEqual(len(shown), 4, f"only found {shown}; the row "
+                                               f"extraction has stopped seeing "
+                                               f"the code")
+        footnote = re.search(r"If they are not[^']*", body)
+        self.assertIsNotNone(footnote, "the banner no longer says where these "
+                                       "settings come from")
+        for label in shown:
+            with self.subTest(setting=label):
+                self.assertIn(label.lower(), footnote.group(0))
+
+    def test_the_fields_the_banner_reads_are_fields_the_exporter_writes(self):
+        # A misremembered name reads as `undefined`, which renders as an empty
+        # cell: a banner with a blank row rather than an error.
+        written = set(_rules_block())
+        read = set(re.findall(r"\br\.([a-z_]+)", self.body("renderRulesBanner")))
+        self.assertGreaterEqual(len(read), 4, f"only found {sorted(read)}; the "
+                                              f"field extraction has stopped "
+                                              f"seeing the code")
+        self.assertEqual(sorted(read - written), [])
+
+    def test_a_round_can_show_more_than_one_team_resting(self):
+        # A whole grade rests in the same week for a public holiday. While the
+        # exporter wrote `bye` and the page read `bye`, that week showed one team
+        # at rest and silently swallowed the others.
+        code = jslint.code_only(self.assets()["app.js"])
+        self.assertRegex(code, r"r\.byes\b[\s\S]{0,80}forEach",
+                         "nothing iterates a round's byes, so a second resting "
+                         "team cannot appear")
+        self.assertNotRegex(code, r"\br\.bye\b",
+                            "the page still reads the singular field the "
+                            "exporter stopped writing")
+
+
+def _rules_block() -> dict:
+    """The ``rules`` block of a season document, from an empty competition.
+
+    Taken from the exporter's own output rather than from a list of names repeated
+    here, so the page and the document cannot drift apart and both be
+    self-consistent. Empty because the only thing under test is which keys exist.
+    """
+    from matchcentre import export, format as fmt_mod, scoring
+    from matchcentre.competition import Club, Competition
+    comp = Competition(id="x", day="Monday", division="C",
+                       fmt=fmt_mod.match_format("doubles-singles-doubles"),
+                       rules=scoring.ruleset("games-bonus"))
+    return export.build_season(
+        [], competition=comp, source_dir=Path("."), generated="",
+        club=Club(name="", competitions=(comp,)),
+        cards=[], rejected=[])["meta"]["rules"]
 
 
 if __name__ == "__main__":

@@ -62,6 +62,18 @@ GENERATED = PAGE_ASSETS + ("season.json", "season-data.js")
 # The picker's data island, written only when the template asks for it.
 PICKER_DATA = "picker-data.js"
 
+# The "All competitions" link in index.html, as the template ships it: correct for
+# a single-season site, where a competition sits one level under the root. In
+# multi-season mode it is one level deeper, and this exact string is rewritten on
+# the way out.
+#
+# Rewritten here rather than left to the browser because the depth is known at
+# this point. app.js retargets the link too, but markup that is only corrected by
+# script is wrong for as long as the script takes to run, and stays wrong if it
+# never runs at all -- and the file the wrong version points at is a directory,
+# which a browser opening a file:// page renders as a folder listing.
+HOME_LINK = 'class="home-link" href="../index.html"'
+
 # Sentinel comments a picker.html may contain. Every one is optional and any that
 # is absent is simply not substituted, so a template can render as much or as
 # little of this server-side as it likes.
@@ -89,13 +101,17 @@ def write_competition(out_dir: str | Path, season: dict) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
+    depth = _root_depth(season)
     for name in PAGE_ASSETS:
         source = WEB / name
         if not source.is_file():
             raise SiteError(
                 f"missing page template {source}: it is copied into every "
                 f"competition directory and the dashboard cannot open without it")
-        shutil.copy2(source, out / name)
+        if name == "index.html" and depth != 1:
+            (out / name).write_text(_pointed_home(source, depth), encoding="utf-8")
+        else:
+            shutil.copy2(source, out / name)
         written.append(out / name)
 
     export.write_season(out / "season.json", season)
@@ -104,6 +120,34 @@ def write_competition(out_dir: str | Path, season: dict) -> list[Path]:
     (out / "season-data.js").write_text(_season_data_js(season), encoding="utf-8")
     written.append(out / "season-data.js")
     return written
+
+
+def _root_depth(season: dict) -> int:
+    """How many levels up the front page sits from this competition's directory.
+
+    One in single-season mode (``site/<competition>/``) and two in multi-season
+    mode (``site/<season>/<competition>/``), which is the same nesting
+    :func:`_competition_dir` lays out, read from the same two fields.
+    """
+    meta = season.get("meta", {}) if isinstance(season, dict) else {}
+    multi = meta.get("seasons_mode") == "multi" and meta.get("season_key")
+    return 2 if multi else 1
+
+
+def _pointed_home(source: Path, depth: int) -> str:
+    """``index.html``, with its home link aimed *depth* levels up at the picker.
+
+    A template that no longer carries the link verbatim stops the run rather than
+    shipping a page whose only route home is a folder listing.
+    """
+    page = source.read_text(encoding="utf-8")
+    if page.count(HOME_LINK) != 1:
+        raise SiteError(
+            f"{source} does not contain exactly one {HOME_LINK!r}: it is the "
+            f"link back to the front page, and a competition nested {depth} "
+            f"levels down needs it rewritten before the page will work")
+    return page.replace(HOME_LINK,
+                        f'class="home-link" href="{"../" * depth}index.html"')
 
 
 def _season_data_js(season: dict) -> str:
@@ -386,8 +430,15 @@ def _entry(comp: Competition | None, season: dict | None, comp_id: str, *,
 
 
 def _href(comp_id: str, meta: dict, *, multi: bool) -> str:
+    """The link from the front page to one competition's dashboard.
+
+    Names ``index.html`` rather than ending at the directory. A web server would
+    fill that in; a browser opening the file directly will not, and shows a
+    directory listing instead of the dashboard. This tool promises that
+    double-clicking works, so the file is named.
+    """
     key = meta.get("season_key", "") if multi else ""
-    return f"{key}/{comp_id}/" if key else f"{comp_id}/"
+    return f"{key}/{comp_id}/index.html" if key else f"{comp_id}/index.html"
 
 
 def _leader(season: dict | None) -> dict | None:

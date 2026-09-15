@@ -26,7 +26,8 @@ from dataclasses import dataclass
 from .format import MatchFormat
 
 __all__ = ["Ruleset", "RULESETS", "ruleset", "ScoringError",
-           "DEFAULT_RULESET", "LADDER_KEYS"]
+           "DEFAULT_RULESET", "LADDER_KEYS", "UNPLAYED_MODES",
+           "UNPLAYED_AVERAGE", "UNPLAYED_ZERO", "unplayed_detail"]
 
 
 class ScoringError(ValueError):
@@ -45,6 +46,22 @@ LADDER_KEYS = ("points_average", "points", "wins", "games_diff", "games_won",
 #   full-games  the winner is credited a clean sweep, the forfeiter nothing
 #   fixed       a flat number of points, ignoring games
 FORFEIT_AWARDS = ("as-played", "full-games", "fixed")
+
+# What a round a team did not play is worth: a bye, a washout, a week called off.
+# Every preset here has an opinion, and it is only an opinion — two associations
+# running the same points scheme differ on this line all the time, and getting it
+# wrong changes the points column of every team that has had a week off. So it is
+# also settable on its own, through `[rules] unplayed` in config.toml, which is
+# what `Ruleset.average_unplayed` ends up holding.
+#
+#   average  the team is credited its own average over the matches it did play,
+#            and the round counts as played. Common where a ladder is ordered on
+#            average rather than on total points.
+#   zero     the round scores nothing and is not counted. The team's average is
+#            untouched either way; only its points total differs.
+UNPLAYED_AVERAGE = "average"
+UNPLAYED_ZERO = "zero"
+UNPLAYED_MODES = (UNPLAYED_AVERAGE, UNPLAYED_ZERO)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +197,22 @@ class Ruleset:
 
 def _num(value: float) -> str:
     return f"{value:g}"
+
+
+def unplayed_detail(average_unplayed: bool) -> str:
+    """The averaging rule in a sentence, for the run report and the dashboard.
+
+    One function so the terminal and the page say the same thing. It is worth
+    saying at all because it is invisible in the ladder's *order* — crediting every
+    team its own average cannot move any team's average, so only the points column
+    changes — and a club comparing totals against its association's sheet needs to
+    know which convention produced the number it is looking at.
+    """
+    if average_unplayed:
+        return ("a bye or a washout is credited the team's own average, "
+                "and counts as a match played")
+    return ("a bye or a washout scores nothing, and is not counted "
+            "as a match played")
 
 
 RULESETS: dict[str, Ruleset] = {

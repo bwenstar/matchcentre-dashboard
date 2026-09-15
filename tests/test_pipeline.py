@@ -562,5 +562,367 @@ class TestOnePlayerRecordedTwice(unittest.TestCase):
         self.assertEqual(self.fixed["teams"], self.control["teams"])
 
 
+# --- byes: what is inferred, what is stated, and what a bye is worth ----------
+
+# Three teams and three rounds is the smallest competition that has a bye at all:
+# one team rests each week. Mondays, so the routing that files a card by the
+# weekday of its own date cannot confuse this with the Tuesday season above, and no
+# two team names share a first word, so no prefix is stripped from any of them.
+BYE_TEAMS = {
+    "sundown-larks": ("SUNDOWN LARKS",
+                      ("Mira Okonkwo", "Nils Perrault", "Oona Devlin")),
+    "tollgate-moths": ("TOLLGATE MOTHS",
+                       ("Pia Halloran", "Quen Adeyemi", "Rafe Sotiris")),
+    "verge-newts": ("VERGE NEWTS",
+                    ("Suki Ferreira", "Tam Brogan", "Uli Naismith")),
+}
+BYE_DATES = {"1": "2026-08-17", "2": "2026-08-24", "3": "2026-08-31"}
+BYE_FIXTURES = (
+    ("1", "sundown-larks", "tollgate-moths",
+     ((6, 1), (6, 2), (6, 0), (6, 3))),                  # 24-6,  larks
+    ("2", "sundown-larks", "verge-newts",
+     ((6, 3), (6, 4), (4, 6), (6, 2))),                  # 22-15, larks
+    ("3", "tollgate-moths", "verge-newts",
+     ((6, 4), (6, 3), (3, 6), (6, 2))),                  # 21-15, moths
+)
+# Who is missing from each round, which is who rests in it.
+BYE_RESTING = {"1": ["verge-newts"], "2": ["tollgate-moths"],
+               "3": ["sundown-larks"]}
+
+# Worked out on paper from games-bonus (win 4, draw 3, loss 2, plus a tenth per
+# game won), decided matches only -- two each:
+#
+#   larks  win 24 -> 6.4 | win 22 -> 6.2          = 12.6 over 2 -> 6.30
+#   moths  loss 6 -> 2.6 | win 21 -> 6.1          =  8.7 over 2 -> 4.35
+#   newts  loss 15 -> 3.5 | loss 15 -> 3.5        =  7.0 over 2 -> 3.50
+BYE_EARNED = {"sundown-larks": 12.6, "tollgate-moths": 8.7, "verge-newts": 7.0}
+BYE_AVERAGES = {"sundown-larks": 6.30, "tollgate-moths": 4.35, "verge-newts": 3.50}
+# The bye credited at the team's own average: three counted instead of two.
+BYE_AVERAGED_TOTALS = {slug: round(avg * 3, 10)
+                       for slug, avg in BYE_AVERAGES.items()}
+BYE_LADDER = ["sundown-larks", "tollgate-moths", "verge-newts"]
+
+
+def write_bye_season_cards(data_dir: Path) -> None:
+    for index, (rnd, home, away, scores) in enumerate(BYE_FIXTURES, start=1):
+        folder = data_dir / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        home_name, home_players = BYE_TEAMS[home]
+        away_name, away_players = BYE_TEAMS[away]
+        cw.write_card_file(folder / f"r{rnd}.pdf", cw.CardSpec(
+            date=BYE_DATES[rnd], round_label=rnd, division="C",
+            court=f"{index:02d}", match_id=f"300{index:04d}",
+            home_name=home_name, away_name=away_name,
+            rows=rows_for(scores, home_players, away_players),
+            home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(home_players)),
+            away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(away_players))))
+
+
+class ByeSeasonCase(unittest.TestCase):
+    """The three-round season, with whatever the subclass declares about it."""
+
+    UNPLAYED = ""
+    DECLARE_ROUND_THREE = False
+    STATED_BYES: dict[str, tuple[str, ...]] = {}
+    EXTRA_TEAMS: tuple[str, ...] = ()
+    ROUNDS_TOTAL = None
+
+    @classmethod
+    def declared(cls):
+        rounds = ()
+        if cls.DECLARE_ROUND_THREE:
+            # One round out of three, with its fixtures, exactly as a club would
+            # type it after copying a line off the draw.
+            rounds = (config_mod.RoundConfig(
+                number="3", date=BYE_DATES["3"],
+                fixtures=(("TOLLGATE MOTHS", "VERGE NEWTS"),)),)
+        return config_mod.CompetitionConfig(
+            id="monday-c", day="Monday", division="C",
+            teams=tuple(name for name, _ in BYE_TEAMS.values()) + cls.EXTRA_TEAMS,
+            rounds=rounds, byes=dict(cls.STATED_BYES),
+            rounds_total=cls.ROUNDS_TOTAL)
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._tmp.name)
+        cls.data = cls.root / "data"
+        write_bye_season_cards(cls.data)
+        cls.cards, cls.rejected = scorecard.read_tree(cls.data)
+        declared = cls.declared()
+        cls.config = config_mod.Config(path=cls.root / "config.toml",
+                                       unplayed=cls.UNPLAYED,
+                                       competitions={declared.id: declared})
+        cls.discovery = discover_mod.discover(cls.cards, cls.rejected,
+                                              config=cls.config, root=cls.data)
+        cls.comp_id, = sorted(cls.discovery.matches)
+        cls.competition = next(c for c in cls.discovery.club.competitions
+                               if c.id == cls.comp_id)
+        cls.matches = stats.with_byes(cls.discovery.matches[cls.comp_id],
+                                      cls.competition)
+        cls.season = export.build_season(
+            cls.discovery.matches[cls.comp_id], competition=cls.competition,
+            source_dir=cls.data, generated="2026-09-10T12:00:00",
+            club=cls.discovery.club, cards=cls.cards, rejected=cls.rejected)
+        cls.team = {t["slug"]: t for t in cls.season["teams"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def resting(self):
+        return {number: sorted(self.competition.byes_for(number))
+                for number in self.competition.round_order}
+
+
+class TestEveryRoundsByeIsWorkedOutFromTheClosedList(ByeSeasonCase):
+    """Nothing declared but the team list, which is all rule F1 asks for."""
+
+    def test_the_team_that_is_missing_from_each_round_is_the_one_resting(self):
+        self.assertEqual(self.resting(),
+                         {n: sorted(v) for n, v in BYE_RESTING.items()})
+
+    def test_the_bye_is_a_match_of_its_own_rather_than_a_gap(self):
+        byes = sorted((m.round, m.home) for m in self.matches
+                      if m.status is MatchStatus.BYE)
+        self.assertEqual(byes, [("1", "verge-newts"), ("2", "tollgate-moths"),
+                                ("3", "sundown-larks")])
+
+    def test_no_bye_becomes_a_fixture(self):
+        for number, rnd in self.competition.rounds.items():
+            with self.subTest(round=number):
+                self.assertEqual(len(rnd.fixtures), 1)
+
+
+class TestDeclaringOneRoundKeepsTheByesInTheOthers(ByeSeasonCase):
+    """Measured bug: declaring any round silently discarded every inferred bye.
+
+    Two code paths reconstruct a draw -- one for a declared draw, one for the cards
+    -- and only the second inferred anything. So a club that wrote down a single
+    round, which is exactly what a club does when it wants to record one date or
+    one note, lost the byes this program could already see in every other round.
+    Nothing warned: three teams simply stopped being paid for resting.
+    """
+
+    DECLARE_ROUND_THREE = True
+    ROUNDS_TOTAL = 3
+
+    def test_the_declaration_was_actually_picked_up(self):
+        # Without this the class would pass by testing the undeclared path twice.
+        self.assertEqual(self.competition.rounds["3"].source,
+                         "declared")
+        self.assertEqual(self.competition.rounds["1"].source, "cards")
+
+    def test_the_rounds_nobody_declared_still_know_who_rested(self):
+        self.assertEqual(self.resting(),
+                         {n: sorted(v) for n, v in BYE_RESTING.items()})
+
+    def test_and_the_declared_round_knows_too(self):
+        self.assertEqual(self.competition.byes_for("3"), ("sundown-larks",))
+
+    def test_the_ladder_is_the_same_as_if_nothing_had_been_declared(self):
+        self.assertEqual(stats.ladder(self.matches, self.competition), BYE_LADDER)
+
+
+class TestAStatedByeCoversWhatTheCardsCannotShow(ByeSeasonCase):
+    """The byes table: the weeks no card can account for.
+
+    Round 4 here has no cards at all -- a public holiday, or a week called off
+    before anybody travelled. Inference cannot see it, because there is nothing to
+    be missing from, so the club states it and the round exists carrying only the
+    rest.
+    """
+
+    STATED_BYES = {"SUNDOWN LARKS": ("4",), "TOLLGATE MOTHS": ("4",),
+                   "VERGE NEWTS": ("4",)}
+    ROUNDS_TOTAL = 4
+
+    def test_the_week_nobody_played_is_a_round_of_its_own(self):
+        self.assertIn("4", self.competition.rounds)
+        self.assertEqual(sorted(self.competition.byes_for("4")),
+                         sorted(BYE_TEAMS))
+
+    def test_it_invents_no_fixture_for_a_week_that_has_no_cards(self):
+        self.assertEqual(self.competition.rounds["4"].fixtures, ())
+
+    def test_it_pays_nobody_for_a_round_nobody_has_played(self):
+        # F2's other half. The round is on the dashboard; it is not on the ladder.
+        for slug in BYE_TEAMS:
+            with self.subTest(team=slug):
+                self.assertEqual(self.team[slug]["counted"], 3)
+
+    def test_the_rounds_that_do_have_cards_are_unaffected(self):
+        for number, expected in BYE_RESTING.items():
+            with self.subTest(round=number):
+                self.assertEqual(sorted(self.competition.byes_for(number)),
+                                 sorted(expected))
+
+    def test_the_stated_round_is_carried_into_the_season_document(self):
+        rounds = {r["number"]: r for r in self.season["rounds"]}
+        self.assertEqual(sorted(rounds["4"]["byes"]), sorted(BYE_TEAMS))
+
+
+class TestAStatedByeCarriesRoundsInferenceWontDecide(ByeSeasonCase):
+    """A grade of five whose cards are still coming in.
+
+    Three fixtures are in and the rest of the draw is not, so every round is short
+    of more than one team and inference refuses to pick a bye out of the gap --
+    rule F1's other half, and the predecessor's most expensive bug: two teams
+    missing is a missing card, not two byes. The club has the association's sheet
+    in front of it and writes the byes down, and the statement has to be honoured
+    for the rounds that already have cards, not only for the rounds that have none.
+    """
+
+    EXTRA_TEAMS = ("WOLDS PIPITS", "YARROW SHRIKES")
+    STATED_BYES = {"VERGE NEWTS": ("1",), "TOLLGATE MOTHS": ("2",)}
+
+    def test_all_five_teams_are_on_the_ladder_though_two_have_no_card(self):
+        self.assertEqual(len(self.competition.teams), 5)
+
+    def test_the_statement_is_honoured_in_a_round_that_has_cards(self):
+        self.assertEqual(self.competition.byes_for("1"), ("verge-newts",))
+        self.assertEqual(self.competition.byes_for("2"), ("tollgate-moths",))
+
+    def test_a_round_nobody_wrote_down_still_infers_nothing(self):
+        # Round three is short of three teams. Silence is the right answer.
+        self.assertEqual(self.competition.byes_for("3"), ())
+
+    def test_a_stated_bye_is_paid_and_an_unexplained_gap_is_not(self):
+        # Newts rest in round one and are paid for it; larks are missing from
+        # round three and are paid nothing, because nobody has said why.
+        self.assertEqual(self.team["verge-newts"]["counted"], 3)
+        self.assertEqual(self.team["sundown-larks"]["counted"], 2)
+
+    def test_the_missing_cards_are_reported_rather_than_absorbed(self):
+        report = validate.validate(self.discovery.matches[self.comp_id],
+                                   self.competition, club=self.discovery.club,
+                                   cards=self.cards, rejected=self.rejected)
+        text = " ".join(f"{i.subject} {i.message} {i.detail}"
+                        for i in report.warnings + report.errors)
+        self.assertIn("wolds-pipits", text)
+
+
+class TestAByeCreditedTheTeamsOwnAverage(ByeSeasonCase):
+    """``unplayed = "average"``: the games-bonus preset's own convention."""
+
+    UNPLAYED = "average"
+
+    def test_the_convention_in_force_is_the_one_asked_for(self):
+        self.assertTrue(self.competition.rules.average_unplayed)
+        self.assertEqual(self.season["meta"]["rules"]["unplayed"], "average")
+
+    def test_a_resting_team_is_paid_its_average_over_the_matches_it_decided(self):
+        for slug, expected in BYE_AVERAGED_TOTALS.items():
+            with self.subTest(team=slug):
+                self.assertAlmostEqual(self.team[slug]["points"], expected,
+                                       places=6)
+
+    def test_the_bye_counts_as_a_match_played(self):
+        for slug in BYE_TEAMS:
+            with self.subTest(team=slug):
+                self.assertEqual(self.team[slug]["counted"], 3)
+
+    def test_awarding_the_mean_does_not_move_the_mean(self):
+        for slug, expected in BYE_AVERAGES.items():
+            with self.subTest(team=slug):
+                self.assertAlmostEqual(self.team[slug]["points_average"],
+                                       expected, places=6)
+
+
+class TestAByeWorthNothing(ByeSeasonCase):
+    """``unplayed = "zero"``: the same points system, the other convention.
+
+    Both are real grades' rules and no preset name distinguishes them, which is why
+    this is a setting rather than a fifth preset. What it changes is the whole
+    points column; what it must not change is who is top, because the average that
+    orders the ladder is the average over decided matches either way.
+    """
+
+    UNPLAYED = "zero"
+
+    def test_the_convention_in_force_is_the_one_asked_for(self):
+        self.assertFalse(self.competition.rules.average_unplayed)
+        self.assertEqual(self.season["meta"]["rules"]["unplayed"], "zero")
+
+    def test_a_resting_team_is_paid_nothing_for_it(self):
+        for slug, expected in BYE_EARNED.items():
+            with self.subTest(team=slug):
+                self.assertAlmostEqual(self.team[slug]["points"], expected,
+                                       places=6)
+
+    def test_the_bye_is_absent_rather_than_a_zero(self):
+        # Counted as played it would halve nobody's average by a third; recorded
+        # as a nil score it would. It is neither: it is not counted.
+        for slug in BYE_TEAMS:
+            with self.subTest(team=slug):
+                self.assertEqual(self.team[slug]["counted"], 2)
+
+    def test_the_bye_is_still_shown_in_the_draw(self):
+        # The club's dashboard should say why a team played two matches in three
+        # weeks, whatever the round was worth.
+        self.assertEqual(self.resting(),
+                         {n: sorted(v) for n, v in BYE_RESTING.items()})
+
+    def test_the_ladder_order_is_the_same_under_either_convention(self):
+        self.assertEqual(stats.ladder(self.matches, self.competition), BYE_LADDER)
+
+    def test_and_so_is_every_average(self):
+        for slug, expected in BYE_AVERAGES.items():
+            with self.subTest(team=slug):
+                self.assertAlmostEqual(self.team[slug]["points_average"],
+                                       expected, places=6)
+
+
+# --- rounding -----------------------------------------------------------------
+
+
+class TestTheAverageIsRoundedTheWayASpreadsheetRounds(unittest.TestCase):
+    """Half a cent, rounded up, in both the Python and the JavaScript.
+
+    A club checks this dashboard against a figure it worked out in a spreadsheet,
+    and a single last digit out of step is enough to make it distrust the whole
+    table. Two things conspire: Python and JavaScript both round a half to even,
+    and 6.225 is not really a half in binary -- it is stored a hair below, so even
+    round-half-up on the float rounds it down. Quantising the shortest decimal that
+    round-trips the float, which is what ``str()`` gives, makes it a half again.
+
+    ``app.js`` reaches the same values by the same reasoning; the structural half
+    of this check lives in ``test_web_assets.py``.
+    """
+
+    def test_a_half_cent_goes_up_not_to_even(self):
+        self.assertEqual(stats.round_half_up(6.225), 6.23)
+        self.assertEqual(stats.round_half_up(3.675), 3.68)
+        self.assertEqual(stats.round_half_up(2.675), 2.68)
+        self.assertEqual(stats.round_half_up(1.005), 1.01)
+
+    def test_pythons_own_rounding_would_have_given_the_other_answer(self):
+        # Named so that nobody 'simplifies' this back to round().
+        self.assertEqual(round(6.225, 2), 6.22)
+        self.assertEqual(round(3.675, 2), 3.67)
+        self.assertEqual(f"{23.25:.1f}", "23.2")
+
+    def test_the_points_column_rounds_the_same_way_at_one_place(self):
+        self.assertEqual(stats.round_half_up(23.25, 1), 23.3)
+        self.assertEqual(stats.round_display(23.25), 23.3)
+
+    def test_it_rounds_a_negative_half_away_from_zero_too(self):
+        self.assertEqual(stats.round_half_up(-6.225), -6.23)
+
+    def test_a_value_that_needs_no_rounding_is_returned_unchanged(self):
+        self.assertEqual(stats.round_half_up(6.2), 6.2)
+        self.assertEqual(stats.round_half_up(0.0), 0.0)
+
+    def test_nothing_to_round_stays_nothing(self):
+        # A team with no decided match has no average, and '0.00' would be a
+        # claim about it.
+        self.assertIsNone(stats.round_half_up(None))
+        self.assertIsNone(stats.round_display(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

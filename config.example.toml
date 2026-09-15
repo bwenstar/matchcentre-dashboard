@@ -89,6 +89,24 @@ scoring = "games-bonus"
 # reads as finished when it was not.
 sets = "first-to-6"
 
+# unplayed — what a round a team did not play is worth: a bye, a washout, a week
+# called off. One of:
+#   average   the team is credited its own average over the matches it did play,
+#             and the round counts as a match played. Common where the ladder is
+#             ordered on average rather than on total points.
+#   zero      the round scores nothing and is not counted.
+# Each scoring preset above already has an opinion — games-bonus averages, the
+# other three do not — and it is only an opinion: two associations running the
+# same points scheme differ on this line all the time. Setting it here overrides
+# the preset without replacing it. Leave it out and the preset decides.
+#
+# This changes the points column of every team that has had a week off, and it
+# never changes the ladder order: crediting a team its own average cannot move
+# its average, and the average is what the ladder is sorted on. So if your totals
+# are close to your association's sheet but not equal, and the teams are in the
+# right order, this is the line to try.
+# unplayed = "zero"
+
 # format — the shape of a match: how many sets, and which are doubles.
 # This *is* read off your cards, from the marker column beside each set row, so
 # you do not need to set it. Declare it only if you would rather a card that
@@ -218,10 +236,11 @@ rounds_total = 14
 teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
          "Silvereyes"]
 
-# A competition can override any of the four [rules] settings, for a club that
-# runs one division under different rules from the others.
+# A competition can override any of the [rules] settings, for a club that runs
+# one division under different rules from the others.
 # scoring = "sets-first"
 # sets = "fast4"
+# unplayed = "average"
 # format = "singles-4"
 # slots = ["singles", "singles", "singles", "singles"]
 # min_sets_for_result = 3
@@ -257,6 +276,40 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 "Nightjars" = 5
 "Silvereyes" = 6
 
+# Which rounds each team sits out. One line per team, listing its rounds, which
+# is how an association's own sheet reads: find the B column and transcribe it.
+# Keyed by team name or team id, like the tables above.
+#
+# You only have to enter the byes this program cannot see for itself. A round
+# that has cards with exactly one team missing is already worked out from the
+# `teams` list above, and a first run writes those here commented out, so you can
+# check them rather than type them again. What no card can show is a week nobody
+# played at all — a long weekend, a washed-out round, a bye week for the whole
+# grade — because a round with no cards leaves nothing behind to read.
+#
+# Rounds are written as they are printed on the cards, so [1, 6] and ["SF"] are
+# both fine, and one round needs no brackets: "Falcons" = 6.
+#
+# In an odd-numbered grade, where somebody rests every week, this section is the
+# whole bye column and takes a minute to type:
+#
+#   "Falcons"    = [1, 6]
+#   "Herons"     = [2, 6]
+#   "Currawongs" = [3, 6]
+#
+# What a bye is worth is [rules] unplayed, above. This section only says who had
+# one.
+[competitions.wednesday-division-3.byes]
+# Six teams play three matches a night, so nobody rests in an ordinary week. But
+# round 6 fell on a long weekend and the whole grade had it off, and that is the
+# case no scorecard can record.
+"Falcons" = [6]
+"Herons" = [6]
+"Currawongs" = [6]
+"Lorikeets" = [6]
+"Nightjars" = [6]
+"Silvereyes" = [6]
+
 # Your published draw, one block per round. Optional, and worth typing in for
 # two reasons: the dashboard can then show fixtures that have not been played
 # yet, and a bye can be credited to the team that actually had the week off.
@@ -266,7 +319,9 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 #             "SF" and "GF" are all valid.
 #   date      the day it is played, yyyy-mm-dd. Optional.
 #   fixtures  a list of [home, away] pairs, using the names in `teams`.
-#   bye       the team resting this round, if any.
+#   byes      the teams resting this round, if any. One name or a list; `bye`
+#             spelled singular is read the same way. Usually easier to put in the
+#             byes table above, which does not need the draw typed in as well.
 #   finals    true for a finals round. A finals round never contributes ladder
 #             points. A round whose label is not a number is treated as finals
 #             whether or not you say so.

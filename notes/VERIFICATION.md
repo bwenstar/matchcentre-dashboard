@@ -209,3 +209,144 @@ The verdict is matched as a **contiguous** block against a **single** card, on
 purpose. Line by line across all fifteen would accept a verdict assembled from six
 different matches — the division from one, the scoreline from another — which is
 the exact failure mode the hand-written block had.
+
+## 6. Navigation over `file://`
+
+Reported 2026-09-14 from use, not from testing: clicking a competition on the
+front page showed a **directory listing**, and so did clicking "← All
+competitions" to come back.
+
+The cause is the one difference between the two ways this site can be opened. Over
+http a server resolves `foo/` to `foo/index.html`; over `file://` there is no
+server, so the browser lists the folder. Every navigation target was written as a
+directory, which works perfectly through a local web server — which is how it was
+being looked at — and fails on the one path `build.py` actually promises
+("double-click works; no web server needed").
+
+Confirmed in `/tmp/navbug`, then audited exhaustively rather than fixed at the two
+places the report named, because a missed link site leaves the same broken page
+somewhere else. **26 agents**, finders per surface piped into verifiers defaulting
+to `real=false`. Three producers, covering every occurrence:
+
+| producer | was | now |
+|---|---|---|
+| `site.py` `_href` | `<comp>/`, `<season>/<comp>/` | names `index.html`; fixes the front page's anchors *and* `picker-data.js`, its only two consumers |
+| `app.js` `rootHref()` | `'../'` / `'../../'` | names `index.html`; fixes all three consumers (the season `<select>`, the "All seasons" anchor, and the `.home-link` retarget) |
+| `web/index.html:61` | `href="../"` | `href="../index.html"` |
+
+**The third fix is not sufficient on its own, and that is the part the report could
+not have shown.** A competition in a multi-season site sits two levels down, so
+`../index.html` from there resolves to `site/<season>/index.html` — a file no
+build writes. `app.js` retargets the link at run time, but markup corrected only
+by script is wrong for as long as the script takes to run and stays wrong if it
+never runs. The depth is known when the page is written, so `write_competition`
+now rewrites the link on the way out (`HOME_LINK`, `_root_depth`,
+`_pointed_home`), from the same two `meta` fields that decide the nesting. A
+template that no longer carries the link verbatim raises `SiteError` rather than
+substituting nothing and shipping the wrong depth. Single-season sites still get
+the template byte for byte, which a test asserts.
+
+Pinned by `TestEveryLinkInTheBuiltSiteOpensWithoutAServer` in `tests/test_cli.py`,
+which builds both site shapes and **resolves every `href`/`src` in every generated
+page, plus every `href` in `picker-data.js`, against the filesystem** — so it also
+fails on a link to a page that simply is not there, not just on one ending in a
+slash. The links `app.js` builds at run time cannot be reached that way (no JS
+engine, §3), so `TestNavigationNamesPagesRatherThanFolders` in
+`tests/test_web_assets.py` reads `rootHref()`'s returns as source.
+
+Six mutations, all caught: each of the three producers reverted to a directory;
+the depth rewrite disabled; the depth rewrite made one level too deep; and the
+fail-closed check on a missing template link removed. Suite 288 → 296 tests, and
+`diff -r` of two builds is still empty, so the fix did not cost determinism.
+
+One thing the audit got wrong, worth recording because it argues for checking a
+verifier's reachability claims: two agents reported the `fillSeasonPicker` path
+dead because nothing hooks `#season-picker`. `web/index.html:79` is
+`<select id="season-picker" …>`. The fix is the same either way — every branch of
+`rootHref()` now names a file — but the reasoning offered for it was false.
+
+## 7. Two real seasons against the association's own points sheets
+
+2026-09-14/15. The first measurement of this project's output against a published
+ladder rather than against itself. Input, supplied as a zip: a `data/` tree of real
+cards run through `build.py` on another machine, the `config.toml` it produced
+(`rounds_total = 10` the only line edited by hand), and photographs of the
+association's points sheets for both grades. All of it kept in `/tmp`; no card,
+name or club identifier copied into this project. Teams below are lettered, not
+named.
+
+Two grades, deliberately unlike each other:
+
+| grade | teams | byes on the sheet | washouts on the sheet |
+|---|---|---|---|
+| Tuesday, division C | 6 | none | none |
+| Monday, division B2 | 5 | `B`, one per round | `W`, several |
+
+**Tuesday matched to the digit**: pts `24.9 / 22.8 / 20.6 / 15.9 / 14.7 / 10.0`,
+and the average column agreed everywhere including `6.23` and `3.68`. Nothing was
+adjusted to get that; it is the six-team even-draw case, which is the case with no
+byes in it.
+
+**Monday came out `25.6 / 14.1 / 12.9 / 11.7 / 9.9` against the sheet's
+`25.6 / 14.1 / 12.9 / 11.9 / 9.9`.** Four of five exact. The fifth is not this
+tool's arithmetic: team D's round 5 card prints `TOTAL 9-24`, and the result verb
+between the team names and the `Match Winner` tick both agree with it, so the three
+independent statements on the page give 2.9 and the sheet's total implies 3.1. A
+card that disagrees with the sheet is the situation this program is built to
+surface rather than smooth over, so it is left standing and recorded here.
+
+Getting there took four changes, all of which the sheets argued for:
+
+1. **`[rules] unplayed`.** The five inferred byes were being paid the team's own
+   average, because `games-bonus` averages by default. This association scores them
+   as nothing. Two associations on the same points scheme differ here, so it is a
+   setting rather than a preset detail — and it can only move a points total, never
+   the ladder's order, since crediting a team its own average cannot move that
+   average.
+2. **The `[competitions.<id>.byes]` table**, keyed by team. `W` and `B` are marks on
+   the association's sheet and appear nowhere on any card; a five-team grade's bye
+   is inferable only while exactly one team is missing from a round, which a missing
+   card or a washed-out week breaks. The question that prompted this was "surely I
+   don't have to enter every match?" — and the answer is that no fixture, date or
+   draw is needed, just the sheet's own bye column.
+3. **A declared round no longer discards the byes inferred in the others.** Writing
+   one `[[rounds]]` block to pin a date silently emptied every other round's byes,
+   which is the worst possible shape for the bug: the more a club configures, the
+   less it gets.
+4. **Half-up rounding.** `6.225` is held as 6.22499999999999964, so `round()` gives
+   `6.22` where the sheet prints `6.23`. Fixed in the Python with
+   `Decimal(str(value))` and in the page with the shortest-round-tripping-string
+   exponent trick, which is why the two agree by construction. `f"{23.25:.1f}"` →
+   `23.2` was the same fault one column over.
+
+Tests: **297 → 356**, run byte-identically twice. **34 mutations across three
+drivers, all caught** — 11 in `config.py`'s reading of the two new settings, 13
+across `discover.py`, `competition.py`, `stats.py` and `export.py`, 10 on the
+browser side and the exporter fields the page reads.
+
+Three things the mutation run taught, each of which changed how the run is done:
+
+**A same-length edit restored inside one second can leave a `.pyc` Python thinks is
+current.** `stats.round_display(23.25)` returned `23.25` while the source read
+`round_half_up(value, 1)`; `co_consts` held `(None, 2)`. Source mtime is
+1-second granular and the mutation `1` → `2` did not change the file's size, so the
+cached bytecode still validated. Every driver now runs with
+`PYTHONDONTWRITEBYTECODE=1` and clears `__pycache__` before the run and after each
+restore, and both earlier drivers were re-run clean to be sure no result had been
+distorted. A mutation driver that patches and restores fast is precisely the
+workload that defeats mtime-and-size validation.
+
+**Two guards each masked the other.** `bool` is an `int` in Python, so
+`Rockets = true` in a byes table would have become a bye in a round called `"True"`
+— a week no draw has, paying a team for resting in it. The scalar shortcut and the
+per-item check both reject it, so mutating either one alone left the other to
+catch the case and the test passed. The test now asserts each guard's own message
+(`"should be a list"` against `"not a round number"`) and adds a wrapped
+`[[6]]`, which is the only shape neither guard reaches by accident.
+
+**A test that checks a word appears somewhere in a function is not checking the
+sentence it appears in.** Removing `unplayed` from the rules banner's footnote
+survived, because `r.unplayed` occurs elsewhere in the same function. The
+replacement extracts the banner's row labels by regex and asserts each one appears
+inside the footnote sentence itself, so the footnote cannot fall behind the rows it
+describes.

@@ -905,14 +905,14 @@ def _check_draw(ctx: _Context) -> list[Issue]:
                 detail=f"declared rounds: {', '.join(comp.round_order)}"))
             continue
         if match.is_bye:
-            if scheduled.bye != match.home:
+            if match.home not in scheduled.byes:
                 issues.append(Issue(
                     rule="bye-not-declared", severity=ERROR,
                     message=f"round {match.round}: {match.home} is being credited a "
                             f"bye, but the declared draw rests "
-                            f"{scheduled.bye or 'nobody'}.",
+                            f"{', '.join(scheduled.byes) or 'nobody'}.",
                     subject=f"R{match.round} {match.home}",
-                    detail=str(scheduled.bye)))
+                    detail=", ".join(scheduled.byes)))
             continue
         pair = (match.home, match.away)
         if scheduled.is_finals:
@@ -982,16 +982,18 @@ def _check_byes(ctx: _Context) -> list[Issue]:
                 detail=f"card {played.source or 'unknown source'}"))
     for number in sorted(set(real) | set(byes), key=round_sort_key):
         declared = comp.rounds.get(number)
-        if declared is None or not declared.bye:
+        if declared is None:
             continue
-        played = real[number].get(declared.bye)
-        if played is not None:
+        for resting in declared.byes:
+            played = real[number].get(resting)
+            if played is None:
+                continue
             issues.append(Issue(
                 rule="bye-contradicted", severity=WARNING,
                 message=f"round {number}: the {comp.draw_source} draw rests "
-                        f"{declared.bye}, but there is a card for it that round. The "
+                        f"{resting}, but there is a card for it that round. The "
                         "card wins and no bye was credited.",
-                subject=f"R{number} {declared.bye}",
+                subject=f"R{number} {resting}",
                 detail=f"card {played.source or 'unknown source'}"))
     return issues
 

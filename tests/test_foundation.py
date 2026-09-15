@@ -542,13 +542,13 @@ class TestDrawReconstruction(unittest.TestCase):
         comp = make_competition(["rockets", "iguanas", "wanderers", "aces",
                                  "spinners"], declared=False)
         rounds = comp.rounds_from_matches(self.round_one())
-        self.assertIsNone(rounds["1"].bye)
+        self.assertEqual(rounds["1"].byes, ())
 
     def test_a_bye_is_inferred_once_the_team_list_is_declared(self):
         comp = make_competition(["rockets", "iguanas", "wanderers", "aces",
                                  "spinners"], declared=True)
         rounds = comp.rounds_from_matches(self.round_one())
-        self.assertEqual(rounds["1"].bye, "spinners")
+        self.assertEqual(rounds["1"].byes, ("spinners",))
 
     def test_two_teams_missing_is_a_missing_card_not_two_byes(self):
         # Refusing to pick one is the point: the shortfall is reported by
@@ -556,7 +556,7 @@ class TestDrawReconstruction(unittest.TestCase):
         comp = make_competition(["rockets", "iguanas", "wanderers", "aces",
                                  "spinners", "smashers"], declared=True)
         rounds = comp.rounds_from_matches(self.round_one())
-        self.assertIsNone(rounds["1"].bye)
+        self.assertEqual(rounds["1"].byes, ())
 
     def test_a_derived_draw_is_a_history_not_a_schedule(self):
         # Only rounds that have cards appear (rule F2).
@@ -599,7 +599,16 @@ class TestDrawReconstruction(unittest.TestCase):
         self.assertEqual([r.number for r in comp.regular_rounds], ["1"])
 
     def test_a_round_reports_every_team_it_touched_including_the_bye(self):
-        rnd = Round(number="1", fixtures=(("rockets", "iguanas"),), bye="aces")
+        rnd = Round(number="1", fixtures=(("rockets", "iguanas"),),
+                    byes=("aces",))
+        self.assertEqual(rnd.teams, ("rockets", "iguanas", "aces"))
+
+    def test_a_whole_grade_resting_is_a_round_with_several_byes(self):
+        # A public holiday, or a week called off before anybody travelled. One
+        # team resting is the common case; it was for a while the only case the
+        # model could hold, which meant the week a club had five byes to write
+        # down it could write down one.
+        rnd = Round(number="6", byes=("rockets", "iguanas", "aces"))
         self.assertEqual(rnd.teams, ("rockets", "iguanas", "aces"))
 
 
@@ -748,6 +757,179 @@ class TestConfigLoading(unittest.TestCase):
         self.assertEqual(loaded.ruleset_for(None).name, "games-bonus")
 
 
+class TestTheUnplayedConvention(unittest.TestCase):
+    """What a bye or a washout is worth, which no preset name can settle.
+
+    Two grades can award points identically and still disagree about the week
+    nobody played: one credits the resting team its own average, the other credits
+    it nothing. Both are real, the association's sheet says which, and the
+    difference is the whole points column -- so it is a setting of its own rather
+    than a fifth and sixth preset.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+
+    def write(self, text):
+        path = self.dir / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_it_overrides_the_presets_own_convention_without_replacing_it(self):
+        averaged = config_mod.load(self.write('[rules]\nscoring = "games-bonus"\n'))
+        self.assertTrue(averaged.ruleset_for(None).average_unplayed)
+        zeroed = config_mod.load(self.write(
+            '[rules]\nscoring = "games-bonus"\nunplayed = "zero"\n'))
+        self.assertFalse(zeroed.ruleset_for(None).average_unplayed)
+        # Still games-bonus: only the one clause moved.
+        self.assertEqual(zeroed.ruleset_for(None).name, "games-bonus")
+
+    def test_one_competition_may_score_a_bye_differently_from_the_rest(self):
+        loaded = config_mod.load(self.write(
+            '[rules]\nunplayed = "average"\n'
+            '[competitions."tuesday-division-c"]\nunplayed = "zero"\n'))
+        comp = loaded.competition("tuesday-division-c")
+        self.assertFalse(loaded.ruleset_for(comp).average_unplayed)
+        self.assertTrue(loaded.ruleset_for(None).average_unplayed)
+
+    def test_a_misspelling_stops_the_run_rather_than_being_warned_about(self):
+        # Warned about and ignored, this would fall back to the preset's own
+        # convention: a points column quietly not the one the club asked for. The
+        # club asked precisely because it had noticed the difference.
+        with self.assertRaises(config_mod.ConfigError):
+            config_mod.load(self.write('[rules]\nunplayed = "averaged"\n'))
+        with self.assertRaises(config_mod.ConfigError):
+            config_mod.load(self.write(
+                '[competitions."tuesday-division-c"]\nunplayed = "nothing"\n'))
+
+    def test_leaving_it_out_leaves_the_preset_alone(self):
+        for name in scoring.RULESETS:
+            with self.subTest(preset=name):
+                loaded = config_mod.load(self.write(f'[rules]\nscoring = "{name}"\n'))
+                self.assertEqual(loaded.ruleset_for(None),
+                                 scoring.ruleset(name))
+
+
+class TestTheByesShorthand(unittest.TestCase):
+    """``[competitions.<id>.byes]``: the byes a club has to type, and no more.
+
+    A club should not transcribe a whole draw to record five byes. Two things make
+    that possible -- inference covers the rounds whose cards have arrived, and this
+    table covers the rest -- and the shape of the table is the shape of the sheet
+    the association publishes: one row per team, rounds across the top.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+
+    def write(self, text):
+        path = self.dir / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def declared(self, byes):
+        return config_mod.load(self.write(
+            '[competitions."monday-division-b"]\n'
+            'teams = ["Rockets", "Iguanas", "Aces"]\n'
+            '[competitions."monday-division-b".byes]\n' + byes)
+        ).competition("monday-division-b")
+
+    def test_it_is_written_by_team_and_read_back_by_round(self):
+        # Read off by team it is one pass down a column. By round it would be a
+        # pass across every row per line typed, which is where transcription
+        # errors come from.
+        comp = self.declared('Rockets = [1, 6]\nIguanas = [2, 6]\nAces = 6\n')
+        self.assertEqual(comp.byes, {"Rockets": ("1", "6"),
+                                     "Iguanas": ("2", "6"),
+                                     "Aces": ("6",)})
+        self.assertEqual(comp.byes_by_round(),
+                         {"1": ("Rockets",), "2": ("Iguanas",),
+                          "6": ("Aces", "Iguanas", "Rockets")})
+
+    def test_a_single_round_needs_no_brackets(self):
+        # The commonest line in the table is one round, and requiring `[6]` for it
+        # is the kind of friction that ends in the table not being filled in.
+        self.assertEqual(self.declared('Rockets = 6\n').byes, {"Rockets": ("6",)})
+        self.assertEqual(self.declared('Rockets = "SF"\n').byes,
+                         {"Rockets": ("SF",)})
+
+    def test_a_round_written_twice_for_one_team_is_one_bye(self):
+        self.assertEqual(self.declared('Rockets = [6, 6]\n').byes,
+                         {"Rockets": ("6",)})
+
+    def test_a_team_the_declared_list_does_not_name_stops_the_run(self):
+        # A bye is the one thing that pays a team points for playing nothing, so a
+        # typo here would credit a team that does not exist and quietly leave the
+        # real one a match short. Closing the team list is what makes it an error.
+        with self.assertRaises(config_mod.ConfigError) as caught:
+            self.declared('Rokcets = [1]\n')
+        self.assertIn("Rokcets", str(caught.exception))
+        self.assertIn("Rockets", str(caught.exception))
+
+    def test_a_spelling_the_team_list_uses_is_accepted_however_it_is_cased(self):
+        self.assertEqual(self.declared('"ROCKETS" = [1]\n').byes,
+                         {"ROCKETS": ("1",)})
+
+    def test_rounds_that_are_not_round_numbers_are_refused(self):
+        # `bool` is an `int` in Python, so left to `str()` a `true` here becomes a
+        # bye in a round called "True": a round on the dashboard that no draw has,
+        # paying a team for resting in a week that does not exist. Each shape is
+        # turned away where it can be described, so the message names the fix.
+        with self.assertRaises(config_mod.ConfigError) as scalar:
+            self.declared('Rockets = true\n')
+        self.assertIn("should be a list", str(scalar.exception))
+        with self.assertRaises(config_mod.ConfigError) as inside:
+            self.declared('Rockets = [1, true]\n')
+        self.assertIn("not a round number", str(inside.exception))
+        with self.assertRaises(config_mod.ConfigError):
+            self.declared('Rockets = [[6]]\n')
+
+    def test_byes_are_taken_on_trust_while_the_team_list_is_still_open(self):
+        # There is nothing to check the name against yet, and refusing every name
+        # would make the shorthand unusable until the roster has been reviewed.
+        loaded = config_mod.load(self.write(
+            '[competitions."monday-division-b".byes]\nRockets = [1]\n'))
+        self.assertEqual(loaded.competition("monday-division-b").byes,
+                         {"Rockets": ("1",)})
+
+    def test_a_round_block_may_rest_one_team_or_the_whole_grade(self):
+        # `bye = "Rockets"` was the only shape this held for a while, so a club
+        # writing down the week its whole grade rested got one team named after
+        # all five of them -- `str()` of a list, slugged.
+        loaded = config_mod.load(self.write(
+            '[[competitions."monday-division-b".rounds]]\n'
+            'number = "1"\nbye = "Rockets"\n'
+            '[[competitions."monday-division-b".rounds]]\n'
+            'number = "6"\nbyes = ["Rockets", "Iguanas"]\n'))
+        one, whole = loaded.competition("monday-division-b").rounds
+        self.assertEqual(one.byes, ("Rockets",))
+        self.assertEqual(whole.byes, ("Rockets", "Iguanas"))
+
+    def test_a_round_block_that_uses_both_spellings_is_refused(self):
+        # Two lists of resting teams in one round is a contradiction to resolve by
+        # asking, not by picking one.
+        with self.assertRaises(config_mod.ConfigError):
+            config_mod.load(self.write(
+                '[[competitions."monday-division-b".rounds]]\n'
+                'number = "1"\nbye = "Rockets"\nbyes = ["Iguanas"]\n'))
+
+    def test_a_round_block_bye_that_is_not_a_team_name_is_refused(self):
+        # `str()` of whatever was written would make a team out of it, and the
+        # team would be a real row on a real ladder.
+        for written in ('bye = [1]', 'bye = true', 'bye = 6'):
+            with self.subTest(written=written):
+                with self.assertRaises(config_mod.ConfigError):
+                    config_mod.load(self.write(
+                        '[[competitions."monday-division-b".rounds]]\n'
+                        f'number = "1"\n{written}\n'))
+
+
 class TestConfigRendering(unittest.TestCase):
     """The first run writes this file, so it has to be valid and reviewable."""
 
@@ -831,6 +1013,39 @@ class TestConfigRendering(unittest.TestCase):
     def test_single_season_mode_does_not_mention_seasons(self):
         text = config_mod.render(self.blank, competitions=[self.comp])
         self.assertNotIn("\n[seasons]", text)
+
+    def test_both_unplayed_conventions_are_named_and_neither_is_chosen(self):
+        # Written commented out for the same reason the team list is: the preset
+        # already has a convention, and overriding it is a deliberate act.
+        text = config_mod.render(self.blank, competitions=[self.comp])
+        for mode in scoring.UNPLAYED_MODES:
+            self.assertIn(mode, text)
+        self.assertRegex(text, r"(?m)^# unplayed = ")
+        self.assertNotRegex(text, r"(?m)^unplayed = ")
+
+    def test_a_chosen_unplayed_convention_is_written_back_live(self):
+        chosen = config_mod.Config(path=Path("config.toml"), exists=True,
+                                   unplayed=scoring.UNPLAYED_ZERO)
+        text = config_mod.render(chosen, competitions=[self.comp])
+        self.assertRegex(text, r'(?m)^unplayed = "zero"')
+
+    def test_the_byes_table_is_written_ready_for_the_association_sheet(self):
+        # A club with a sheet in front of it should find the block already there
+        # with an example in it, rather than having to learn the syntax.
+        text = config_mod.render(self.blank, competitions=[self.comp])
+        self.assertIn(f"[competitions.{self.comp.id}.byes]", text)
+        self.assertIn("= [1, 6]", text)
+        tomllib.loads(text)
+
+    def test_an_inferred_bye_is_written_commented_so_it_is_not_typed_twice(self):
+        # It is already worked out from the cards. Shown so a club can see the
+        # program agrees with its sheet, commented so declaring it is a choice.
+        comp = self.comp.with_rounds({
+            "1": Round(number="1", fixtures=(("iguanas", "aces"),),
+                       byes=("riverside-rockets",))})
+        text = config_mod.render(self.blank, competitions=[comp])
+        self.assertRegex(text, r'(?m)^# "Riverside Rockets" = \["1"\]')
+        self.assertNotRegex(text, r'(?m)^"Riverside Rockets" = ')
 
 
 class TestNoClubSpecificsLeaked(unittest.TestCase):

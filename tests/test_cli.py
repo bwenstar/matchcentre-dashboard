@@ -613,5 +613,175 @@ class TestTheReadmeQuotesWhatThisProgramPrints(unittest.TestCase):
         return competition_id(day.group(1), division.group(1))
 
 
+class TestEveryLinkInTheBuiltSiteOpensWithoutAServer(unittest.TestCase):
+    """The dashboard is documented to open by double-clicking, so it must.
+
+    ``build.py`` finishes by saying "double-click works; no web server needed", and
+    that promise is what makes this tool usable by a club with no hosting. It also
+    makes one class of link silently wrong.
+
+    Over http, a link to ``foo/`` is resolved *by the server* to ``foo/index.html``.
+    Over ``file://`` there is no server, so the browser shows a directory listing
+    instead of a page. Both directions of navigation were written as directory
+    links and so both were broken on the one path the README promises, while
+    working perfectly for anyone testing through a local web server:
+
+    * the front page linked to ``<competition>/``;
+    * every competition page's "All competitions" link pointed at ``../``, and in
+      multi-season mode at a season directory that holds no page at all.
+
+    Every link is resolved against the filesystem rather than pattern-matched, so
+    this also fails on a link to a page that simply is not there. Both site shapes
+    are built, because the nesting differs and the back link differs with it.
+    """
+
+    IGNORED_SCHEMES = ("http://", "https://", "mailto:", "data:", "javascript:")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        cls.sites = {"single": cls.build(root / "single", multi=False),
+                     "multi": cls.build(root / "multi", multi=True)}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @classmethod
+    def build(cls, cwd: Path, *, multi: bool) -> Path:
+        """A whole site, from cards to pages, the way a club builds one."""
+        cwd.mkdir(parents=True)
+        # Two competitions, so the front page has a real choice on it, and in
+        # multi-season mode a second season of one of them, which is what puts a
+        # competition directory one level deeper than the picker.
+        seasons = (("2026-season-2", "Monday", "B2"), ("2026-season-2", "Tuesday", "C"),
+                   ("2026-season-1", "Monday", "B2")) if multi else \
+                  ((None, "Monday", "B2"), (None, "Tuesday", "C"))
+        for season, day, division in seasons:
+            out = cwd / "data" / (f"{season}/{day}-{division}" if season
+                                  else f"{day}-{division}")
+            done = subprocess.run(
+                (sys.executable, str(ROOT / "tools" / "demo.py"), "--day", day,
+                 "--division", division, "--out", str(out)),
+                cwd=cwd, capture_output=True, text=True, timeout=600)
+            assert done.returncode == 0, done.stdout + done.stderr
+        if multi:
+            # Written by hand rather than by a first run: the mode has to be set
+            # before the build that lays out the tree.
+            (cwd / "config.toml").write_text('[build]\nseasons = "multi"\n',
+                                             encoding="utf-8")
+        done = subprocess.run((sys.executable, str(BUILD), "--generated", STAMP),
+                              cwd=cwd, capture_output=True, text=True, timeout=600)
+        assert done.returncode == 0, done.stdout + done.stderr
+        return cwd / "site"
+
+    def links(self, site: Path) -> list[tuple[Path, str]]:
+        """Every navigable target in the built site, with the page it is on.
+
+        Fragment links are the hash router's own and never touch the disk, so they
+        are not links in this sense. ``picker-data.js`` is included because the
+        front page builds its list from that file, so a target written there is as
+        real as one in the markup.
+        """
+        found: list[tuple[Path, str]] = []
+        for page in sorted(site.rglob("*.html")):
+            for target in re.findall(r'(?:href|src)="([^"]*)"', page.read_text(
+                    encoding="utf-8")):
+                found.append((page, target))
+        for carrier in sorted(site.rglob("picker-data.js")):
+            for target in re.findall(r'"href":\s*"([^"]*)"', carrier.read_text(
+                    encoding="utf-8")):
+                found.append((carrier, target))
+        return found
+
+    def resolved(self, site: Path):
+        """Each link, paired with the path a browser would actually open."""
+        for page, target in self.links(site):
+            bare = target.split("#")[0].split("?")[0]
+            if not bare or bare.startswith("#") \
+                    or bare.startswith(self.IGNORED_SCHEMES):
+                continue
+            yield page, target, (page.parent / bare).resolve()
+
+    def test_every_link_lands_on_a_file_that_exists(self):
+        for mode, site in self.sites.items():
+            for page, target, landing in self.resolved(site):
+                with self.subTest(mode=mode, page=str(page.relative_to(site)),
+                                  href=target):
+                    self.assertTrue(
+                        landing.exists(),
+                        f"{target!r} on {page.relative_to(site)} points at "
+                        f"nothing: {landing}")
+                    self.assertTrue(
+                        landing.is_file(),
+                        f"{target!r} on {page.relative_to(site)} points at a "
+                        f"directory, so double-clicking the dashboard shows a "
+                        f"file listing rather than the page. Name the file: "
+                        f"{landing.name}/index.html")
+
+    def test_a_template_that_lost_its_home_link_stops_the_run(self):
+        """Because the alternative is a dashboard with no way back to the front.
+
+        The link is aimed by rewriting one known string in the template. If an edit
+        to ``index.html`` ever changes that string, the substitution would silently
+        do nothing and every nested dashboard would ship the wrong depth, so the
+        rewrite fails closed instead.
+        """
+        deep = next(iter(sorted(self.sites["multi"].rglob("season.json"))))
+        season = json.loads(deep.read_text(encoding="utf-8"))
+        self.assertEqual(season["meta"]["seasons_mode"], "multi",
+                         "this test needs a season that nests, to exercise the "
+                         "rewrite at all")
+        with tempfile.TemporaryDirectory() as tmp:
+            web, out = Path(tmp) / "web", Path(tmp) / "out"
+            web.mkdir()
+            for name in site.PAGE_ASSETS:
+                text = (site.WEB / name).read_text(encoding="utf-8")
+                if name == "index.html":
+                    text = text.replace(site.HOME_LINK, 'class="home-link"')
+                (web / name).write_text(text, encoding="utf-8")
+            original = site.WEB
+            try:
+                site.WEB = web
+                with self.assertRaises(site.SiteError) as caught:
+                    site.write_competition(out, season)
+            finally:
+                site.WEB = original
+        self.assertIn("home-link", str(caught.exception),
+                      f"the refusal does not say which link is missing: "
+                      f"{caught.exception}")
+
+    def test_a_single_season_dashboard_is_left_byte_for_byte_as_shipped(self):
+        # The rewrite is for the nested case only. A single-season site is served
+        # the template unchanged, so an edit to it needs no build to take effect.
+        for page in sorted(self.sites["single"].rglob("*/index.html")):
+            with self.subTest(page=str(page.relative_to(self.sites["single"]))):
+                self.assertEqual(page.read_bytes(),
+                                 (site.WEB / "index.html").read_bytes())
+
+    def test_the_front_page_reaches_every_competitions_own_page(self):
+        for mode, site in self.sites.items():
+            pages = {p.resolve() for p in site.rglob("*/index.html")}
+            reached = {landing for page, _, landing in self.resolved(site)
+                       if page.name in ("index.html", "picker-data.js")
+                       and page.parent == site and landing in pages}
+            with self.subTest(mode=mode):
+                self.assertEqual(reached, pages,
+                                 f"the front page does not reach "
+                                 f"{sorted(str(p.relative_to(site)) for p in pages - reached)}")
+
+    def test_every_competition_page_has_a_way_back_to_the_front_page(self):
+        for mode, site in self.sites.items():
+            front = (site / "index.html").resolve()
+            resolved = list(self.resolved(site))
+            for page in sorted(site.rglob("*/index.html")):
+                with self.subTest(mode=mode, page=str(page.relative_to(site))):
+                    back = [target for source, target, landing in resolved
+                            if source == page and landing == front]
+                    self.assertTrue(back, f"{page.relative_to(site)} has no link "
+                                          f"that lands on the front page")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
