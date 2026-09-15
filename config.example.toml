@@ -43,8 +43,9 @@ strip_team_prefix = "Willowbank"
 #           site/<competition>/. No season picker.
 # "multi"   the first folder level under data/ is the season, so
 #           data/2026-winter/round-3/card.pdf is season "2026-winter".
-#           Output goes to site/<season>/<competition>/, the site gains a
-#           season picker, and player career totals span seasons.
+#           Output goes to site/<season>/<competition>/ and the site gains a
+#           season picker. Each season keeps its own ladder, teams and player
+#           pages; nothing is totalled across seasons.
 # Switching to "multi" changes competition ids: they gain the season key as a
 # prefix, so any [competitions.*] section you have written needs its name and
 # its season_key updated to match.
@@ -94,18 +95,18 @@ sets = "first-to-6"
 #   average   the team is credited its own average over the matches it did play,
 #             and the round counts as a match played. Common where the ladder is
 #             ordered on average rather than on total points.
-#   zero      the round scores nothing and is not counted.
-# Each scoring preset above already has an opinion — games-bonus averages, the
-# other three do not — and it is only an opinion: two associations running the
-# same points scheme differ on this line all the time. Setting it here overrides
-# the preset without replacing it. Leave it out and the preset decides.
+#   zero      the round scores nothing and is not counted. This is the default.
+# Every preset above defaults to zero, and that is only a default: two
+# associations running the same points scheme differ on this line all the time.
+# Setting it here overrides the preset without replacing it.
 #
 # This changes the points column of every team that has had a week off, and it
 # never changes the ladder order: crediting a team its own average cannot move
 # its average, and the average is what the ladder is sorted on. So if your totals
-# are close to your association's sheet but not equal, and the teams are in the
-# right order, this is the line to try.
-# unplayed = "zero"
+# are lower than your association's sheet but the teams are in the right order,
+# and the teams that differ are the ones that have had a bye or a washout, this is
+# the line to try.
+# unplayed = "average"
 
 # format — the shape of a match: how many sets, and which are doubles.
 # This *is* read off your cards, from the marker column beside each set row, so

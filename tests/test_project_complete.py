@@ -252,6 +252,36 @@ class TestAFreshCheckoutIsEmptyOfOnesOwnData(unittest.TestCase):
                                     f"{keeper} is gitignored, so a fresh clone "
                                     f"would have no data/ at all")
 
+    def test_git_ignores_the_config_a_run_writes_but_not_the_example(self):
+        # config.toml is written by the first run and then edited by hand, and what
+        # a club edits into it is [captains], [player_names] and [aliases] -- three
+        # tables of real people's names. Same exposure as data/, same rule, same
+        # one-line opt-out. config.example.toml is the opposite: every name in it is
+        # invented, and it is the only documentation of the settings, so it ships.
+        if not under_git():
+            self.skipTest("not inside a git checkout")
+        for path, ignored in (("config.toml", True), ("config.example.toml", False)):
+            with self.subTest(path=path):
+                result = subprocess.run(("git", "check-ignore", "-q", path),
+                                        cwd=ROOT, capture_output=True)
+                if ignored:
+                    self.assertEqual(result.returncode, 0,
+                                     f"{path} is not gitignored, so a club would "
+                                     f"publish its members' names on the next "
+                                     f"`git add .`")
+                else:
+                    self.assertNotEqual(result.returncode, 0,
+                                        f"{path} is gitignored, so a fresh clone "
+                                        f"would document no settings at all")
+
+    def test_no_config_of_anybody_elses_ships_with_the_project(self):
+        # A config.toml left in the tree is one machine's state, and it would
+        # arrive in a club's copy naming somebody else's club, teams and captains.
+        # The README's whole opening is that the first run writes this file.
+        self.assertFalse((ROOT / "config.toml").exists(),
+                         "config.toml is in the project tree; it is a build "
+                         "artefact and the deliverable must not carry one")
+
     def test_no_pdf_is_tracked_anywhere_in_the_repository(self):
         tracked = [line for line in git("ls-files").splitlines()
                    if line.lower().endswith(".pdf")]

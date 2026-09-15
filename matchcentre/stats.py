@@ -4,9 +4,10 @@ Every function here is a pure function of ``list[Match]`` plus the competition, 
 the dashboard's numbers can always be regenerated from the cards alone and nothing
 cached in ``season.json`` can drift away from them.
 
-Four rules drive the shape of this module. The first two were already true of the
-predecessor and are easy to break by accident; the last two are new, and each
-closes a hole that produced wrong numbers.
+Five rules drive the shape of this module. Two of them — averaging and
+recomputation — were already true of the predecessor and are easy to break by
+accident; the other three are new, and each closes a hole that produced wrong
+numbers.
 
 *Averaging.* When ``rules.average_unplayed`` is set, an unscored match (a bye, a
 washout) is credited the team's own average over the matches it actually played.
@@ -17,6 +18,13 @@ which part of a total is real. When the setting is off, an unscored match leaves
 the numerator and the divisor alike untouched — it is not a zero, it simply is not
 there. :meth:`~matchcentre.model.Match.points_for` returns ``None`` for both
 cases; this module is the only place that knows which of the two applies.
+
+*Abandonment.* A match that did not happen contributes nothing to any count here
+— no games, no sets, no appearance, no slot record — and
+:attr:`~matchcentre.model.Match.counts_as_played` is the single test for it. Part
+of a cancelled night's card is often filled in before play stops, and counting
+those games would pay a team twice: once in the games column, once in whatever the
+averaging rule above gives it for a round nobody played.
 
 *Recomputation.* Ladder history is the ladder recomputed from scratch over the
 matches up to each round, never a running total patched round by round. Because
@@ -514,7 +522,7 @@ class _Tally:
 def _tally(matches: Sequence[Match], team: str) -> _Tally:
     wins = games_won = games_lost = sets_won = sets_lost = 0
     for match in matches:
-        if not match.involves(team):
+        if not match.involves(team) or not match.counts_as_played:
             continue
         games_won += match.games_for(team)
         games_lost += match.games_against(team)
@@ -700,7 +708,8 @@ def _outcome_letter(outcome: Outcome) -> str:
 
 
 def _side_record(played: Sequence[Match], team: str, side: str) -> SideRecord:
-    subset = [m for m in played if m.side_of(team) == side]
+    subset = [m for m in played
+              if m.side_of(team) == side and m.counts_as_played]
     outcomes = [m.outcome_for(team) for m in subset if m.decided]
     return SideRecord(
         played=len(outcomes),
@@ -722,6 +731,8 @@ def _team_by_slot(played: Sequence[Match], team: str,
     """
     tally = {slot.key: SlotRecord() for slot in fmt.slots}
     for match in played:
+        if not match.counts_as_played:
+            continue
         side = match.side_of(team)
         for result in match.sets:
             key = result.slot.key
@@ -817,6 +828,12 @@ def player_stats(matches: Sequence[Match],
         # instead would leave an unused player showing no rating at all.
         for slug, rating in match.ratings.items():
             acc[slug].ratings[match.round] = (rating.singles, rating.doubles)
+        if not match.counts_as_played:
+            # A cancelled night leaves no appearances behind, whatever reached the
+            # card before play stopped: a rubber nobody finished playing is not a
+            # rubber anybody played. The ratings above are kept, because those are
+            # the card printing its squads rather than anyone taking a court.
+            continue
         for result in match.sets:
             sides = {"home": result.home_players, "away": result.away_players}
             for side, players in sides.items():
@@ -866,7 +883,11 @@ def player_stats(matches: Sequence[Match],
         registered = index.get(slug)
         team_slug = registered.team if registered else None
         team = teams.get(team_slug) if team_slug else None
-        available = (sum(1 for m in ordered if m.involves(team_slug))
+        # Matches the player could have been picked for: a cancelled round is not
+        # one, so "played 2 of 3" counts the same three nights the association's
+        # sheet counts.
+        available = (sum(1 for m in ordered
+                         if m.involves(team_slug) and m.counts_as_played)
                      if team_slug else len(entry.match_ids))
         rating_history = [
             RatingPoint(round=number, singles=values[0], doubles=values[1])

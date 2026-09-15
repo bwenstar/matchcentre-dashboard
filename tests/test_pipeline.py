@@ -299,6 +299,154 @@ class TestValidationPassesOnACleanSeason(SeasonCase):
                 self.assertTrue(issue.message.strip())
 
 
+class TestACardThatPrintsVSInsteadOfAResult(SeasonCase):
+    """The card holds no result. It is still read, still scored, still counted.
+
+    Match Centre prints ``VS`` between the team names for a fixture it has no
+    result for, and 3 of 22 real exported cards did. The result is on those cards
+    anyway — in the set rows, which are what this program scores from — so all
+    three were counted, and the run nonetheless reported "result verb 'VS' is not
+    one this program recognises". That is a true sentence about a check and a
+    misleading one about a card: a club reading it looks for a match it believes
+    went missing.
+
+    Three cards are added here for the three ways a card can leave the verb check
+    unrunnable, because the value is in the *separation*: a fixture with no result
+    printed, a word this program genuinely does not know, and a match nobody
+    played, whose cancellation is already reported once and must not be reported
+    twice.
+    """
+
+    EXTRA = (
+        # round, date, home, away, per-set games, printed verb, cancelled
+        ("4", "2026-09-08", "riverside-rockets", "lakeside-spinners",
+         ((6, 2), (6, 3), (4, 6), (6, 1)), "VS", False),
+        ("5", "2026-09-15", "hilltop-aces", "parkview-wanderers",
+         ((6, 4), (6, 2), (3, 6), (6, 3)), "TROUNCES", False),
+        ("6", "2026-09-22", "lakeside-spinners", "parkview-wanderers",
+         ((0, 0), (0, 0), (0, 0), (0, 0)), "VS", True),
+        # The away verb exactly as the real exports print it, punctuation and all.
+        ("7", "2026-09-29", "hilltop-aces", "lakeside-spinners",
+         ((2, 6), (3, 6), (6, 4), (1, 6)), "DEF. BY", False),
+    )
+
+    @classmethod
+    def extra_cards(cls):
+        cls.paths = {}
+        for index, (rnd, date, home, away, scores, verb, cancelled) in enumerate(
+                cls.EXTRA, start=1):
+            home_name, home_players = TEAMS[home]
+            away_name, away_players = TEAMS[away]
+            folder = cls.data / f"Round{rnd}"
+            folder.mkdir(parents=True, exist_ok=True)
+            spec = cw.CardSpec(
+                date=date, round_label=rnd, division="B",
+                court=f"1{index}", match_id=f"300{index:04d}",
+                home_name=home_name, away_name=away_name,
+                rows=rows_for(scores, home_players, away_players),
+                verb=verb, cancelled=cancelled,
+                # A real card printing VS carries no Match Winner tick either: the
+                # two absences were measured together on every one of them.
+                winner=cw.NO_TICK if verb == "VS" else cw.AUTO,
+                home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                               captain=(i == 0))
+                                  for i, n in enumerate(home_players)),
+                away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                               captain=(i == 0))
+                                  for i, n in enumerate(away_players)))
+            cls.paths[rnd] = cw.write_card_file(folder / f"round{rnd}.pdf", spec)
+
+    def match_in(self, round_label):
+        found = [m for m in self.matches if m.round == round_label]
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def verb_issues_for(self, round_label):
+        """Every finding whose rule is about the verb, for one round's card."""
+        path = str(self.paths[round_label])
+        return [i for i in self.report.issues
+                if i.rule.startswith("verb") and path in i.subject]
+
+    # --- the card is scored ------------------------------------------------
+
+    def test_the_result_is_worked_out_from_the_set_rows(self):
+        # Games 22-12, sets 3-1: a home win, and nothing about the banner changes
+        # that. This is the question a club actually asks about these cards.
+        match = self.match_in("4")
+        self.assertTrue(match.decided)
+        self.assertEqual(match.winner, "home")
+        self.assertEqual(match.home_games, 22)
+        self.assertEqual(match.away_games, 12)
+
+    def test_the_points_are_paid_and_land_on_the_ladder(self):
+        # win 4 + a tenth per game won: 4 + 2.2 = 6.2 home, 2 + 1.2 = 3.2 away.
+        match = self.match_in("4")
+        self.assertAlmostEqual(match.points_for("riverside-rockets"), 6.2, places=6)
+        self.assertAlmostEqual(match.points_for("lakeside-spinners"), 3.2, places=6)
+        ledger = stats.points_ledger(self.matches, "riverside-rockets")
+        self.assertAlmostEqual(ledger.total,
+                               EXPECTED_POINTS["riverside-rockets"] + 6.2,
+                               places=6)
+
+    def test_the_card_is_counted_not_rejected(self):
+        self.assertEqual(self.rejected, [])
+        self.assertEqual(self.season["meta"]["cards_scored"],
+                         len(FIXTURES) + len(self.EXTRA))
+
+    # --- and what it cost is named, in the right words ---------------------
+
+    def test_the_finding_says_the_card_states_no_result_not_that_it_is_unknown(self):
+        issue, = self.verb_issues_for("4")
+        self.assertEqual(issue.rule, "verb-absent")
+        self.assertEqual(issue.severity, validate.WARNING)
+        self.assertIn("VS", issue.message)
+
+    def test_the_finding_says_the_sets_were_read_and_scored_anyway(self):
+        # Without this sentence the warning is still misleading, however it is
+        # named: the reader has to be told the card counted.
+        issue, = self.verb_issues_for("4")
+        lowered = issue.message.casefold()
+        self.assertIn("still", lowered)
+        self.assertIn("scored", lowered)
+        self.assertIn("cross-check", lowered)
+
+    def test_a_word_this_program_does_not_know_is_still_reported_as_unknown(self):
+        # The other half of the separation. Collapsing the two findings into one
+        # kind message would hide a verb worth adding to the vocabulary.
+        issue, = self.verb_issues_for("5")
+        self.assertEqual(issue.rule, "verb-unknown")
+        self.assertIn("TROUNCES", issue.message)
+
+    def test_a_cancelled_match_is_reported_once_not_twice(self):
+        # It has no result for a verb to state, and `no-result` has already said
+        # the match was called off. A list where every entry is two entries is a
+        # list a club learns to skim.
+        self.assertEqual(self.verb_issues_for("6"), [])
+        cancelled = [i for i in self.report.issues if i.rule == "no-result"
+                     and str(self.paths["6"]) in i.detail]
+        self.assertEqual(len(cancelled), 1, "the cancellation went unreported")
+
+    def test_the_verbs_a_real_card_prints_are_all_understood(self):
+        # Ten cards, and only the two that were meant to be reported are. That
+        # covers DEFEATS, LOSES TO and DRAWS WITH on the ordinary cards, and on
+        # round 7 the away verb the real exports print, "DEF. BY" -- which is why
+        # the vocabulary is matched on a key with the punctuation taken out, and
+        # matched exactly rather than by prefix, since "DEF. BY" begins with the
+        # home verb "DEF". Read by prefix it would say the loser won.
+        self.assertEqual(sorted(i.rule for i in self.report.issues
+                                if i.rule.startswith("verb")),
+                         ["verb-absent", "verb-unknown"])
+        self.assertEqual(self.match_in("7").winner, "away")
+
+    def test_no_verb_finding_is_an_error(self):
+        # Severity is a claim about the numbers, and the numbers are fine: the
+        # sets are on the card and were added up. A missing confirmation is a
+        # warning by definition.
+        for issue in self.report.errors:
+            with self.subTest(rule=issue.rule):
+                self.assertFalse(issue.rule.startswith("verb"), issue.message)
+
+
 class TestTheSeasonDocumentIsCompleteAndStable(SeasonCase):
 
     def test_it_serialises_to_json_without_nan_or_infinity(self):
@@ -380,6 +528,335 @@ class TestADeclaredTeamListChangesWhatMayBeInferred(SeasonCase):
     def test_still_no_bye_because_no_round_is_short(self):
         self.assertEqual([m for m in self.matches
                           if m.status is MatchStatus.BYE], [])
+
+
+class TestAWashoutStoppedHalfwayLeavesNothingBehind(SeasonCase):
+    """Rain at 8pm: two rubbers on the card, the night called off, nothing counts.
+
+    Measured on real exports. An association's sheet marks such a night ``W`` and
+    adds nothing to either team -- not a game, not a match played -- and the tool
+    counted the games that had reached the card before the rain. Two teams' games
+    columns were wrong by twenty-odd games each, which in this preset is a tiebreak,
+    and both teams were *also* paid for the round by the averaging rule. Paid twice
+    and counted once.
+
+    So the whole of round four here must be invisible to every aggregate, while
+    remaining perfectly visible as a match on the dashboard and as a finding in the
+    report. The expectations are the clean three-round season's, unchanged: the
+    point is that adding this card changes nothing.
+    """
+
+    ROUND = "4"
+    HOME, AWAY = "riverside-rockets", "hilltop-aces"
+    # Two rubbers finished before the rain, two never started. A real washed-out
+    # card looks exactly like this.
+    SCORES = ((6, 2), (6, 1), (0, 0), (0, 0))
+
+    @classmethod
+    def extra_cards(cls):
+        home_name, home_players = TEAMS[cls.HOME]
+        away_name, away_players = TEAMS[cls.AWAY]
+        folder = cls.data / f"Round{cls.ROUND}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cls.washout = cw.write_card_file(folder / "washout.pdf", cw.CardSpec(
+            date="2026-09-08", round_label=cls.ROUND, division="B",
+            court="09", match_id="4000001",
+            home_name=home_name, away_name=away_name,
+            rows=rows_for(cls.SCORES, home_players, away_players),
+            cancelled=True, verb="VS", winner=cw.NO_TICK,
+            home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(home_players)),
+            away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(away_players))))
+
+    def washed_out(self):
+        found = [m for m in self.matches if m.round == self.ROUND]
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def on_court(self):
+        """The slugs `rows_for` actually puts on court: the first two per side."""
+        return [name.lower().replace(" ", "-")
+                for team in (self.HOME, self.AWAY)
+                for name in TEAMS[team][1][:2]]
+
+    # --- the card is read, and says what it says ---------------------------
+
+    def test_the_card_is_read_and_the_games_on_it_are_transcribed(self):
+        # Nothing is being hidden at the parser: the card really does print 12-3,
+        # and refusing to read it would lose the evidence that it was played at all.
+        match = self.washed_out()
+        self.assertIs(match.status, MatchStatus.CANCELLED)
+        self.assertEqual((match.home_games, match.away_games), (12, 3))
+        self.assertFalse(match.counts_as_played)
+
+    def test_the_cancellation_is_reported_rather_than_absorbed(self):
+        named = [i for i in self.report.issues
+                 if i.rule == "no-result" and str(self.washout) in i.detail]
+        self.assertEqual(len(named), 1)
+
+    # --- and counts for nothing anywhere -----------------------------------
+
+    def test_the_ladder_is_the_one_the_three_clean_rounds_produced(self):
+        self.assertEqual(stats.ladder(self.matches, self.competition),
+                         EXPECTED_LADDER)
+
+    def test_no_team_gains_a_point(self):
+        for slug, expected in EXPECTED_POINTS.items():
+            with self.subTest(team=slug):
+                self.assertAlmostEqual(
+                    stats.points_ledger(self.matches, slug).total, expected,
+                    places=6)
+
+    def test_no_team_gains_a_game(self):
+        # The failure that mattered most: games difference is this preset's
+        # tiebreak, so twenty-odd phantom games reorder a ladder silently.
+        rows = {t["slug"]: t for t in self.season["teams"]}
+        for slug, expected in EXPECTED_GAMES_FOR.items():
+            with self.subTest(team=slug):
+                self.assertEqual(rows[slug]["games_won"], expected)
+
+    def test_no_team_gains_a_match_played_or_a_set(self):
+        rows = {t["slug"]: t for t in self.season["teams"]}
+        for slug in (self.HOME, self.AWAY):
+            with self.subTest(team=slug):
+                self.assertEqual(rows[slug]["played"], 3)
+                self.assertEqual(rows[slug]["counted"], 3)
+        # Rounds 1, 2, 3: sets 4-0, 3-1, 4-0. Not the two the rain left behind.
+        self.assertEqual(rows[self.HOME]["sets_won"], 11)
+
+    def test_nobody_who_was_on_the_card_gains_an_appearance(self):
+        # A rubber nobody finished playing is not a rubber anybody played, and a
+        # player's own page is where a club member notices the difference first.
+        players = {p["slug"]: p for p in self.season["players"]}
+        for slug in self.on_court():
+            with self.subTest(player=slug):
+                self.assertEqual(players[slug]["matches"], 3)
+                # Three rubbers a night -- both doubles and one singles -- over
+                # three nights. The washout's first two rubbers are not a fourth.
+                self.assertEqual(players[slug]["sets_played"], 9)
+
+    def test_a_round_nobody_played_is_not_a_round_anybody_was_available_for(self):
+        # "played 3 of 4" would read as a player who missed a week, when the week
+        # is the one that did not happen -- and the dashboard's "players to check"
+        # list is built from exactly that ratio.
+        players = {p["slug"]: p for p in self.season["players"]}
+        for slug in self.on_court():
+            with self.subTest(player=slug):
+                self.assertEqual(players[slug]["available"], 3)
+
+    def test_the_side_records_do_not_count_it_either(self):
+        # home/away splits are their own aggregation, so they are their own bug.
+        # Every rockets fixture here is at home, washout included.
+        home = {t["slug"]: t for t in self.season["teams"]}[self.HOME]["home"]
+        self.assertEqual(home["played"], 3)
+        self.assertEqual(home["games_won"], EXPECTED_GAMES_FOR[self.HOME])
+
+    def test_the_slot_records_do_not_count_it_either(self):
+        # The per-slot table is a third aggregation over the same matches, and the
+        # washout's two finished rubbers are d1 and s1 -- so a slot table that
+        # counted them would show two slots played four times and two played three.
+        by_slot = {t["slug"]: t
+                   for t in self.season["teams"]}[self.HOME]["by_slot"]
+        self.assertEqual(sorted(by_slot), ["d1", "d2", "s1", "s2"])
+        for key, record in by_slot.items():
+            with self.subTest(slot=key):
+                self.assertEqual(record["won"] + record["lost"], 3)
+        self.assertEqual(sum(r["games_won"] for r in by_slot.values()),
+                         EXPECTED_GAMES_FOR[self.HOME])
+
+    # --- while still being on the dashboard --------------------------------
+
+    def test_the_match_is_still_in_the_document_so_the_round_is_visible(self):
+        rounds = {r["number"]: r for r in self.season["rounds"]}
+        self.assertIn(self.ROUND, rounds)
+        exported = [m for m in self.season["matches"] if m["round"] == self.ROUND]
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["status"], "cancelled")
+
+
+class TestABlankCardInventsNobody(SeasonCase):
+    """A fixture called off before its players were entered, which is a real export.
+
+    Every name cell prints Match Centre's own ``Unspecified player``, and read as a
+    name that placeholder became a player: one appearance, eight rubbers -- more than
+    any real member of the club had -- no team, and itself as its only opponent. It
+    reached the dashboard's list of players worth checking, where a club would look
+    for a person who does not exist. Nothing in the report mentioned it, because a
+    cancelled card skips the roster checks that would have.
+
+    So: no phantom, and one line in the report per card saying how much of it was
+    never filled in.
+    """
+
+    ROUND = "4"
+    HOME, AWAY = "lakeside-spinners", "parkview-wanderers"
+    PLACEHOLDER = "Unspecified player"
+
+    @classmethod
+    def extra_cards(cls):
+        blank = tuple(
+            cw.SetRow(home_games=0, away_games=0, doubles=index in (0, 3),
+                      home_players=(cls.PLACEHOLDER,) * (2 if index in (0, 3) else 1),
+                      away_players=(cls.PLACEHOLDER,) * (2 if index in (0, 3) else 1))
+            for index in range(4))
+        folder = cls.data / f"Round{cls.ROUND}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cls.blank_card = cw.write_card_file(folder / "blank.pdf", cw.CardSpec(
+            date="2026-09-08", round_label=cls.ROUND, division="B",
+            court="09", match_id="4100001",
+            home_name=TEAMS[cls.HOME][0], away_name=TEAMS[cls.AWAY][0],
+            rows=blank, cancelled=True, verb="VS", winner=cw.NO_TICK,
+            omit_totals=True,
+            # The roster block is empty on such a card too, so nothing here
+            # registers the placeholder onto a team either.
+            home_roster=(cw.RosterRow(name=cls.PLACEHOLDER),),
+            away_roster=(cw.RosterRow(name=cls.PLACEHOLDER),)))
+
+    def unrecorded(self):
+        return [i for i in self.report.issues
+                if i.rule == "players-unrecorded"]
+
+    # --- nobody was invented -----------------------------------------------
+
+    def test_no_player_is_registered_from_the_placeholder(self):
+        slugs = {p["slug"] for p in self.season["players"]}
+        self.assertEqual(len(slugs), 12)
+        for slug in slugs:
+            with self.subTest(player=slug):
+                self.assertNotIn("unspecified", slug)
+
+    def test_no_display_name_is_invented_for_it_either(self):
+        # player_names is where a slug becomes a label, and the label would have
+        # been "Unspecified Player" -- title-cased, which is how it reached the
+        # dashboard looking like a person.
+        for slug, name in self.season["player_names"].items():
+            with self.subTest(player=slug):
+                self.assertNotIn("unspecified", name.casefold())
+
+    def test_the_match_has_no_players_on_either_side(self):
+        match, = [m for m in self.matches if m.round == self.ROUND]
+        self.assertEqual(match.players_on("home"), ())
+        self.assertEqual(match.players_on("away"), ())
+        self.assertEqual(match.home_roster, ())
+
+    def test_no_team_gains_a_squad_member(self):
+        rows = {t["slug"]: t for t in self.season["teams"]}
+        for slug in (self.HOME, self.AWAY):
+            with self.subTest(team=slug):
+                self.assertEqual(len(rows[slug]["players"]), 3)
+
+    # --- and the loss is reported ------------------------------------------
+
+    def test_one_finding_per_card_says_how_much_was_never_filled_in(self):
+        issue, = self.unrecorded()
+        self.assertEqual(issue.severity, validate.WARNING)
+        self.assertIn(str(self.blank_card), issue.subject)
+        self.assertIn("12 name cell", issue.message)
+        self.assertIn("4 of 4 rubber", issue.message)
+        self.assertIn("Unspecified player", issue.message)
+
+    def test_it_says_the_match_was_called_off_so_nothing_needs_doing(self):
+        # The distinction that decides whether a club acts: a card called off
+        # before the names went in needs nothing, a played card printing the
+        # placeholder needs re-exporting.
+        issue, = self.unrecorded()
+        self.assertIn("called off", issue.message)
+
+    def test_the_clean_cards_produce_no_such_finding(self):
+        # Six cards with real names on them. Without this the check could fire on
+        # everything and still pass above.
+        for issue in self.unrecorded():
+            with self.subTest(subject=issue.subject):
+                self.assertIn(str(self.blank_card), issue.subject)
+
+    def test_the_card_is_still_read_and_counted_as_a_card(self):
+        self.assertEqual(self.rejected, [])
+        self.assertEqual(self.season["meta"]["cards_scored"], len(FIXTURES) + 1)
+
+    def test_the_ladder_is_untouched_by_it(self):
+        self.assertEqual(stats.ladder(self.matches, self.competition),
+                         EXPECTED_LADDER)
+
+
+class TestAPlayedCardMissingOneRowsNamesSaysWhatToDo(SeasonCase):
+    """The version a club has to act on: the match was played, a rubber has no names.
+
+    Those games are real and are counted -- the scoreline is evidence, and refusing
+    it would lose a night's tennis -- but there is nobody to credit them to, so the
+    two players who did play that rubber have a week missing from their records. The
+    fix is upstream, in Match Centre, and the report has to say so differently from
+    the way it describes a card called off before anybody was entered.
+    """
+
+    ROUND = "4"
+    HOME, AWAY = "riverside-rockets", "parkview-wanderers"
+    PLACEHOLDER = "Unspecified player"
+
+    @classmethod
+    def extra_cards(cls):
+        home_players, away_players = TEAMS[cls.HOME][1], TEAMS[cls.AWAY][1]
+        scores = ((6, 2), (6, 3), (6, 1), (6, 4))
+        rows = []
+        for index, (home, away) in enumerate(scores):
+            doubles = index in (0, 3)
+            if index == 2:                       # s2: played, nobody named
+                home_names = away_names = (cls.PLACEHOLDER,)
+            elif doubles:
+                home_names, away_names = home_players[:2], away_players[:2]
+            else:
+                home_names, away_names = home_players[:1], away_players[:1]
+            rows.append(cw.SetRow(home_games=home, away_games=away,
+                                  doubles=doubles, home_players=home_names,
+                                  away_players=away_names))
+        folder = cls.data / f"Round{cls.ROUND}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cls.thin_card = cw.write_card_file(folder / "thin.pdf", cw.CardSpec(
+            date="2026-09-08", round_label=cls.ROUND, division="B",
+            court="09", match_id="4200001",
+            home_name=TEAMS[cls.HOME][0], away_name=TEAMS[cls.AWAY][0],
+            rows=tuple(rows),
+            home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(home_players)),
+            away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(away_players))))
+
+    def test_the_match_is_played_and_its_games_all_count(self):
+        match, = [m for m in self.matches if m.round == self.ROUND]
+        self.assertTrue(match.counts_as_played)
+        self.assertTrue(match.decided)
+        self.assertEqual(match.home_games, 24)      # the nameless rubber included
+
+    def test_the_nameless_rubber_has_its_score_and_no_players(self):
+        match, = [m for m in self.matches if m.round == self.ROUND]
+        nameless = match.sets[2]
+        self.assertEqual((nameless.home_games, nameless.away_games), (6, 1))
+        self.assertEqual(nameless.home_players, ())
+        self.assertEqual(nameless.away_players, ())
+
+    def test_the_finding_says_the_games_have_nobody_to_credit_them_to(self):
+        issue, = [i for i in self.report.issues
+                  if i.rule == "players-unrecorded"]
+        self.assertEqual(issue.severity, validate.WARNING)
+        self.assertIn(str(self.thin_card), issue.subject)
+        self.assertIn("2 name cell", issue.message)
+        self.assertIn("nobody to credit", issue.message)
+        self.assertNotIn("called off", issue.message)
+
+    def test_it_names_the_rubber_so_the_card_can_be_compared_against_it(self):
+        issue, = [i for i in self.report.issues
+                  if i.rule == "players-unrecorded"]
+        self.assertIn("3", issue.detail)            # row three of four
+
+    def test_no_phantom_reaches_the_players_list(self):
+        slugs = {p["slug"] for p in self.season["players"]}
+        for slug in slugs:
+            with self.subTest(player=slug):
+                self.assertNotIn("unspecified", slug)
 
 
 # --- one player, two spellings ------------------------------------------------
@@ -740,6 +1217,10 @@ class TestAStatedByeCoversWhatTheCardsCannotShow(ByeSeasonCase):
     STATED_BYES = {"SUNDOWN LARKS": ("4",), "TOLLGATE MOTHS": ("4",),
                    "VERGE NEWTS": ("4",)}
     ROUNDS_TOTAL = 4
+    # The convention under which a bye is worth anything at all, which is the only
+    # one where "paid for resting, not paid for a week nobody played" is a
+    # distinction to be drawn.
+    UNPLAYED = "average"
 
     def test_the_week_nobody_played_is_a_round_of_its_own(self):
         self.assertIn("4", self.competition.rounds)
@@ -779,6 +1260,9 @@ class TestAStatedByeCarriesRoundsInferenceWontDecide(ByeSeasonCase):
 
     EXTRA_TEAMS = ("WOLDS PIPITS", "YARROW SHRIKES")
     STATED_BYES = {"VERGE NEWTS": ("1",), "TOLLGATE MOTHS": ("2",)}
+    # As above: a stated bye and an unexplained gap only score differently where a
+    # bye scores at all.
+    UNPLAYED = "average"
 
     def test_all_five_teams_are_on_the_ladder_though_two_have_no_card(self):
         self.assertEqual(len(self.competition.teams), 5)

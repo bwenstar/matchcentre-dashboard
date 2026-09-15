@@ -251,7 +251,7 @@ The report starts with the rules it used:
 == rules in force ============================================================
   scoring      games-bonus             win 4, draw 3, loss 2, 0.1 per game; decided on games then sets
   sets         first-to-6              first to 6
-  unplayed     average                 a bye or a washout is credited the team's own average, and counts as a match played
+  unplayed     zero                    a bye or a washout scores nothing, and is not counted as a match played
   format       read from each card     the row bands and marker column of every card
 ```
 
@@ -285,17 +285,25 @@ sanity-check it against the one your association publishes:
   teams        6 (derived)
   rounds       5 played; season length not declared, so no percentage is shown
   draw         cards (card)
-  ladder       complete: every team has played the same number
+  ladder       in progress: teams have played unequal numbers of matches
 
     #  team                  P  W  L  D     pts    avg      games
     1  Brindle Wombats       5  4  1  0    27.0   5.40    90-77
     2  Brindle Bunyips       5  3  2  0    26.5   5.30   105-72
     3  Brindle Quolls        5  3  2  0    25.5   5.10    95-88
-    4  Brindle Rosellas      4  2  2  0    23.3   4.65    66-73
-    5  Brindle Magpies       4  1  3  0    19.8   3.95    58-69
+    4  Brindle Rosellas      4  2  2  0    18.6   4.65    66-73
+    5  Brindle Magpies       4  1  3  0    15.8   3.95    58-69
     6  Brindle Kookaburras   5  1  4  0    19.4   3.88    74-109
-  problems     0 error(s), 5 warning(s) -- see below
+  problems     0 error(s), 6 warning(s) -- see below
 ```
+
+Two teams show `4` in the `P` column and the rest show `5`, because the demo's
+round 5 includes a match called off — which is what the `in progress` note is
+saying. That is the `unplayed = zero` line above doing its job: a round nobody
+played adds nothing to either team, so until that match is rescheduled and its
+card copied in, the ladder's order is not settled. `avg` is the column to compare
+in the meantime; it is points per match counted, so it is fair across an unequal
+`P`.
 
 Then a review list of everything it worked out rather than being told, each with
 the exact lines to paste into `config.toml` if you want to confirm it. Then any
@@ -429,6 +437,11 @@ each set row, so it is read off your cards and you do not need to set it.
 You do not have to type in your draw to get byes right. There are two questions
 here and they are separate: **who had the week off**, and **what that is worth**.
 
+A third case needs nothing from you at all: a match that *does* have a card, ticked
+`Match Cancelled`. That one is read off the page and handled on its own — see [A
+round was called off, and its card has scores on
+it](#a-round-was-called-off-and-its-card-has-scores-on-it).
+
 ### Who had the week off
 
 Most of the time the tool works this out. Once you have confirmed the team list —
@@ -480,24 +493,27 @@ Associations disagree about this, and the disagreement is worth a line in
 
 ```toml
 [rules]
-unplayed = "zero"
+unplayed = "average"
 ```
 
 | `unplayed` | a bye or a washout | counts as a match played |
 |---|---|---|
-| `average` | is credited the team's own average over the matches it did play | yes |
 | `zero` | scores nothing | no |
+| `average` | is credited the team's own average over the matches it did play | yes |
 
-Leave it out and the scoring preset decides: `games-bonus` averages, the other
-three do not. Setting it here overrides the preset for every competition, and a
-`[competitions.<id>]` section can override it again for one grade.
+`zero` is the default, under every preset, because it is the convention that needs
+no explaining: a round nobody played adds nothing. Averaging is the more surprising
+of the two — it puts points on the board for a night off — so the line above is
+what you write if your association does that. Setting it under `[rules]` applies to
+every competition, and a `[competitions.<id>]` section can override it again for
+one grade.
 
 **This never changes the ladder order.** Crediting a team its own average cannot
 move its average, and the average is what the ladder is sorted on. All that
 changes is the points total printed against a team that has had a week off — which
 is exactly the number a club compares against its association's sheet. So if your
-order is right and your totals are close but not equal, this is the first line to
-try.
+order is right but your totals sit *below* the sheet's, and the teams that differ
+are the ones that have had a bye or a washout, this is the first line to try.
 
 The average column is rounded the way a spreadsheet rounds — a half goes up — so
 `6.225` prints as `6.23`, not as the `6.22` most programming languages would give
@@ -539,9 +555,15 @@ What changes:
 
 - output moves to `site/<season>/<competition>/`, so five years of tennis is five
   folders rather than fifty;
-- the front page gains a season picker;
-- players get career totals across seasons as well as per-season figures;
-- each season keeps its own ladder. Seasons are never added together into one.
+- the front page gains a season picker, grouped by season and newest first;
+- each season keeps its own ladder, its own teams and its own player pages.
+
+Nothing is added together across seasons — not a ladder, and not a player's record.
+A player who appeared in three of your seasons has three separate pages, one per
+season, and the picker is how you get between them. Career totals spanning seasons
+are not built yet; the season boundary is the one thing every figure on a page can
+be traced to a card for, and totalling across it would mean a page whose numbers no
+single season's cards account for.
 
 Give each folder a readable name in `config.toml`:
 
@@ -660,6 +682,86 @@ find data -iname '*.pdf' -print0 |
   done
 ```
 
+### The report says a card prints `VS` instead of a result
+
+The match was still read, still scored and still on the ladder. Check it on the
+dashboard if you like — it is there with its games, its sets and its points.
+
+Match Centre prints `DEFEATS` or `DEF. BY` between the team names when it holds a
+result for the fixture and `VS` when it does not, usually because the scores were
+entered but never confirmed at the association's end. The set rows are on the card
+either way, and the set rows are what this tool scores from; the banner is only one
+of the three places a card repeats its own result.
+
+What the warning tells you is which check could not run. A card printing `VS`
+normally carries no `Match Winner` tick either, so its printed `TOTAL` row is left
+as the only confirmation of its set rows — one is enough to trust them, and if that
+one had disagreed you would have an error instead. If you would rather have all
+three, export the card again once the association has finalised the result.
+
+A match that genuinely was not played is a different line in the report:
+`no-result`, which names the washout or the cancellation instead. See [A round was
+called off, and its card has scores on
+it](#a-round-was-called-off-and-its-card-has-scores-on-it).
+
+### A round was called off, and its card has scores on it
+
+The report says so under `no-result`, naming the card:
+
+```
+  no-result
+      wednesday-division-3: R5 brindle-magpies v brindle-rosellas: recorded as cancelled, so it is not counted in the ladder.
+```
+
+That is the report telling you the card was read and then set aside, and both
+halves of that matter. It knows because the card itself says so: Match Centre
+prints a ticked `Match Cancelled` box on it, which is the only thing on a page that
+can distinguish a night called off from a night played. A washed-out match with no
+such tick reads as an ordinary one, and the fix is to mark it cancelled in Match
+Centre and export the card again.
+
+A washed-out night often stops partway. Two rubbers finish, a third is level at
+5-5, the rain comes, and Match Centre keeps whatever was entered — so the card
+arrives with real games on it and no result. Those games are not a partial result
+to be counted at reduced strength. They belong nowhere, so nothing on the card is
+counted anywhere: not a game, not a set, not an appearance, not a match played.
+The two teams show one fewer in the ladder's `P` column than the teams who played
+that night, and their averages are worked out over the matches they did play.
+
+This is not the same as a match that was played to the end with one rubber left
+unfinished — a set abandoned at 4-4, a pair who had to leave. That match happened,
+so its games, sets and appearances all count, and it takes a ladder result too as
+long as enough rubbers finished (`min_sets_for_result` under `[rules]`, three of
+four by default). The line between the two is not how much of the card is filled
+in; it is whether the night was played at all.
+
+There is nothing to fix here. The one thing worth checking is that the ladder's
+`P` column matches your association's sheet — if the sheet has a number there for
+the washed-out night, your association pays for it, and that is the `unplayed`
+line: see [What a bye is worth](#byes-washouts-and-rounds-nobody-played).
+
+### The report says a card prints `Unspecified player`
+
+The warning is `players-unrecorded`, and it counts them for you: how many name cells
+on the card print the placeholder, and how many of the card's rubbers those cells
+are spread across. One line per card, however many cells it has.
+
+`Unspecified player` is what Match Centre prints where a name has not been entered.
+It is not somebody's name, so it is not read as one: no player is created, nothing
+is credited to anyone, and the rubber's games still count if the match was played.
+The warning exists because the alternative — dropping the cell without saying so —
+looks identical to a card that had no such row at all.
+
+What to do depends on the last clause of the message:
+
+- **`this match was called off`** — nothing. The night never happened, the names
+  were never going to be entered, and the card contributes nothing regardless.
+- **`those rubbers have games but nobody to credit them to`** — the match *was*
+  played, and somebody's matches are missing from their record. Enter the players
+  in Match Centre, export that card again, replace the file in `data/` and re-run.
+  The team's games and points are already right; it is the player pages that are
+  short.
+
 ### A team was awarded a bye it should not have had, or a round is short
 
 Confirm the team list in `config.toml` — remove the `#` from the `teams = ` line.
@@ -717,8 +819,42 @@ three rounds into ten reads as complete.
 
 Two spellings of one name across cards. Add a line under `[aliases]` in
 `config.toml` mapping one onto the other; the example config shows the form. The
-dashboard lists anyone who appears only once or twice under "players to check",
-which is where these usually surface.
+dashboard's "players to check" list is where these surface — see below.
+
+### The dashboard has a "players to check" list. Why are these people on it?
+
+Because they appear on one or two of the scorecards their team played, and nothing
+else. It is a list of names worth a glance, not a list of errors, and most weeks
+every row on it is perfectly fine: a fill-in from another grade, a late arrival, a
+player who came back from injury for a night.
+
+It is there because that is also exactly what **one player entered under two
+spellings** looks like. `A Whitlock` on three cards and `Anna Whitlock` on two are
+two players as far as any program can tell, each with half a record, and neither
+half looks wrong on its own. The only way to see it is to see them side by side.
+
+So: read the **Rounds** column first. Two spellings of one person never share a
+round — one card spells it one way, another card the other way, and no card does
+both. Two rows whose rounds interleave without overlapping are worth a look; two
+rows that both played round 3 are two different people.
+
+If two rows are the same person, map one spelling onto the other under `[aliases]`
+in `config.toml` and re-run; the example config shows the form. Nothing is merged
+for you, because merging two players who are not the same person is not something
+that can be undone by looking at the dashboard.
+
+The **Note** column narrows it further. `on no team's roster` means the name is in
+a set row but in neither roster block, which is what a misspelling in a set row
+looks like — the report names those too, as `unknown-player` or `player-no-team`.
+`played outside their own roster` is a fill-in, and is normal. A dash means neither,
+and those rows are the ones the Rounds column is for.
+
+The list stays hidden until somebody has had four matches available, because two
+rounds into a season everybody has played once or twice and the list says nothing.
+
+Being on the list is not itself a problem: it changes no score, moves nothing on the
+ladder, and adds no line to the report on its own. Read it once a season, fix any
+split names you find under `[aliases]`, and leave the rest.
 
 ### Nothing was found
 

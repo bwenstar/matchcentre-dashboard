@@ -48,11 +48,12 @@ LADDER_KEYS = ("points_average", "points", "wins", "games_diff", "games_won",
 FORFEIT_AWARDS = ("as-played", "full-games", "fixed")
 
 # What a round a team did not play is worth: a bye, a washout, a week called off.
-# Every preset here has an opinion, and it is only an opinion — two associations
-# running the same points scheme differ on this line all the time, and getting it
-# wrong changes the points column of every team that has had a week off. So it is
-# also settable on its own, through `[rules] unplayed` in config.toml, which is
-# what `Ruleset.average_unplayed` ends up holding.
+# Every preset here ships with `zero`, and that is only a default — two
+# associations running the same points scheme differ on this line all the time, and
+# getting it wrong changes the points column of every team that has had a week off.
+# So it is settable on its own, through `[rules] unplayed` in config.toml, which is
+# what `Ruleset.average_unplayed` ends up holding. A club whose sheet pays for a bye
+# sets `unplayed = "average"` and keeps its preset.
 #
 #   average  the team is credited its own average over the matches it did play,
 #            and the round counts as played. Common where a ladder is ordered on
@@ -86,7 +87,11 @@ class Ruleset:
     forfeit_points: float | None = None
     ladder_by: tuple[str, ...] = ("points_average", "points", "games_diff",
                                   "games_won", "head_to_head", "name")
-    average_unplayed: bool = True
+    # False by default because it is the convention that needs no explaining: a
+    # round nobody played adds nothing. Averaging is the more surprising of the
+    # two — it puts points on the board for a night off — so a competition that
+    # wants it says so, in its preset or in `[rules] unplayed`.
+    average_unplayed: bool = False
 
     def __post_init__(self) -> None:
         for basis in self.decide_by:
@@ -224,6 +229,7 @@ RULESETS: dict[str, Ruleset] = {
         decide_by=("games", "sets"),
         ladder_by=("points_average", "points", "games_diff", "games_won",
                    "head_to_head", "name"),
+        average_unplayed=False,
     ),
     # The common pennant scheme: the match goes to whoever won more rubbers.
     "sets-first": Ruleset(

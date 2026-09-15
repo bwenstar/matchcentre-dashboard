@@ -26,6 +26,15 @@ Initial release.
   the printed `TOTAL` row, the result verb between the team names, and the
   `Match Winner` tick. Agreement is required before the numbers are trusted; a
   disagreement is an error naming both readings.
+- A card whose banner reads `VS` reported as a card holding no result, not as a
+  card this program failed to understand. Match Centre prints `VS` between the team
+  names for a fixture it has no result for, and 3 of 22 real exported cards did;
+  reported as an unrecognised verb, that reads as *this card was not counted*, which
+  is the one thing it does not mean. Such a card is read, scored and counted like
+  any other — the set rows are what the tool scores from — and what the report says
+  it lost is the one cross-check the banner would have provided. A word that
+  genuinely is not in the vocabulary is still reported as one, separately, and a
+  match nobody played is reported once as `no-result` rather than twice.
 - Routing from card contents only. A card's competition comes from the division
   printed on it and the weekday of its own date. Nothing is read from a file name
   or a folder name, with one opt-in exception: in multi-season mode the first
@@ -51,17 +60,43 @@ Initial release.
 - What a round a team did not play is worth as a setting of its own — `unplayed`
   under `[rules]`, overridable per competition. `average` credits a bye or a
   washout the team's own average over the matches it did play and counts it as a
-  match played; `zero` scores it as nothing and does not count it. Every scoring
-  preset carries a default, and it is only a default: two associations running the
-  same points scheme disagree on this line routinely, and getting it wrong changes
-  the points column of every team that has had a week off. It cannot change the
-  ladder's order — crediting a team its own average cannot move that average, and
-  the average is what orders the ladder — so what it changes is exactly the total a
-  club checks against its association's published sheet. Printed on every run and
-  shown on the dashboard, in one sentence generated from one function so the
-  terminal and the page cannot say different things. A misspelt value stops the run
-  rather than falling back to the preset, because a club that sets this line has
-  already noticed the difference.
+  match played; `zero` scores it as nothing and does not count it. `zero` is the
+  default under every preset, because it is the convention that needs no
+  explaining — a round nobody played adds nothing — and averaging is the surprising
+  one, putting points on the board for a night off. It is only a default: two
+  associations running the same points scheme disagree on this line routinely, and
+  getting it wrong changes the points column of every team that has had a week off.
+  It cannot change the ladder's order — crediting a team its own average cannot move
+  that average, and the average is what orders the ladder — so what it changes is
+  exactly the total a club checks against its association's published sheet.
+  Printed on every run and shown on the dashboard, in one sentence generated from
+  one function so the terminal and the page cannot say different things. A misspelt
+  value stops the run rather than falling back to the preset, because a club that
+  sets this line has already noticed the difference.
+- A match that was not played contributes nothing anywhere, including when part of
+  its card was filled in first. A washed-out night regularly stops partway: two
+  rubbers finish, the rain arrives, and Match Centre keeps what was entered, so the
+  card arrives with real games on it and a ticked `Match Cancelled` box. Those games
+  are not a partial result to be counted at reduced strength — they are counted
+  nowhere. Not in a team's games or sets, not in its home-and-away split, not in the
+  per-slot table, not as a match played or a match available, and not as an
+  appearance on any player's record. One predicate decides it, `Match.counts_as_played`,
+  consulted at every aggregation site rather than restated at each; the browser
+  mirrors it once, in `countsAsPlayed`, so the tiles a page computes for itself
+  cannot disagree with the ladder printed beside them. A match played to the end with
+  one rubber left unfinished is the opposite case and is unaffected: it happened, so
+  its games count and it takes a ladder result if enough rubbers finished.
+- Match Centre's `Unspecified player` placeholder read as *no name recorded* rather
+  than as a person. It appears where a name was never entered, and taken literally it
+  becomes a player named "Unspecified Player" with a playing record, a team and a
+  page of their own. Such cells produce no player, in the set rows and in the roster
+  block alike; the rubber's games still count if the match was played. Dropping them
+  silently would be the other failure — indistinguishable from a card that never had
+  the row — so they are counted per row and reported once per card as
+  `players-unrecorded`, saying how many cells across how many rubbers. The message
+  distinguishes the two real cases: a card called off before the names went in, where
+  there is nothing to do, and a card that was played whose rubbers have games but
+  nobody to credit them to, which wants fixing in Match Centre and exporting again.
 - Configuration in `config.toml`, read with `tomllib`. A run that finds no config
   writes one, filled in from what the cards revealed, with every worked-out value
   written commented and annotated with what confirming it would change — and
@@ -103,9 +138,10 @@ Initial release.
   two agree by construction rather than by coincidence, and every number the page
   prints goes through the one function.
 - Multi-season mode: `seasons = "multi"` files cards by the first folder level
-  under `data/`, writes to `site/<season>/<competition>/`, adds a season picker,
-  and adds cross-season player career totals. Seasons are never merged into one
-  ladder.
+  under `data/`, writes to `site/<season>/<competition>/`, and adds a season picker
+  grouped by season. Nothing is totalled across seasons — not a ladder, and not a
+  player's record — so every figure on a page is accounted for by that season's own
+  cards.
 - `season.json` beside each dashboard: the same ladder, team, player, match,
   head-to-head and validation data as plain JSON.
 - Every link in the generated site names the page it opens rather than the folder
@@ -124,6 +160,13 @@ Initial release.
   can be tried end to end without any real data. Deterministic for a given seed.
 - `README.md`, `data/README.md` and `config.example.toml` for clubs;
   `CHANGELOG.md`; MIT `LICENSE`.
+- `data/` and `config.toml` both kept out of git by default, with a one-line opt-out
+  each. The cards name real players; a filled-in `config.toml` names real captains,
+  and its `[player_names]` and `[aliases]` tables exist precisely to hold real
+  people's names — so a fork or a pull request would publish a club's membership
+  either way. `config.example.toml`, in which every name is invented, is committed in
+  its place, and `data/README.md` survives the ignore rule so a fresh clone still
+  explains what the empty folder is for.
 - Test suite in `tests/`, standard-library `unittest`. Fixtures are generated
   in-process from fictional clubs and fictional players; no PDF is committed, and
   no real person's name appears anywhere in the project. The generated cards are a

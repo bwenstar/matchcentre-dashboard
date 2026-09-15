@@ -310,6 +310,16 @@ class TestScoring(unittest.TestCase):
             scoring.Ruleset(name="x", win=1, draw=0, loss=0,
                             ladder_by=("bananas", "name"))
 
+    def test_a_ruleset_built_by_hand_pays_nothing_for_a_round_nobody_played(self):
+        # The field's own default, which is what a scheme written for one club --
+        # a preset added later, a ruleset assembled in a script -- inherits without
+        # saying anything. Defaulting the other way puts points on a ladder for a
+        # night off, which is the surprising half of the choice and so the half
+        # that has to be asked for.
+        plain = scoring.Ruleset(name="plain", win=2.0, draw=1.0, loss=0.0,
+                                ladder_by=("points", "name"))
+        self.assertFalse(plain.average_unplayed)
+
     def test_every_shipped_preset_describes_itself(self):
         for name, rules in scoring.RULESETS.items():
             with self.subTest(preset=name):
@@ -398,6 +408,31 @@ class TestMatch(unittest.TestCase):
     def test_a_cancelled_match_is_undecided_whatever_it_shows(self):
         washout = make_match(status=MatchStatus.CANCELLED)
         self.assertFalse(washout.decided)
+
+    def test_a_cancelled_match_has_no_numbers_worth_counting(self):
+        # The scores on it are real -- rain stops a night halfway through and the
+        # rubbers already finished are on the card -- and they still belong nowhere.
+        # Counting them pays the team twice: once in the games column, once in
+        # whatever the ruleset gives it for a round nobody played.
+        washout = make_match(status=MatchStatus.CANCELLED)
+        self.assertEqual(washout.home_games, 19)        # the card does say so
+        self.assertFalse(washout.counts_as_played)      # and it counts for nothing
+
+    def test_an_unfinished_match_still_counts_as_played(self):
+        # Weaker than `decided`, deliberately. A night whose last rubber ran out of
+        # light decides nothing, and the sets that were played were played: those
+        # games are in the ladder's games column on the association's sheet too.
+        thin = make_match(scores=((6, 1), (5, 3)))
+        self.assertFalse(thin.decided)
+        self.assertTrue(thin.counts_as_played)
+
+    def test_only_the_three_unplayed_statuses_are_left_out(self):
+        # Spelled out as a set so that adding a status has to be a decision about
+        # this line rather than a default.
+        left_out = {s for s in MatchStatus
+                    if not make_match(status=s).counts_as_played}
+        self.assertEqual(left_out, {MatchStatus.BYE, MatchStatus.CANCELLED,
+                                    MatchStatus.UNPLAYED})
 
     def test_a_bye_is_recognisable_and_scores_nothing_directly(self):
         bye = Match(competition="test", round="1", home="rockets", away=NO_OPPONENT,
@@ -779,13 +814,22 @@ class TestTheUnplayedConvention(unittest.TestCase):
         return path
 
     def test_it_overrides_the_presets_own_convention_without_replacing_it(self):
-        averaged = config_mod.load(self.write('[rules]\nscoring = "games-bonus"\n'))
+        plain = config_mod.load(self.write('[rules]\nscoring = "games-bonus"\n'))
+        self.assertFalse(plain.ruleset_for(None).average_unplayed)
+        averaged = config_mod.load(self.write(
+            '[rules]\nscoring = "games-bonus"\nunplayed = "average"\n'))
         self.assertTrue(averaged.ruleset_for(None).average_unplayed)
-        zeroed = config_mod.load(self.write(
-            '[rules]\nscoring = "games-bonus"\nunplayed = "zero"\n'))
-        self.assertFalse(zeroed.ruleset_for(None).average_unplayed)
         # Still games-bonus: only the one clause moved.
-        self.assertEqual(zeroed.ruleset_for(None).name, "games-bonus")
+        self.assertEqual(averaged.ruleset_for(None).name, "games-bonus")
+
+    def test_no_preset_pays_for_a_round_nobody_played_unless_asked(self):
+        # The surprising convention is the one a club has to ask for. Shipping a
+        # preset that credits a team its average for a washout puts points on a
+        # ladder the association's sheet does not, and the club finds out by
+        # comparing totals rather than by reading a default.
+        for name in scoring.RULESETS:
+            with self.subTest(name):
+                self.assertFalse(scoring.RULESETS[name].average_unplayed)
 
     def test_one_competition_may_score_a_bye_differently_from_the_rest(self):
         loaded = config_mod.load(self.write(

@@ -52,6 +52,11 @@ class ParsedSet:
     status: SetStatus = SetStatus.PLAYED
     home_forfeit: bool = False
     away_forfeit: bool = False
+    # Name cells on this row that print Match Centre's ``Unspecified player``
+    # rather than a person, and so produced no name above. Counted rather than
+    # discarded so that one warning per card can say how much of it was never
+    # filled in; read as a name it would become a player with a playing record.
+    unnamed: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -399,6 +399,70 @@ class TestNoClubSpecificsInThePages(WebAssetCase):
                     self.assertEqual(re.findall(pattern, text), [])
 
 
+class TestThePageCountsTheSameMatchesThePythonDoes(WebAssetCase):
+    """``Match.counts_as_played``, mirrored in JavaScript, and kept in step with it.
+
+    The season document carries computed aggregates, and the page computes a few of
+    its own on top of them: the overview tiles, and each player's per-set trail. If
+    the page's idea of a match that happened differs from the exporter's, the tile
+    saying "10 matches played" sits directly above a ladder whose P column adds to
+    eight -- and nothing errors, because both numbers are internally consistent.
+
+    The list of statuses is taken from the Python by running it, not repeated here,
+    so a status added to one side cannot pass by being forgotten on the other.
+    """
+
+    def excluded_statuses(self) -> set[str]:
+        from matchcentre import format as fmt_mod, scoring
+        from matchcentre.model import Match, MatchStatus
+        comp = dict(competition="x", round="1", home="a", away="b",
+                    fmt=fmt_mod.match_format("doubles-singles-doubles"),
+                    rules=scoring.ruleset("games-bonus"))
+        return {s.value for s in MatchStatus
+                if not Match(status=s, **comp).counts_as_played}
+
+    def test_the_page_has_the_predicate_at_all(self):
+        self.assertIn("function countsAsPlayed(",
+                      jslint.code_only(self.assets()["app.js"]))
+
+    def test_it_leaves_out_exactly_the_statuses_the_python_leaves_out(self):
+        # Read from the source with its strings intact: the status names *are*
+        # string literals, so code_only() would blank the only thing under test.
+        body = self.body("countsAsPlayed")
+        excluded = self.excluded_statuses()
+        self.assertEqual(len(excluded), 3, "the Python side has changed shape")
+        for status in excluded:
+            with self.subTest(status=status):
+                self.assertIn(f"'{status}'", body,
+                              f"the page still counts a {status} match")
+        for status in {"played", "forfeit", "disputed"}:
+            with self.subTest(status=status):
+                self.assertNotIn(f"'{status}'", body,
+                                 f"the page has stopped counting a {status} match")
+
+    def test_the_overview_tiles_go_through_it(self):
+        # Matches played, sets completed and games played are all derived from this
+        # one filter, and it is the tile row a club reads first.
+        self.assertRegex(self.body("renderOverview"), r"countsAsPlayed\b")
+
+    def test_a_players_own_set_trail_goes_through_it_too(self):
+        # The trail is where a member checks their own season. A cancelled night
+        # appearing on it is a rubber they are told they played and did not.
+        self.assertRegex(self.body("setsOfPlayer"), r"countsAsPlayed\s*\(")
+
+    def test_nothing_tests_a_match_status_by_hand_any_more(self):
+        # Two hand-written filters drift; one shared predicate cannot. Any new
+        # comparison against these status strings outside countsAsPlayed() is that
+        # drift starting again.
+        predicate = self.body("countsAsPlayed")
+        rest = self.assets()["app.js"].replace(predicate, "")
+        for status in self.excluded_statuses() - {"bye"}:
+            with self.subTest(status=status):
+                self.assertNotRegex(
+                    rest, r"status\s*[!=]==?\s*'" + status + r"'",
+                    f"a hand-written {status} test outside countsAsPlayed()")
+
+
 class TestThePlayersToCheckList(WebAssetCase):
     """The one part of the page that exists to find a mistake in the data.
 

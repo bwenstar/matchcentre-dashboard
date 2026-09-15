@@ -54,6 +54,11 @@ _AWAY_VERBS = frozenset({"def by", "defeated by", "loses to", "lost to",
                          "defeats by"})
 _DRAW_VERBS = frozenset({"draws with", "draw", "draws", "drawn", "ties with",
                          "tie", "tied"})
+# Not verbs: what Match Centre prints between the team names for a fixture it has
+# no result for. Kept apart from a verb this program does not know, because the two
+# findings point at different people — an unknown word is this program's to learn,
+# and a separator is the card saying it has nothing to state.
+_NO_RESULT_VERBS = frozenset({"vs", "v", "versus"})
 
 # Statuses that carry no scoreline. Their cards are still checked for identity and
 # duplication, but not for set contents, which they do not have.
@@ -145,6 +150,7 @@ def validate(matches: Sequence[Match], competition: Competition, *,
         _check_cross_checks,        # F6
         _check_totals,              # totals-mismatch
         _check_verb,                # verb-mismatch
+        _check_unnamed,             # players-unrecorded
         _check_competition_id,      # wrong-competition
         _check_self_play,           # team-plays-itself
         _check_team_list,           # F8
@@ -214,10 +220,20 @@ def _card_tally(card: Card, rule: SetRule) -> tuple[int, int, int, int]:
             winners.count("away"))
 
 
+def _verb_key(verb: str) -> str:
+    """``DEF. BY`` -> ``def by``, so punctuation cannot make two of one verb."""
+    return " ".join("".join(c if c.isalnum() else " " for c in verb.lower()).split())
+
+
+def _verb_states_no_result(verb: str) -> bool:
+    """Whether the card printed a separator where a result would go."""
+    return _verb_key(verb) in _NO_RESULT_VERBS
+
+
 def _verb_side(verb: str) -> str | None:
     # Exact match on a normalised key, deliberately: prefix matching would read the
     # away verb "DEF. BY" as the home verb "DEF".
-    key = " ".join("".join(c if c.isalnum() else " " for c in verb.lower()).split())
+    key = _verb_key(verb)
     if key in _DRAW_VERBS:
         return "draw"
     if key in _AWAY_VERBS:
@@ -428,6 +444,21 @@ def _check_verb(ctx: _Context) -> list[Issue]:
             continue
         expected = _verb_side(card.verb)
         if expected is None:
+            if _verb_states_no_result(card.verb):
+                if card.cancelled:
+                    # `no-result` already reports the cancellation, and a match
+                    # nobody played has no result for a verb to state. Two warnings
+                    # about one fact teach a club to skim the list.
+                    continue
+                issues.append(Issue(
+                    rule="verb-absent", severity=WARNING,
+                    message=f"{_where(card)}: the card prints {card.verb!r} between "
+                            f"the team names instead of a result, which is what "
+                            f"Match Centre prints for a fixture it holds no result "
+                            f"for. The set rows were still read and scored; what "
+                            f"could not run is this one cross-check against them.",
+                    subject=_where(card), detail=card.verb))
+                continue
             issues.append(Issue(
                 rule="verb-unknown", severity=WARNING,
                 message=f"{_where(card)}: result verb {card.verb!r} is not one this "
@@ -473,6 +504,48 @@ def _check_verb(ctx: _Context) -> list[Issue]:
                 detail=f"verb {card.verb!r} says {expected}; sets "
                        f"{h_sets}-{a_sets} and games {h_games}-{a_games} decided on "
                        f"{' then '.join(rules.decide_by)} say {actual}"))
+    return issues
+
+
+# --- name cells nobody filled in ----------------------------------------
+
+
+def _check_unnamed(ctx: _Context) -> list[Issue]:
+    """Cards with rubbers whose players were never entered in Match Centre.
+
+    The site prints its own ``Unspecified player`` placeholder in a name cell
+    nobody filled in, and :func:`~matchcentre.scorecard.names_nobody` drops it
+    rather than reading it as a person — a placeholder read as a name becomes a
+    player with a playing record, a squad of one on no team whose only opponent is
+    itself. Dropping it silently would be the other failure: a card thinned out
+    with no trace is exactly the kind of quiet loss this program refuses
+    elsewhere. So each card that lost names says so once, with the count, whether
+    or not the match was played.
+
+    The usual cause is a fixture called off before the teams were entered, in
+    which case nothing needs doing. The one worth acting on is a card that *was*
+    played and still prints the placeholder, because those rubbers have games but
+    no one to credit them to: fix the entry in Match Centre and re-export.
+    """
+    issues: list[Issue] = []
+    for card in ctx.cards:
+        cells = sum(s.unnamed for s in card.sets)
+        if not cells:
+            continue
+        rows = sum(1 for s in card.sets if s.unnamed)
+        played = "; this match was called off" if card.cancelled else \
+                 ("; those rubbers have games but nobody to credit them to"
+                  if any(s.unnamed and (s.home_games or s.away_games)
+                         for s in card.sets) else "")
+        issues.append(Issue(
+            rule="players-unrecorded", severity=WARNING,
+            message=f"{_where(card)}: {cells} name cell(s) across "
+                    f"{rows} of {len(card.sets)} rubber(s) print Match Centre's "
+                    f"'Unspecified player' placeholder rather than a person, so no "
+                    f"name was recorded for them{played}.",
+            subject=_where(card),
+            detail=f"{cells} placeholder cell(s) in rubber(s) "
+                   f"{', '.join(str(s.index + 1) for s in card.sets if s.unnamed)}"))
     return issues
 
 

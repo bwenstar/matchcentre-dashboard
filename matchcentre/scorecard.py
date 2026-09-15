@@ -137,6 +137,21 @@ _DRAW_MARKS = ("draw", "drew", "tie", "level", "halved")
 _LOSS_MARKS = (" by", " to")
 _WIN_MARKS = ("def", "beat", "won", "win", "d.")
 
+# Not verbs. `VS` is what Match Centre prints between the team names when it has
+# no result to state, and it has to be told apart from a word the reader simply
+# does not know, because the two are opposite findings: an unknown word is a gap in
+# this program, and a separator is a gap in the card. Measured across 22 real
+# exported cards — every card printing VS also had no Match Winner tick, and every
+# card printing DEFEATS or DEF. BY had one.
+_NO_RESULT_MARKS = ("vs", "v", "versus")
+
+# What Match Centre prints in a name cell nobody filled in. It is the template's
+# own empty state, not a person, and it appears on a card for a fixture whose
+# players were never entered -- most often one that was called off before the
+# names went in. Read as a name it becomes a player: a squad of one, on no team,
+# whose only opponent is itself.
+_UNNAMED_MARKS = ("unspecified player", "unspecified players", "unspecified")
+
 
 # --- geometry read off the card ------------------------------------------
 
@@ -530,7 +545,9 @@ def describe(page: pdf.Page) -> str:
             f"  row {parsed.index + 1} marker {parsed.marker!r} "
             f"{'doubles' if parsed.doubles else 'singles'} "
             f"{parsed.home_games}-{parsed.away_games} {parsed.status.value} "
-            f"home {list(parsed.home_players)} away {list(parsed.away_players)}")
+            f"home {list(parsed.home_players)} away {list(parsed.away_players)}"
+            + (f" ({parsed.unnamed} cell(s) print no player, only Match "
+               f"Centre's placeholder)" if parsed.unnamed else ""))
     try:
         detected = from_rows(s.doubles for s in sets)
         lines.append(f"format described by the card: {detected.name} "
@@ -1244,8 +1261,10 @@ def _read_row(page: pdf.Page, grid: _Grid, index: int,
     marker, doubles = _read_marker(page, grid, index, band, warnings)
     home_games = _games(page, band, grid.home_games, index, "home", warnings)
     away_games = _games(page, band, grid.away_games, index, "away", warnings)
-    home_players = _players(page, band, grid.home_names, boxes)
-    away_players = _players(page, band, grid.away_names, boxes)
+    home_players, home_unnamed = _named(
+        _players(page, band, grid.home_names, boxes))
+    away_players, away_unnamed = _named(
+        _players(page, band, grid.away_names, boxes))
 
     wanted = 2 if doubles else 1
     for side, players in (("home", home_players), ("away", away_players)):
@@ -1280,6 +1299,7 @@ def _read_row(page: pdf.Page, grid: _Grid, index: int,
         status=status,
         home_forfeit=home_forfeit,
         away_forfeit=away_forfeit,
+        unnamed=home_unnamed + away_unnamed,
     )
 
 
@@ -1371,6 +1391,18 @@ def _players(page: pdf.Page, band: tuple[float, float], cell: _Cell,
         if name:
             out.append(name)
     return tuple(out)
+
+
+def _named(printed: tuple[str, ...]) -> tuple[tuple[str, ...], int]:
+    """The names from one cell, and how many of them named nobody.
+
+    Splitting rather than filtering keeps the absence reportable: a card can then
+    be told the difference between *this rubber's names were never entered* and
+    *this rubber's name cell was empty*, which read the same way once the
+    placeholder is gone.
+    """
+    kept = tuple(name for name in printed if not names_nobody(name))
+    return kept, len(printed) - len(kept)
 
 
 def _lines_in(page: pdf.Page, band: tuple[float, float],
@@ -1562,10 +1594,14 @@ def _verb_check(sets: Sequence[ParsedSet], verb: str) -> CrossCheck:
     """The result verb printed between the team names against the set rows."""
     claim = _verb_claim(verb)
     if claim is None:
-        return CrossCheck(
-            "verb", False,
-            detail=f"the verb {verb!r} is not one this reader recognises"
-                   if verb else "the card prints no result verb")
+        if states_no_result(verb):
+            detail = (f"the card prints {verb!r} between the team names, which "
+                      f"states no result to check against")
+        elif verb:
+            detail = f"the verb {verb!r} is not one this reader recognises"
+        else:
+            detail = "the card prints no result verb"
+        return CrossCheck("verb", False, detail=detail)
     if _supported(claim, sets):
         return CrossCheck("verb", True,
                           detail=f"{verb!r} agrees with the set rows")
@@ -1574,6 +1610,31 @@ def _verb_check(sets: Sequence[ParsedSet], verb: str) -> CrossCheck:
     return CrossCheck("verb", True, agrees=False,
                       detail=f"the card prints {verb!r}, making {said}, but "
                              f"{_reading_text(sets)}")
+
+
+def states_no_result(verb: str) -> bool:
+    """Whether a printed verb is the neutral separator rather than an outcome.
+
+    ``VS`` between two team names is a fixture, not a result. A card printing it is
+    not a card this reader failed to understand — it is a card with no result on it,
+    which is a different thing to report and a different thing for a club to do
+    about it. Everything else on such a card is read and scored as usual; the only
+    loss is one of the three ways a card confirms its own set rows.
+    """
+    return " ".join(verb.split()).casefold().strip(".") in _NO_RESULT_MARKS
+
+
+def names_nobody(text: str) -> bool:
+    """Whether a printed name cell holds Match Centre's placeholder for nobody.
+
+    The distinction this draws is between *no name was recorded* and *a person
+    called this*. It matters because everything downstream identifies a player by
+    the name printed in a set row: the placeholder read as a name registers a
+    phantom who has played, has a rubber record, and turns up in the dashboard's
+    list of players worth checking — while the club's report says nothing about it,
+    because a cancelled card is exempt from the roster checks that would.
+    """
+    return " ".join(text.split()).casefold().strip(".") in _UNNAMED_MARKS
 
 
 def _verb_claim(verb: str) -> str | None:
@@ -1698,7 +1759,9 @@ def _roster_entry(texts: Sequence[str]) -> RosterEntry | None:
             name_parts.append(token)
         index += 1
     name = " ".join(name_parts).strip()
-    if not name:
+    if not name or names_nobody(name):
+        # A roster line naming nobody registers nobody. Worse than the same
+        # placeholder in a set row, this one would put the phantom on a team.
         return None
     return RosterEntry(name=name, singles=singles, doubles=doubles,
                        is_captain=captain)

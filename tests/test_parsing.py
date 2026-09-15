@@ -295,6 +295,106 @@ class TestSetStatusComesFromTheTickedBox(CardCase):
         self.assertTrue(card.cancelled)
 
 
+PLACEHOLDER = "Unspecified player"
+
+
+class TestTheSitesPlaceholderForNobodyIsNotAPlayer(CardCase):
+    """``Unspecified player``: what Match Centre prints in a name cell nobody filled.
+
+    Measured on a real export. A washed-out round's card had been created and never
+    filled in, so all twelve of its name cells printed the placeholder -- and the
+    placeholder was read as a person. That invented a player: one squad of one, on
+    no team, whose only opponent was itself, with more rubbers to its name than
+    anybody real, listed on the dashboard among the players worth checking. The
+    validator said nothing, because a cancelled card is exempt from the roster
+    checks that would have caught it.
+
+    It is the template's own empty state, so it is dropped -- and *counted*, because
+    a card quietly thinned out is the other half of the same failure.
+    """
+
+    def blank_rows(self, *scores):
+        """Set rows in the shape of a card whose players were never entered."""
+        return tuple(cw.SetRow(home_games=home, away_games=away,
+                               doubles=index in (0, len(scores) - 1),
+                               home_players=(PLACEHOLDER,) * (
+                                   2 if index in (0, len(scores) - 1) else 1),
+                               away_players=(PLACEHOLDER,) * (
+                                   2 if index in (0, len(scores) - 1) else 1))
+                     for index, (home, away) in enumerate(scores))
+
+    def test_the_placeholder_is_recognised_however_it_is_punctuated(self):
+        # Casing and trailing punctuation vary between exports; the plural does
+        # too, on a doubles row.
+        for text in ("Unspecified player", "unspecified players", "UNSPECIFIED "
+                     "PLAYER", " Unspecified  player ", "Unspecified."):
+            with self.subTest(text=text):
+                self.assertTrue(scorecard.names_nobody(text))
+
+    def test_a_real_name_is_not_mistaken_for_it(self):
+        # The predicate is exact, not a substring test: a club can have a member
+        # whose name contains any of these words.
+        for text in HOME_PLAYERS + ("Player One", "Spec Unspecified-Jones"):
+            with self.subTest(text=text):
+                self.assertFalse(scorecard.names_nobody(text))
+
+    def test_no_name_is_read_from_a_cell_that_names_nobody(self):
+        card = self.read(cw.CardSpec(rows=self.blank_rows((0, 0), (0, 0),
+                                                          (0, 0), (0, 0)),
+                                     cancelled=True, winner=cw.NO_TICK,
+                                     omit_totals=True, omit_verb=True))
+        for parsed in card.sets:
+            with self.subTest(row=parsed.index):
+                self.assertEqual(parsed.home_players, ())
+                self.assertEqual(parsed.away_players, ())
+
+    def test_how_many_cells_named_nobody_is_kept_rather_than_forgotten(self):
+        # The count is what lets one warning per card say how much of it was never
+        # filled in. Dropped silently, a card that needs re-exporting looks clean.
+        card = self.read(cw.CardSpec(rows=self.blank_rows((0, 0), (0, 0),
+                                                          (0, 0), (0, 0)),
+                                     cancelled=True, winner=cw.NO_TICK,
+                                     omit_totals=True, omit_verb=True))
+        self.assertEqual([s.unnamed for s in card.sets], [4, 2, 2, 4])
+
+    def test_a_card_with_real_names_counts_none(self):
+        # Without this the count above could be anything at all and still pass.
+        card = self.read(cw.CardSpec(rows=rows((6, 1), (6, 2), (6, 3), (6, 4))))
+        self.assertEqual([s.unnamed for s in card.sets], [0, 0, 0, 0])
+
+    def test_the_games_on_such_a_row_are_still_read(self):
+        # A row can print games and no names -- a card filled in from the scoresheet
+        # in a hurry. The scoreline is evidence and is kept; inventing a player to
+        # attach it to is not the way to keep it.
+        card = self.read(cw.CardSpec(rows=self.blank_rows((6, 1), (6, 2),
+                                                          (3, 6), (6, 4))))
+        self.assertEqual([(s.home_games, s.away_games) for s in card.sets],
+                         [(6, 1), (6, 2), (3, 6), (6, 4)])
+        self.assertEqual(card.home_games, 21)
+
+    def test_a_roster_line_naming_nobody_registers_nobody(self):
+        # Worse than the same placeholder in a set row: this one would put the
+        # phantom on a team, and a team's squad list is what closes the roster
+        # checks.
+        card = self.read(cw.CardSpec(
+            rows=rows((6, 1), (6, 2), (6, 3), (6, 4)),
+            home_roster=(cw.RosterRow(name=PLACEHOLDER, singles=2.5, doubles=2.5),
+                         cw.RosterRow(name=HOME_PLAYERS[0], singles=2.5,
+                                      doubles=2.5, captain=True))))
+        self.assertEqual([e.name for e in card.home_roster], [HOME_PLAYERS[0]])
+
+    def test_describing_the_card_says_which_rows_lost_their_names(self):
+        # `describe` is what a club is told to paste when asking for help, so the
+        # thing that was dropped has to be in it.
+        path = self.write(cw.CardSpec(rows=self.blank_rows((0, 0), (0, 0),
+                                                           (0, 0), (0, 0)),
+                                      cancelled=True, winner=cw.NO_TICK,
+                                      omit_totals=True, omit_verb=True))
+        described = scorecard.describe(pdf.extract(path))
+        self.assertIn("placeholder", described)
+        self.assertIn("no player", described)
+
+
 class TestADamagedCardIsRefused(CardCase):
     """F5: fail closed. Each of these produced a wrong number in the predecessor."""
 
@@ -435,6 +535,79 @@ class TestAThinCardIsReadButNotTrusted(CardCase):
                         "the printed TOTAL disagrees with the sets and nothing "
                         "noticed")
         self.assertFalse(card.confirmed)
+
+
+class TestVSIsASeparatorNotAnUnknownVerb(CardCase):
+    """A card with no result printed on it, told apart from a word we do not know.
+
+    Match Centre prints ``DEFEATS`` or ``DEF. BY`` between the team names when it
+    holds a result, and ``VS`` when it does not. Both readings leave the verb
+    cross-check unavailable, so it is tempting to report them the same way — but
+    they are opposite findings. An unknown word means this reader has a word to
+    learn and the card had a result it could not use; a separator means the card
+    itself states no result, and there is nothing here to fix. Reported as "not one
+    this reader recognises", the second reads as *this card was not understood*,
+    and a club's fair conclusion is that the card went uncounted. It did not: the
+    sets, the roster and the printed ``TOTAL`` are all still read.
+    """
+
+    def spec(self, **kw) -> cw.CardSpec:
+        # No Match Winner tick either: on the real cards the two absences were
+        # measured together, every time. That leaves the TOTAL row as the only
+        # confirmation the card offers, which is what the last test here is about.
+        fields = {"verb": "VS", "winner": cw.NO_TICK,
+                  "rows": rows((6, 2), (3, 6), (6, 4), (1, 6))}
+        return cw.CardSpec(**{**fields, **kw})
+
+    def test_the_separator_is_recognised_in_the_forms_a_card_prints_it(self):
+        for verb in ("VS", "vs", "Vs.", " V ", "VERSUS"):
+            with self.subTest(verb=verb):
+                self.assertTrue(scorecard.states_no_result(verb))
+
+    def test_a_result_verb_is_never_mistaken_for_the_separator(self):
+        # The blank is in this list on purpose: a card that printed no verb at all
+        # is a third finding, not this one.
+        for verb in ("DEFEATS", "DEF. BY", "DRAWS WITH", "TROUNCES", ""):
+            with self.subTest(verb=verb):
+                self.assertFalse(scorecard.states_no_result(verb))
+
+    def test_every_set_row_is_still_read_off_a_card_printing_vs(self):
+        card = self.read(self.spec())
+        self.assertEqual([(s.home_games, s.away_games) for s in card.sets],
+                         [(6, 2), (3, 6), (6, 4), (1, 6)])
+
+    def test_the_printed_verb_is_passed_through_untouched(self):
+        self.assertEqual(self.read(self.spec()).verb, "VS")
+
+    def verb_check(self, spec: cw.CardSpec):
+        check, = [c for c in self.read(spec).checks if c.name == "verb"]
+        self.assertFalse(check.available)
+        return check
+
+    def test_the_verb_check_says_the_card_states_no_result(self):
+        detail = self.verb_check(self.spec()).detail
+        self.assertIn("VS", detail)
+        self.assertIn("states no result", detail)
+        self.assertNotIn("recognis", detail,
+                         "a separator reported as an unrecognised word is the "
+                         "wording that sent a club looking for a lost card")
+
+    def test_a_word_this_reader_does_not_know_still_says_so(self):
+        detail = self.verb_check(self.spec(verb="TROUNCES")).detail
+        self.assertIn("TROUNCES", detail)
+        self.assertIn("recognis", detail)
+
+    def test_a_card_with_no_verb_at_all_says_that_instead_of_either(self):
+        detail = self.verb_check(self.spec(omit_verb=True)).detail
+        self.assertIn("no result verb", detail)
+        self.assertNotIn("recognis", detail)
+
+    def test_the_card_is_still_confirmed_by_its_printed_total_row(self):
+        # One confirmation of three, and it is enough: a card confirmed once is not
+        # a card in doubt. Losing the other two is why the run says anything at all.
+        card = self.read(self.spec())
+        self.assertEqual([c.name for c in card.cross_checks_available], ["totals"])
+        self.assertTrue(card.confirmed)
 
 
 class TestTheFixtureCardHasTheShapeOfARealOne(CardCase):

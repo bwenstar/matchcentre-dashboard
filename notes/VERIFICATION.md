@@ -350,3 +350,261 @@ survived, because `r.unplayed` occurs elsewhere in the same function. The
 replacement extracts the banner's row labels by regex and asserts each one appears
 inside the footnote sentence itself, so the footnote cannot fall behind the rows it
 describes.
+
+## 8. `VS` on a real card: what the report said, and what was true
+
+2026-09-15. Prompted by a question about the dashboard's Data health panel, which
+carried three warnings reading `verb-unknown: result verb 'VS' is not one this
+program recognises` — and the fair question that follows: *does that mean this
+scorecard is not recognised or processed at all?*
+
+Measured over the same 22 real cards as section 7, still in `/tmp`:
+
+| printed between the team names | cards | `Match Winner` tick | cross-checks available |
+|---|---|---|---|
+| `DEFEATS` / `DEF. BY` | 19 | present, every one | 3 of 3 |
+| `VS` | 3 | absent, every one | 1 of 3 |
+
+The correspondence is exact in both directions, which is what settles it: `VS` is
+not a word the reader failed to learn. It is what Match Centre prints when it holds
+no result for the fixture, and the tick is missing for the same reason the verb is.
+
+What the three cards actually did: two carry a cancellation tick, are correctly
+`decided: false`, and are reported once each as `no-result`. The third was read,
+scored and counted — `season.json` records `decided: true`, `result: home`, points
+5.6 to 3.3, games 16-13, sets 1-2, a home win because `games-bonus` decides on games
+and uses sets only to break a tie — and its printed `TOTAL` row agrees with its four
+set rows. Nothing was lost but one redundant confirmation of numbers that were
+already confirmed.
+
+So the defect was the sentence, not the reading. A warning that reads as *this card
+was not understood* invites a club to go looking for a match that is already on its
+ladder, and the two findings it conflated point at different people: an unknown word
+is this program's to learn, a separator is the card saying it has nothing to state.
+Both halves changed:
+
+- `scorecard.states_no_result`, and a verb cross-check whose detail distinguishes
+  three cases — the separator, the unknown word, and no verb printed at all.
+- `validate.verb-absent`: a warning that names what could not run *and* says the set
+  rows were read and scored anyway. Suppressed entirely on a cancelled card, where
+  `no-result` has already reported the fact and a match nobody played has no result
+  for a verb to state.
+
+On the same real input, Monday's warnings went **9 → 6**: two duplicates on the
+cancelled cards gone, and the third now accurate.
+
+Tests: **359 → 376**. **14 mutations, all caught** — the separator vocabulary and
+its normalisation on both sides, the branch that tells the two findings apart, the
+cancelled-card suppression in both directions, the rule name, the severity, and the
+sentence that says the card still counted.
+
+**The gap that mutation run found.** Dropping the punctuation-stripping from
+`_verb_key` survived every test in the suite. Nothing had ever put `DEF. BY` — the
+away verb the real exports print — through the validator, because `cardwriter`
+derives `LOSES TO`, which needs no normalisation. Read with the full stop left in,
+`DEF. BY` matches nothing; read by prefix, it matches the home verb `DEF` and says
+the loser won. A card printing it exactly as Match Centre does now sits in the
+fixture season, and the whole verb vocabulary is asserted over all ten cards at
+once: only the two findings that were meant to be reported are.
+
+## 9. A washed-out round on real cards, and the fabricated player it produced
+
+2026-09-15. Prompted by a question about one real card: *the scorecard is basically
+incomplete with the players as "Unspecified Player", so you know that something must
+have happened and this match was either cancelled or something happened with the
+scorecard, therefore it's not counted — which you can cross check against the
+association's points sheet and validate against the scores listed for winner vs
+loser.*
+
+Same input as sections 7 and 8, still in `/tmp`, still nothing copied into the
+project. Teams are lettered by their finishing position in the Monday B2 grade, as
+in section 7, so A is the leader and D is the team whose round 5 card disagrees with
+the sheet.
+
+Staged as `/tmp/v9`: the zip's `data/` tree, the `config.toml` that an earlier
+`build.py` wrote on the club's own machine (`rounds_total = 10` its only hand edit),
+plus a five-line `[competitions.monday-division-b2.byes]` table transcribed from the
+sheet's `B` column. That config has no `unplayed` line, which is the point — the run
+below is what a club gets from the defaults.
+
+```
+cd /tmp/v9 && python3 .../build.py --check --generated 2026-09-15T00:00:00
+```
+
+### What the two cards actually are
+
+Both round 2 cards, read structurally — games and cell counts only, no names:
+
+| card | `Match Cancelled` | verb | `Match Winner` | printed `TOTAL` | rubber games | placeholder cells |
+|---|---|---|---|---|---|---|
+| B v D | ticked | `VS` | absent | 15-1 | 6-1, 6-0, 3-0, 0-0 | none |
+| C v E | ticked | `VS` | absent | 0-0 | 0-0, 0-0, 0-0, 0-0 | 4, 2, 2, 4 = 12 |
+
+So the two failure modes the design had been reasoning about hypothetically are both
+real, on the same night, in the same grade:
+
+- **B v D is a night that stopped partway.** Two rubbers finished, a third was
+  abandoned at 3-0, the fourth never started, and Match Centre kept all of it. The
+  card carries 16 real games and no result.
+- **C v E is a night that never started.** Every rubber 0-0, and every one of the
+  twelve on-court name cells printing `Unspecified player`. The roster block on that
+  card *does* carry three real names a side; it is only the on-court cells that were
+  never filled in.
+
+The association's sheet marks the whole round `W` for all four teams — its legend
+reads `W = wet, unplayed or incomplete match` — and states outright that "cards
+missing & cards incomplete have been scored as 0 points for the calculation of the
+Points and Positions." A had the bye that round.
+
+### The sheet's own two columns settle the convention
+
+The sheet publishes Prog. Points, Matches Played and Prog. Average, and the three
+agree with each other only if a `W` and a `B` are both uncounted:
+
+| team | its numbered rounds | sum | sheet Prog. Points | sheet Matches Played | sheet Average |
+|---|---|---|---|---|---|
+| A | 6.4, 6.4, 6.4, 6.4 | 25.6 | 25.6 | 4 | 6.40 |
+| B | 2.7, 5.6, 5.8 | 14.1 | 14.1 | 3 | 4.70 |
+| C | 6.2, 3.4, 3.3 | 12.9 | 12.9 | 3 | 4.30 |
+| D | 2.8, 6.0, 3.1 | 11.9 | 11.9 | 3 | 3.97 |
+| E | 3.4, 2.8, 3.7 | 9.9 | 9.9 | 3 | 3.30 |
+
+That is what promoted `zero` from "this club's setting" to the shipped default. It is
+not only that a bye is worth nothing here; the *washout* is worth nothing too, and
+the Matches Played column of `4 / 3 / 3 / 3 / 3` is a second, independent statement
+of the same rule. Section 7 had inferred it from the points column alone.
+
+### Before and after, on the same real cards
+
+Run twice with only three lines changed — `Match.counts_as_played` letting a
+cancelled match through, `scorecard.names_nobody` returning `False`, and
+`games-bonus` averaging again — which is the state the club's own run was in:
+
+|  | before | after | sheet |
+|---|---|---|---|
+| points | 32.0 / 23.5 / 21.5 / 19.5 / 16.5 | 25.6 / 14.1 / 12.9 / 11.7 / 9.9 | 25.6 / 14.1 / 12.9 / 11.9 / 9.9 |
+| B's games | 56-55 | 41-54 | — |
+| D's games | 38-75 | 37-60 | — |
+| ladder state | `complete: every team has played the same number` | `in progress` | 5 of 10 rounds |
+| players | 16 | 15 | — |
+
+Four of five points totals now match to the digit, all five Matches Played match, and
+the order is the sheet's order. The remaining 0.2 is D's round 5 card, already
+recorded in section 7: the card's set rows, its `TOTAL 9-24` and its `Match Winner`
+tick all agree on 2.9 and the sheet implies 3.1. A card that disagrees with the sheet
+is left standing.
+
+Three separate defects show up in that table, and only the first was the one asked
+about:
+
+**The cancelled card's games were counted while the match was not.** B's 56-55
+included the 15-1 it was leading by when the rain came, and D's 38-75 the 1-15 it was
+losing by — but neither team's `P` went up, because a cancelled match is not
+`decided`. Games from a match that never happened, in a column beside a played count
+that excludes it. Nothing reported it.
+
+**The ladder said `complete: every team has played the same number` directly above a
+`P` column reading 4 / 3 / 3 / 3 / 3.** Averaging made every team's *counted* total 4
+while the printed `P` stayed on matches actually played, so the one sentence that
+exists to say "this order is not settled yet" said the opposite, in a grade five
+rounds into ten. Flipping the default fixed this as a side effect; it had been
+recorded as a smaller finding before this session and was never reproduced this
+cleanly.
+
+**A player named `Unspecified Player` was on the dashboard, and nothing said so.**
+The before run has 16 players to the after run's 15. The extra one is slug
+`unspecified-player`, on no team, with 1 match and 8 sets played — 4 rubbers × 2
+sides of the same match, so it played itself. Not one of the 14 warnings mentioned
+it. It surfaced in exactly one place: the "players to check" list, which flags anyone
+with one or two appearances — which is how the club found it, and why the question
+arrived as *why are these people here*.
+
+That last one is the argument for the `players-unrecorded` warning being a warning
+rather than a silent drop. On this input it reads:
+
+```
+players-unrecorded
+    monday-division-b2: data/.../R2/match_scorecard_XXXXXXX.pdf: 12 name cell(s)
+    across 4 of 4 rubber(s) print Match Centre's 'Unspecified player' placeholder
+    rather than a person, so no name was recorded for them; this match was called off.
+        12 placeholder cell(s) in rubber(s) 1, 2, 3, 4
+```
+
+One line for twelve cells, and the closing clause tells the club there is nothing to
+do. The B v D card gets no such line: it is cancelled too, but its names are real, so
+the check is answering "were names recorded" and not "was this card any good".
+
+Monday's warnings went 6 → 8: the two round 2 cards keep their `no-result` lines, and
+the placeholder card gains one.
+
+### Two smaller findings this run surfaced, not yet actioned
+
+- `set-tied` says *level at 0-0, so nobody won the set and nothing on the card says
+  why it stopped* on rubbers that were plainly never played. Three of them here.
+  "Tied" is the wrong word for a rubber with no games in it.
+- `app.js` labels `fill_in_appearances` as sets in the players-to-check table, while
+  `stats.py` counts matches.
+
+### One documented feature that was never built
+
+Checked while sweeping the docs for the default flip. `README.md` and
+`config.example.toml` both promised that multi-season mode gives "player career
+totals across seasons"; `CHANGELOG.md` claimed it as shipped. It does not exist.
+There is no cross-season aggregation anywhere: `_write_picker` builds a list of
+competitions and nothing else, and `app.js` carries the opposite comment — *the only
+season this page can name from evidence is its own*.
+
+Corrected in all three files rather than built, and stated as a limitation with its
+reason: the season boundary is the line every figure on a page can be traced to a
+card across, and totalling over it would put numbers on a page that no one season's
+cards account for. Worth building; not worth claiming first.
+
+### Two `config.toml` exposures, closed
+
+- The `config.toml` a run writes holds `[captains]`, `[player_names]` and
+  `[aliases]` — three tables whose whole purpose is real people's names — and it was
+  not gitignored, so `git add .` after a build would publish a club's membership to
+  GitHub. Same exposure as `data/`, which has been ignored for exactly this reason
+  since the first commit. Now ignored with the same one-line opt-out, and asserted by
+  `git check-ignore` in both directions so `config.example.toml` cannot be swept up
+  with it.
+- A stray `config.toml` was sitting in the project tree — one machine's state, which
+  would have arrived in a club's copy naming somebody else's club. Removed, and a
+  test now fails if one is there.
+
+### Tests and mutations
+
+**376 → 419 tests**, all passing:
+
+```
+cd tests && rm -rf __pycache__ ../matchcentre/__pycache__ &&
+  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -t .
+```
+
+**23 mutations, all caught** (`/tmp/mutate6.py`) — 8 on the abandonment predicate and
+the five aggregation sites that consult it, 8 on the placeholder (its vocabulary, the
+punctuation strip, exact-match versus substring, the per-row count, the roster guard,
+`describe()`), 4 on the validator's new check including the branch that tells a
+called-off card from a played one, and 3 on the browser mirror.
+
+**The mutation run's own bug, which is the lesson worth keeping.** Three model
+mutations were reported caught by test classes named `TestOneMatch` and
+`TestScoringRulesets`. Neither exists; the real names are `TestMatch` and
+`TestScoring`. `python3 -m unittest NoSuchClass` exits nonzero, and a driver that
+reads nonzero as "the test caught it" reads a typo as proof. Every driver now
+pre-flights each distinct target set unmutated and refuses to start if any of them
+fails, so a target that cannot fail for the right reason cannot pass for the wrong
+one.
+
+Two real survivors before that fix:
+
+- **Exact match weakened to a substring.** The near-miss name in the test was
+  `Spec Unspecified-Jones`, which does not *start* with the placeholder, so a
+  prefix-match mutation survived. Rather than invent a name contrived to kill it, the
+  mutation was replaced with the implementation somebody would actually write by
+  mistake — `"unspecified" in text` — which the existing test does kill, and
+  punctuation-strip and singular-only mutations were added beside it.
+- **The `average_unplayed` field default.** All four presets now set the flag
+  explicitly, house style being explicit-though-redundant, so nothing exercised the
+  dataclass default and flipping it survived. Covered by a test that builds a
+  `Ruleset` by hand and asserts it pays nothing for a round nobody played.

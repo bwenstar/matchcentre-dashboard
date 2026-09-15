@@ -196,6 +196,26 @@ class Match:
     def is_bye(self) -> bool:
         return self.status is MatchStatus.BYE or self.away == NO_OPPONENT
 
+    @property
+    def counts_as_played(self) -> bool:
+        """Whether this match happened, and so has numbers worth counting.
+
+        Weaker than :attr:`decided` and deliberately so: a card whose last rubber
+        was never finished was still played, and its games belong in the ladder's
+        games column even though the match itself decides nothing.
+
+        A cancelled or unplayed match is the other way round. It contributes
+        nothing anywhere — not a game, not a set, not an appearance — *including*
+        when part of its card was filled in before play stopped. That happens: a
+        washed-out night can leave two and a half rubbers on the card, and
+        counting them would credit a team both the games it won before the rain and
+        whatever the ruleset pays for a round nobody played. It also decides which
+        way the association's sheet is reproduced, since a round marked as
+        unplayed there adds nothing to a team's games, points or matches played.
+        """
+        return self.status not in (MatchStatus.BYE, MatchStatus.CANCELLED,
+                                   MatchStatus.UNPLAYED)
+
     # --- tallies --------------------------------------------------------
 
     @property
