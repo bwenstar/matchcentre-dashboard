@@ -242,6 +242,79 @@ class TestItSaysWhatItAssumed(CliCase):
         self.assertIsNone(self.season()["meta"]["rounds_total"])
 
 
+class TestEveryArtefactSaysWhichBuildMadeIt(CliCase):
+    """One version number, printed everywhere somebody might read it back.
+
+    A bug report arrives as "the ladder looks wrong", and the first question is
+    which build produced the ladder. There are three places the answer can come
+    from and a club will have exactly one of them to hand: the report the run
+    printed, the dashboard page in front of them, or the ``season.json`` they
+    still have. All three must agree, and all three must say it without being
+    asked -- a version you have to run a command to discover is a version nobody
+    quotes.
+    """
+
+    def version(self) -> str:
+        from matchcentre import __version__
+        return __version__
+
+    def test_the_reports_first_line_names_the_version_and_the_interpreter(self):
+        # First line, not somewhere in the middle: it is what gets pasted when
+        # somebody quotes "the top of the output", and the Python is on it because
+        # "works here, not there" is answered by that pair and nothing else.
+        first = self.build().out.splitlines()[0]
+        self.assertIn(self.version(), first)
+        self.assertIn("python", first.lower())
+        self.assertIn(sys.platform, first)
+
+    def test_a_run_that_fails_still_says_which_build_failed(self):
+        # The path where it matters most. A run that cannot score anything prints
+        # a short report, and a short report that omits the version is the one a
+        # club is most likely to be pasting into an issue.
+        for pdf in (self.cwd / "data").rglob("*.pdf"):
+            pdf.write_bytes(b"not a pdf at all")
+        run = self.build(expect=None)
+        self.assertNotEqual(run.code, 0, "every card was replaced with rubbish and "
+                                         "the run still reported success")
+        self.assertIn(self.version(), run.text)
+
+    def test_the_season_document_records_the_version_that_wrote_it(self):
+        self.build()
+        self.assertEqual(self.season()["meta"]["version"], self.version())
+
+    def test_the_data_island_records_it_too(self):
+        # The island is what a double-clicked dashboard actually reads, so a
+        # version present only in season.json is a version the page cannot print.
+        self.build()
+        island = next((self.cwd / "site").rglob("season-data.js"))
+        text = island.read_text(encoding="utf-8")
+        embedded = json.loads(text[text.find("{"):text.rfind("}") + 1])
+        self.assertEqual(embedded["meta"]["version"], self.version())
+
+    def test_the_front_page_prints_it_without_any_javascript_running(self):
+        # The front page is server-rendered here, so this is the one place the
+        # version can be asserted as text in a file rather than as an instruction
+        # to a browser.
+        self.build()
+        front = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertIn(self.version(), front)
+
+    def test_the_competition_page_has_somewhere_to_print_it_and_code_that_does(self):
+        # This one cannot be checked as text: the dashboard's footer is written by
+        # app.js out of the data island. So the two halves are checked instead --
+        # the element exists in the page, and the script fills it from the version
+        # in the document. Both must be true for the footer in a screenshot to be
+        # the version that built it.
+        self.build()
+        page = next(p for p in (self.cwd / "site").rglob("index.html")
+                    if p.parent != self.cwd / "site")
+        self.assertIn('id="foot-note"', page.read_text(encoding="utf-8"))
+        script = next((self.cwd / "site").rglob("app.js"))
+        source = script.read_text(encoding="utf-8")
+        self.assertIn("foot-note", source)
+        self.assertRegex(source, r"m\.version")
+
+
 class TestCheckWritesNothing(CliCase):
 
     def test_check_leaves_no_site_directory(self):

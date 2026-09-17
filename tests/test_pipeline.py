@@ -677,6 +677,206 @@ class TestAWashoutStoppedHalfwayLeavesNothingBehind(SeasonCase):
         self.assertEqual(exported[0]["status"], "cancelled")
 
 
+class TestARubberWithNoGamesIsNotReportedAsATie(SeasonCase):
+    """The same washed-out night, with nobody having ticked Match Cancelled.
+
+    Without the tick there is nothing on the page to read a cancellation off, so the
+    card is an ordinary match and its empty rows go through the set checks. That is
+    the case a club is actually in when a round is rained off and the box is missed,
+    and every one of those rows was reported as "level at 0-0, so nobody won the set
+    and nothing on the card says why it stopped" -- a sentence about a contest. A row
+    with no games on it is not a contest that finished level, it is a rubber nobody
+    played, and a club reading it as a tie is left to work that out unaided. Three of
+    these came off one real exported card.
+
+    A rubber that genuinely stopped level is the other case and keeps the word. It is
+    on the same card here so that the two readings cannot be confused, and so that
+    fixing one by deleting the other fails.
+    """
+
+    ROUND = "4"
+    HOME, AWAY = "riverside-rockets", "hilltop-aces"
+    # Two whitewashes, one each way, then a rubber abandoned level, then one that
+    # never started. The whitewashes are the point of the shape: they are the rows
+    # that separate "no games on the row" from "no games for one side", and a check
+    # written against either side alone reports the two most decisive rubbers on
+    # the card as rubbers nobody played. One each way, because one of them only
+    # catches half of that.
+    SCORES = ((6, 0), (0, 6), (3, 3), (0, 0))
+    EMPTY_SLOTS = ("d2",)
+    TIED_SLOT = "s2"
+    WHITEWASH_SLOTS = ("d1", "s1")
+
+    @classmethod
+    def extra_cards(cls):
+        home_name, home_players = TEAMS[cls.HOME]
+        away_name, away_players = TEAMS[cls.AWAY]
+        folder = cls.data / f"Round{cls.ROUND}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cls.card = cw.write_card_file(folder / "unticked.pdf", cw.CardSpec(
+            date="2026-09-08", round_label=cls.ROUND, division="B",
+            court="09", match_id="4000002",
+            home_name=home_name, away_name=away_name,
+            rows=rows_for(cls.SCORES, home_players, away_players),
+            verb="VS", winner=cw.NO_TICK,
+            home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(home_players)),
+            away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(away_players))))
+
+    def issues(self, rule):
+        return [i for i in self.report.issues
+                if i.rule == rule and str(self.card) in i.detail]
+
+    def test_the_card_reads_as_a_match_that_happened(self):
+        # The premise of everything below. With no tick there is no evidence of a
+        # cancellation, so this is a played match with rows left empty -- not the
+        # cancelled card two classes up, which never reaches the set checks at all.
+        match, = [m for m in self.matches if m.round == self.ROUND]
+        self.assertIs(match.status, MatchStatus.PLAYED)
+        self.assertTrue(match.counts_as_played)
+
+    def test_each_rubber_with_no_games_on_it_is_named(self):
+        found = self.issues("set-no-games")
+        self.assertEqual(sorted(i.subject.split()[-1] for i in found),
+                         sorted(self.EMPTY_SLOTS))
+        for issue in found:
+            with self.subTest(subject=issue.subject):
+                self.assertEqual(issue.severity, validate.WARNING)
+                self.assertTrue(issue.detail.endswith(".pdf"),
+                                f"the warning does not name the card it came "
+                                f"from: {issue.detail!r}")
+
+    def test_it_says_there_are_no_games_rather_than_quoting_a_score(self):
+        # The whole of the fix is the wording, so the wording is what is asserted.
+        # "level at 0-0" reads as a match that was played out to a dead heat.
+        for issue in self.issues("set-no-games"):
+            with self.subTest(subject=issue.subject):
+                self.assertIn("no games", issue.message)
+                self.assertNotIn("level at", issue.message)
+                self.assertNotIn("0-0", issue.message)
+
+    def test_a_rubber_won_without_conceding_a_game_is_not_an_empty_one(self):
+        # Both sides have to be at zero. Measured as two surviving mutations:
+        # reading the condition off one side reported every whitewash in the
+        # competition as a rubber nobody played, and nothing else in the suite
+        # noticed. Scanned over the whole report rather than this card alone,
+        # because the clean rounds have whitewashes on them too.
+        named = " ".join(i.subject for i in self.report.issues
+                         if i.rule == "set-no-games")
+        for slot in self.WHITEWASH_SLOTS:
+            with self.subTest(slot=slot):
+                self.assertNotIn(slot, named)
+
+    def test_a_rubber_that_really_stopped_level_is_still_a_tie(self):
+        tied = self.issues("set-tied")
+        self.assertEqual([i.subject.split()[-1] for i in tied], [self.TIED_SLOT])
+        self.assertIn("level at 3-3", tied[0].message)
+
+    def test_the_empty_rubbers_are_not_also_reported_as_ties(self):
+        # Both branches firing would double-report, and the pair of messages
+        # disagree with each other about what happened.
+        subjects = " ".join(i.subject for i in self.issues("set-tied"))
+        for slot in self.EMPTY_SLOTS:
+            with self.subTest(slot=slot):
+                self.assertNotIn(slot, subjects)
+
+    def test_none_of_this_stops_the_run(self):
+        # An empty row is a fact about the night, not a misread card: the games
+        # that are on the card are still transcribed and still count.
+        for rule in ("set-no-games", "set-tied"):
+            with self.subTest(rule=rule):
+                self.assertEqual([i for i in self.report.errors
+                                  if i.rule == rule], [])
+
+
+class TestAFillInsAppearancesAreCountedInMatchesNotSets(SeasonCase):
+    """A borrowed player used in two rubbers of one night is one appearance, not two.
+
+    ``fill_in_appearances`` is the size of ``fill_ins``, a set of the same
+    ``(round, home, away)`` keys the accumulator counts as ``match_ids``, so the unit
+    is matches. The dashboard printed it as sets -- "has played 1 set outside their
+    registered roster" on a night they played two -- which is a number a club can
+    check against a scorecard and find wrong. Asserted from the data rather than from
+    the source, because the source is what was misread.
+    """
+
+    ROUND = "4"
+    HOME, AWAY = "riverside-rockets", "hilltop-aces"
+    BORROWED = "Jo Calder"          # registered to parkview-wanderers
+    BORROWED_SLUG = "jo-calder"
+    # Two of the four rubbers, on one night. Both doubles and one singles is what a
+    # club does with a borrowed player, so d1 and s1 it is.
+    RUBBERS_FILLED_IN = 2
+
+    @classmethod
+    def extra_cards(cls):
+        home_name, home_players = TEAMS[cls.HOME]
+        away_name, away_players = TEAMS[cls.AWAY]
+        # The set rows name the borrowed player; the roster block does not. That
+        # gap is what makes them a fill-in, and it is what a real card looks like.
+        rows = (
+            cw.SetRow(home_games=6, away_games=2, doubles=True,
+                      home_players=(cls.BORROWED, home_players[0]),
+                      away_players=away_players[:2]),
+            cw.SetRow(home_games=6, away_games=3, doubles=False,
+                      home_players=(cls.BORROWED,),
+                      away_players=(away_players[0],)),
+            cw.SetRow(home_games=6, away_games=4, doubles=False,
+                      home_players=(home_players[1],),
+                      away_players=(away_players[1],)),
+            cw.SetRow(home_games=6, away_games=1, doubles=True,
+                      home_players=home_players[:2],
+                      away_players=away_players[:2]),
+        )
+        folder = cls.data / f"Round{cls.ROUND}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cls.card = cw.write_card_file(folder / "borrowed.pdf", cw.CardSpec(
+            date="2026-09-08", round_label=cls.ROUND, division="B",
+            court="09", match_id="4000003",
+            home_name=home_name, away_name=away_name, rows=rows,
+            home_fill_ins=(cls.BORROWED,),
+            home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(home_players)),
+            away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(away_players))))
+
+    def borrowed(self):
+        return {p["slug"]: p for p in self.season["players"]}[self.BORROWED_SLUG]
+
+    def test_the_night_is_one_appearance_however_many_rubbers_it_was(self):
+        self.assertEqual(
+            self.borrowed()["fill_in_appearances"], 1,
+            "a borrowed player used twice in one night counts as one night away "
+            "from their own team, so the figure the page prints is matches")
+
+    def test_the_rubbers_themselves_are_still_counted(self):
+        # Otherwise the 1 above could be a fill-in whose second rubber was dropped,
+        # which is the same number arrived at by a much worse route. Three rubbers a
+        # night for their own team across rounds 1-3, plus two on loan.
+        borrowed = self.borrowed()
+        self.assertEqual(borrowed["sets_played"], 9 + self.RUBBERS_FILLED_IN)
+        self.assertEqual(borrowed["matches"], 4)
+
+    def test_the_report_names_the_loan_once_per_rubber_not_once_per_night(self):
+        # The report and the player page count different things on purpose, and
+        # this pins the difference: the report is a list of rows for a human to
+        # look at, so a row is its unit, while the page is describing a person's
+        # season. Two counts of the same event, both correct, differently worded.
+        named = [i for i in self.report.issues
+                 if i.rule == "fill-in" and self.BORROWED in i.message]
+        self.assertEqual(len(named), self.RUBBERS_FILLED_IN)
+        for issue in named:
+            with self.subTest(subject=issue.subject):
+                self.assertTrue(issue.subject.startswith(f"R{self.ROUND} "),
+                                f"a fill-in warning that does not name its "
+                                f"rubber: {issue.subject!r}")
+
+
 class TestABlankCardInventsNobody(SeasonCase):
     """A fixture called off before its players were entered, which is a real export.
 

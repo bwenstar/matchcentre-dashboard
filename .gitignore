@@ -1,0 +1,40 @@
+# Your scorecards. Ignored on purpose: they name real players, and a fork or a
+# pull request would publish them. The folder itself is kept, along with the
+# note explaining what goes in it, so a fresh clone still has somewhere to put
+# the PDFs. `python3 tools/demo.py` also writes here, and its fictional season
+# is likewise nothing to commit.
+#
+# If your club *wants* its cards in the repository -- a private repo, or results
+# that are published anyway -- delete these four lines.
+/data/*
+!/data/.gitkeep
+!/data/README.md
+!/data/*.md
+
+# Your own config.toml, for the same reason as data/: [captains], [player_names]
+# and [aliases] are lists of real people's names, and a fork or a pull request
+# would publish them. `python3 build.py` writes this file for you from the cards,
+# so a fresh clone is never without one for long. config.example.toml, which
+# documents every setting and invents every name in it, is committed instead.
+#
+# Delete this line if you want your settings in the repository — a private repo,
+# or a second machine to clone onto, are both good reasons.
+/config.toml
+
+# Generated dashboard. Rebuilt from data/ by `python3 build.py`, so it is not
+# committed by default. Delete this line if you want the built site in git —
+# publishing to GitHub Pages from the repo is a legitimate reason to.
+/site/
+
+# Design and development notes. Working documents, not part of the product.
+/notes/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors and OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

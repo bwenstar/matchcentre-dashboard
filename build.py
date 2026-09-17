@@ -66,6 +66,7 @@ if str(ROOT) not in sys.path:
     # So that `python3 /somewhere/else/build.py` finds its own package.
     sys.path.insert(0, str(ROOT))
 
+from matchcentre import __version__                           # noqa: E402
 from matchcentre import config as config_mod                  # noqa: E402
 from matchcentre import discover as discover_mod              # noqa: E402
 from matchcentre import export, scorecard, site               # noqa: E402
@@ -74,6 +75,7 @@ from matchcentre import stats as stats_mod                    # noqa: E402
 from matchcentre.competition import (Competition,             # noqa: E402
                                      CompetitionError, Provenance)
 from matchcentre.config import ConfigError                    # noqa: E402
+from matchcentre.discover import DiscoveryError               # noqa: E402
 from matchcentre.format import FormatError                    # noqa: E402
 from matchcentre.scoring import ScoringError                  # noqa: E402
 from matchcentre.site import SiteError                        # noqa: E402
@@ -136,11 +138,21 @@ class _Report:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     report = _Report()
+    _stamp(report)
 
     try:
         return _run(args, report)
-    except (ConfigError, CompetitionError, FormatError, ScoringError,
-            SiteError) as exc:
+    except (ConfigError, CompetitionError, DiscoveryError, FormatError,
+            ScoringError, SiteError) as exc:
+        # Every one of these means "the input contradicts itself", which is a
+        # sentence to print, not a stack to print. DiscoveryError was missing from
+        # this tuple until a fuzz case found it: a card that had lost a set row --
+        # a truncated download, or a rubber the club never printed -- made
+        # `discover` refuse the competition, and the refusal came out as a
+        # traceback with the whole report swallowed, so the one message that said
+        # which files disagreed was never shown. Its own docstring says it is a
+        # ValueError "so a caller that already handles bad input handles this
+        # too"; this is the caller, and it handles them by name.
         _flush(report, args)
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -148,6 +160,22 @@ def main(argv: list[str] | None = None) -> int:
         _flush(report, args)
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+
+def _stamp(report: _Report) -> None:
+    """Which build wrote this report, and which Python ran it.
+
+    Added before any work is done, and marked ``always`` so ``--quiet`` keeps it,
+    because the report is the whole of what a maintainer has to go on when a club
+    reports a problem -- and the two facts nobody ever thinks to include are which
+    version they are running and which Python is running it. Stamping it here
+    rather than in ``_compose`` means a run that dies half way through still says
+    what died: every path out of ``main`` flushes this report, including the
+    exception handlers below.
+    """
+    python = ".".join(str(part) for part in sys.version_info[:3])
+    report.line(f"matchcentre-dashboard {__version__}  "
+                f"(python {python} on {sys.platform})", always=True)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:

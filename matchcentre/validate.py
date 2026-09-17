@@ -745,7 +745,25 @@ def _check_sets(ctx: _Context) -> list[Issue]:
             # printed TOTAL row agrees with the set rows regardless. Where enough
             # sets are unfinished to leave the match undecided, _check_status says
             # so separately.
-            if result.home_games == result.away_games:
+            #
+            # 0-0 is split out because "tied" is the wrong word for it. A row with
+            # no games on it is not a contest that finished level, it is a rubber
+            # nobody played, and a club reading "level at 0-0" is left to work that
+            # out for itself. Measured on real cards: a washed-out night that
+            # nobody ticked Match Cancelled on produced three of these, all read as
+            # ties. A card whose every row is 0-0 with nothing ticked never reaches
+            # here at all — _match_status calls that UNPLAYED and _check_status
+            # names it — so what lands on this branch is a row left empty on a card
+            # that has scores elsewhere, or one that has a whole-match box ticked.
+            if result.home_games == 0 and result.away_games == 0:
+                issues.append(Issue(
+                    rule="set-no-games", severity=WARNING,
+                    message=f"{where}: no games on the row at all and no box "
+                            "ticked, so nobody is credited the set. A rubber that "
+                            "was never played reads like this when the card does "
+                            "not say so.",
+                    subject=where, detail=match.source))
+            elif result.home_games == result.away_games:
                 issues.append(Issue(
                     rule="set-tied", severity=WARNING,
                     message=f"{where}: level at {score}, so nobody won the set and "

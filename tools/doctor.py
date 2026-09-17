@@ -3,6 +3,7 @@
 
     python3 tools/doctor.py data/round-3/card.pdf
     python3 tools/doctor.py --page 2 "data/Rules 2026.pdf"
+    python3 tools/doctor.py --redact data/round-3/card.pdf   # safe to paste
 
 This is what a club runs when ``build.py`` refuses a card, so it has to be
 genuinely diagnostic rather than a second opinion. It reports the file's own
@@ -12,6 +13,23 @@ actually contains (the rectangle census, the set table's column rules and row
 bands, the checkbox census with tick state), then which header fields a tolerant
 pattern can find, then what :mod:`~matchcentre.scorecard` itself makes of the
 page, and finally a plain-language verdict.
+
+**``--redact`` is for the report you send somebody else.** The full report names
+every player on the card, both ratings for each of them, who the captain is, both
+team names, the club on the letterhead and the path the file sits at -- and the
+report ends by inviting whoever ran it to quote it if they want help. Pasted into
+a public issue tracker, that publishes a club's membership. With ``--redact``, no
+text the page carries is printed unless it is one of the Match Centre template's
+own words; everything else is replaced by its shape, so ``Priya Halloran``
+arrives as ``<2 words, 15 chars>``. The shape is what diagnoses a parsing fault
+anyway: two names read as one cell shows up in the character count.
+
+What ``--redact`` deliberately keeps, because none of it names a person and all of
+it is the diagnosis: every measurement, every count, every score, the result verb,
+the tick labels, the grade, round and court numbers, the weekday, and the
+producer line out of the file's metadata. What it removes: names, teams, the club,
+the venue, the season label, dates, times, the Match Centre match id, ratings, and
+the file's own name and path.
 
 Two deliberate choices about how it reads a page:
 
@@ -33,6 +51,8 @@ can be used in a loop over a directory.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
 import re
 import sys
@@ -44,7 +64,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from matchcentre import pdf, scorecard                        # noqa: E402
-from matchcentre.card import CardError                        # noqa: E402
+from matchcentre.card import Card, CardError                  # noqa: E402
 
 # Beyond this many pages the report is longer than anyone reads. A scorecard has
 # one page; the club's rules and draw PDFs are the long ones, and for those the
@@ -102,6 +122,178 @@ INDENT = "    "
 # emails and issue trackers.
 LABEL = 14
 
+# --- redaction ---------------------------------------------------------------
+
+# The Match Centre template's own vocabulary: the words a card prints whoever
+# played on it. ``--redact`` keeps these and shapes every other piece of text the
+# page carries. Two consequences, both deliberate:
+#
+# * somebody actually named one of these words is not redacted. The list is short
+#   and every entry is label text, so the hole is narrow.
+# * a card carrying a word this report uses as a label -- a team called "Rules",
+#   say -- has it shaped everywhere, including in the report's own headings. Ugly,
+#   and safe, and that is the right way round for the two to fail.
+#
+# `Unspecified` and `Player` are in here on purpose. Match Centre's
+# `Unspecified player` placeholder is one of the commonest things a club needs
+# help with, and a report that hid the placeholder would hide the question.
+TEMPLATE_WORDS = frozenset(word.casefold() for word in (
+    "SET", "SETS", "TOTAL", "TOTALS", "Game", "Games", "Rating", "Ratings",
+    "Player", "Players", "Unspecified", "Forfeit", "Retired", "Incomplete",
+    "Match", "Winner", "Forfeited", "Cancelled", "Disputed", "Signed", "Sign",
+    "Fill", "ins", "Court", "Round", "Division", "Grade", "Section", "Date",
+    "Time", "Venue", "Season", "Captain", "Name", "Result", "Points", "No",
+    "Home", "Away", "Singles", "Doubles", "Rubber", "Team", "Teams",
+    # Hyphenated, because a token is tested whole: with only "Fill" and "ins" in
+    # here the template's own "Fill-ins" heading was reported as an 8-character
+    # secret, which reads as though the card had something to hide there.
+    "Fill-in", "Fill-ins",
+    # The captain mark, which the card prints beside a roster name. The name it
+    # sits beside is shaped, so keeping the mark says a captain was read without
+    # saying who: `<2 words, 19 chars> (C)`. It was coming out as `<3 chars>`.
+    "(C)",
+    # Weekday names. A card's weekday is what routes it to a competition -- this
+    # tool's commonest real question is "why did my Tuesday card land in the
+    # Wednesday division" -- and no weekday names a person. The date itself is
+    # withheld by _IDENTIFYING regardless.
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    "DEFEATS", "LOSES", "DRAWS", "WITH", "TO", "VS",
+    "v", "vs", "by", "and", "of", "the", "at",
+))
+
+# Values that identify a fixture rather than describe a shape, matched by their
+# form. They catch what the word pass cannot: a value this report *derives* is no
+# longer any word on the page, so an ISO date and a match id captured out of
+# "#4200000" are invisible to a word-by-word comparison.
+#
+# These run *before* the word pass, on untouched text, because a value made of
+# more than one token is only recognisable while it is still whole. Measured: with
+# the word pass first, "7:00 PM" had its PM shaped as a two-character secret,
+# after which the time pattern no longer matched and the report published the
+# start time as "7:00".
+_IDENTIFYING: tuple[tuple[re.Pattern[str], object], ...] = (
+    (re.compile(r"\d{4}-\d{2}-\d{2}"), lambda m: "<date>"),
+    (re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"), lambda m: "<date>"),
+    # The am/pm is optional so that a 24-hour card is covered too. No structural
+    # line in this report prints a colon between two numbers, so nothing
+    # measured can be swallowed by this.
+    (re.compile(r"\b\d{1,2}:\d{2}(?:\s*[AaPp]\.?[Mm]\.?)?"), lambda m: "<time>"),
+    # Guarded against a decimal point on either side so that a coordinate, a
+    # rectangle dimension and a column position all survive intact -- those are
+    # the measurements the whole report is for.
+    (re.compile(r"(?<![\d.])\d{5,}(?![\d.])"),
+     lambda m: f"<{len(m.group())} digits>"),
+)
+
+# A roster entry's printed rating pair, `[2.34/4.23]`. Shaped rather than dropped:
+# whether one rating, two or none were read is diagnostic, and the numbers
+# themselves are not.
+_RATING_RE = re.compile(r"\[(-|\d+(?:\.\d+)?)/(-|\d+(?:\.\d+)?)\]")
+
+
+def _shape(text: str) -> str:
+    """What a redacted string is replaced by: its size, not its content."""
+    words = len(text.split())
+    if words > 1:
+        return f"<{words} words, {len(text)} chars>"
+    return f"<{len(text)} chars>"
+
+
+def _rating_shape(match: re.Match[str]) -> str:
+    return "[" + "/".join("-" if side == "-" else "x.xx"
+                          for side in match.groups()) + "]"
+
+
+class _Redactor:
+    """Everything the page said, so that none of it can be printed.
+
+    Built the other way round from the obvious design. Rather than each print
+    site deciding whether its value is safe -- which fails the moment a new line
+    is added, or when :func:`matchcentre.scorecard.describe` grows a field this
+    file does not know about -- the report is written normally into a buffer and
+    then scrubbed against what the page turned out to contain. One mechanism
+    therefore covers the header captures, the reader's own summary, the roster
+    lines, the verdict, the card's warnings *and* the text quoted inside a
+    refusal reason, including whatever any of them prints next year.
+
+    The secret set is gathered two ways at once, so an unreadable page -- the
+    case this whole tool exists for, and the case where a field-by-field
+    redactor has nothing to work from -- is covered as well as a clean one:
+
+    * every word the page draws that is not in :data:`TEMPLATE_WORDS`. This
+      needs nothing to parse.
+    * the full multi-word values off the parsed card, when it parses, so that
+      ``Priya Halloran`` is shaped as one name rather than as two words.
+
+    Single characters are never secrets: shaping every "J" on the page would
+    take the report's own punctuation with it. An initial standing alone
+    therefore survives, which is the one thing here that is a compromise rather
+    than a decision.
+    """
+
+    def __init__(self) -> None:
+        self._secrets: set[str] = set()
+
+    # --- learning ---
+
+    def learn_page(self, page: pdf.Page) -> None:
+        for word in page.words:
+            for token in word.text.split():
+                self._add(token)
+        if page.source:
+            self._secrets.add(page.source)
+
+    def learn_card(self, card: Card) -> None:
+        for value in (card.club_hint, card.venue, card.season_hint,
+                      card.home_name, card.away_name):
+            self._add(value)
+        for parsed in card.sets:
+            for name in parsed.home_players + parsed.away_players:
+                self._add(name)
+        for entry in card.home_roster + card.away_roster:
+            self._add(entry.name)
+        # Added past _add's letter test rather than through it: both are pure
+        # digits, and both name this fixture in a public database.
+        for digits in (card.match_id, card.date):
+            if len(digits) >= 3:
+                self._secrets.add(digits)
+
+    def learn_path(self, path: Path) -> None:
+        """The file's own path, which the reader's summary prints as `source:`."""
+        self._secrets.add(str(path))
+        self._secrets.add(str(Path(path).resolve()))
+        for part in Path(path).parts:
+            self._add(part)
+        self._add(Path(path).stem)
+
+    def _add(self, text: str) -> None:
+        for candidate in (text.strip(), text.strip("'\"()[]{},.:;!?-_ ")):
+            if len(candidate) < 2:
+                continue
+            if not any(ch.isalpha() for ch in candidate):
+                continue                      # a number is a score, or an id
+            if candidate.casefold() in TEMPLATE_WORDS:
+                continue
+            self._secrets.add(candidate)
+
+    # --- using ---
+
+    def scrub(self, text: str) -> str:
+        for expression, replace in _IDENTIFYING:
+            text = expression.sub(replace, text)
+        text = _RATING_RE.sub(_rating_shape, text)
+        if self._secrets:
+            # Longest first, so a full name is shaped as a name and not as two
+            # shaped words; one pass, so a replacement cannot be re-matched.
+            # Lookarounds rather than \b because a secret can begin or end with
+            # punctuation, where \b means the opposite of what is wanted.
+            ordered = sorted(self._secrets, key=len, reverse=True)
+            pattern = re.compile(r"(?<!\w)(?:"
+                                 + "|".join(re.escape(s) for s in ordered)
+                                 + r")(?!\w)")
+            text = pattern.sub(lambda m: _shape(m.group()), text)
+        return text
+
 
 def _row(label: str, value: str, *, indent: str = "") -> None:
     print(f"{indent}{label:<{LABEL}}{value}")
@@ -116,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="the PDF to explain; repeatable")
     ap.add_argument("--page", type=int, default=None, metavar="N",
                     help="examine only this page, counting from 1")
+    ap.add_argument("--redact", action="store_true",
+                    help="replace every name, team, date and path with its "
+                         "shape, so the report can be pasted into a public "
+                         "issue without publishing who played")
     args = ap.parse_args(argv)
 
     worst = 0
@@ -123,7 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         for index, path in enumerate(args.paths):
             if index:
                 print()
-            worst = max(worst, _one_file(path, page=args.page))
+            worst = max(worst, _one_file(path, page=args.page,
+                                        redact=args.redact, number=index + 1))
         sys.stdout.flush()
     except BrokenPipeError:
         # `doctor.py card.pdf | head` closes the pipe while there is still report
@@ -138,9 +335,33 @@ def main(argv: list[str] | None = None) -> int:
     return worst
 
 
-def _one_file(path: Path, *, page: int | None) -> int:
+def _one_file(path: Path, *, page: int | None, redact: bool = False,
+              number: int = 1) -> int:
+    """One file's report, redacted as a whole if that was asked for.
+
+    Redaction cannot happen line by line as the report is written, because what
+    has to be removed is only fully known once the page has been read -- so the
+    report is written into a buffer, and scrubbed against what the page contained
+    before any of it reaches the terminal. The exit status is decided by the
+    report, not by the scrubbing, so ``--redact`` cannot change the verdict.
+    """
+    if not redact:
+        return _report(path, page=page, label=str(path), redactor=None)
+
+    redactor = _Redactor()
+    redactor.learn_path(path)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = _report(path, page=page, redactor=redactor,
+                       label=f"#{number}  (name and path withheld by --redact)")
+    print(redactor.scrub(buffer.getvalue()), end="")
+    return code
+
+
+def _report(path: Path, *, page: int | None, label: str,
+            redactor: _Redactor | None) -> int:
     print("=" * 72)
-    print(f"file          {path}")
+    print(f"file          {label}")
     print("=" * 72)
 
     if not path.is_file():
@@ -177,7 +398,7 @@ def _one_file(path: Path, *, page: int | None) -> int:
     for index in wanted:
         print()
         worst = max(worst, _one_page(path, index, count, raw,
-                                     fonts_ok=fonts_ok))
+                                     fonts_ok=fonts_ok, redactor=redactor))
     return worst
 
 
@@ -325,13 +546,25 @@ def _ascii(raw: bytes) -> str:
 
 
 def _one_page(path: Path, index: int, count: int, raw: bytes, *,
-              fonts_ok: bool = True) -> int:
+              fonts_ok: bool = True, redactor: _Redactor | None = None) -> int:
     print(f"page {index + 1} of {count}")
     try:
         page = pdf.extract(path, page=index)
     except pdf.PdfError as exc:
         print(f"{INDENT}This page cannot be read: {exc}")
         return 1
+
+    if redactor is not None:
+        # Before anything below it prints. The page is parsed a second time here,
+        # purely to learn the full multi-word names, and the failure is ignored
+        # because the word-level pass above it does not need the page to parse --
+        # which is the case that matters, since a page that will not read is why
+        # anybody is running this.
+        redactor.learn_page(page)
+        try:
+            redactor.learn_card(scorecard.read_page(page))
+        except CardError:
+            pass
 
     paper = PAPERS.get((round(page.width), round(page.height)), "")
     _row("size", f"{page.width:g} x {page.height:g} pt  "

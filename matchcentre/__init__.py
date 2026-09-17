@@ -31,7 +31,16 @@ from __future__ import annotations
 
 import sys
 
-__version__ = "1.0.0"
+#: This release, and the number a club quotes when reporting a problem. It is
+#: printed on the first line of every ``build.py`` report, recorded in each
+#: ``season.json``, and shown in the dashboard's footer, so an issue can say which
+#: build produced the output it is complaining about without anybody having to ask.
+#:
+#: It read ``1.0.0`` while ``CHANGELOG.md`` documented ``0.1.0`` and nothing
+#: anywhere read the constant, so there was no run in which the disagreement could
+#: show up. A test now requires this to equal the newest version the changelog
+#: documents.
+__version__ = "0.1.0"
 __all__ = ["__version__", "REQUIRES_PYTHON"]
 
 #: The oldest Python this code runs on. Set by ``tomllib``, which arrived in 3.11

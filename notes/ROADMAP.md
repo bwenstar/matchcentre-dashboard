@@ -245,8 +245,10 @@ how per-player pages work when players have no names.
 ## 5. Growth: more clubs, more seasons
 
 Multi-season is implemented (`seasons = "multi"`, season key from the first path
-segment, ids carrying the season, per-season ladders, cross-season career totals).
-The growth risks are elsewhere.
+segment, ids carrying the season, per-season ladders). Cross-season career totals
+are *not*: this line claimed them, three shipped files repeated the claim, and no
+such code exists. The docs now say so; the feature is listed in §8 below as a real
+piece of unbuilt work rather than a described one. The growth risks are elsewhere.
 
 **Many seasons.** Rebuild cost is linear and the front page groups by season, so
 the mechanical part is fine. What degrades is human review: the review checklist
@@ -325,3 +327,128 @@ Kept here so it does not get re-proposed.
 - **Guessing anything currently reported as derived.** Every item on the review
   checklist is there because guessing it was measured producing a confidently
   wrong dashboard. Convenience does not outrank that.
+
+---
+
+## 8. Suggested next work, in order
+
+Written after the first run against a club's real cards and its association's real
+points sheet (`notes/VERIFICATION.md` §9). Ordered by value per hour, not by size.
+
+1. ~~**Two wrong words, both found on real data.**~~ **Done.** `set-tied` no longer
+   claims a rubber with no games on it finished level: the 0-0 case is split out as
+   `set-no-games`, which says nobody is credited the set and that a rubber never
+   played reads like this when the card does not say so. And `web/app.js` now labels
+   `fill_in_appearances` as matches, with a comment naming `stats.py` as the reason,
+   because `fill_ins` holds match keys.
+
+2. **Reconcile against the association's published sheet, as a build step.** An
+   optional `[competitions.<id>.expected]` table holding what the sheet says —
+   points and matches played per team — with the build reporting any team whose
+   computed figure differs, and by how much. This is exactly the check done by
+   hand for §9, it is the check a club will do every week regardless, and it is
+   the only check that catches a wrong `unplayed`, a wrong `sets` rule or a
+   missing card in one line. Note where the line is: this reads an *expectation*
+   and reports disagreement. It must never read a *result* — §7 stands — so a
+   mismatch is a warning naming both figures and nothing on any page moves.
+   Against the real data it would have named the one residual 0.2 gap (a card
+   whose own `TOTAL`, tick and set rows all agree on 2.9 where the sheet implies
+   3.1) instead of leaving it to be found by eye.
+
+3. **The unattended trio, from §1.2.** A change detector over `(path, size,
+   mtime_ns)`, per-run report files kept newest-last, and a one-line build status
+   on the front page. All three are stdlib, all three are testable here, and
+   together they deliver the half of the goal that needs no network: nobody has to
+   run the script.
+
+4. **The byte-identical rebuild, as a committed test** (§6.2). Held by hand across
+   four processes and two `PYTHONHASHSEED` values; uncommitted, it guards nothing.
+   It is what makes an automated nightly diff mean "a result changed".
+
+5. **Anonymised output** (§4). A build option rendering players as initials or
+   roster positions. Needed *before* anything is published, not after, and it is
+   real work: per-player pages have to still make sense when players have no
+   names.
+
+6. **A nudge toward `min_sets_for_result`.** It cannot be detected, defaults to
+   three quarters of the slots, and nothing prompts a club whose grade disagrees.
+   The evidence exists at build time: when a competition has a match that was
+   played but not decided, say so on the review checklist and name the setting.
+   Written commented into a generated config (`config.py:704`) is not the same as
+   raised at the moment it matters.
+
+7. **Cross-season career totals.** Genuinely unbuilt, and now documented as such.
+   Worth doing only with the traceability rule intact: a career figure must be
+   presented as a sum of per-season figures a reader can still open and check,
+   never as a number with no season behind it.
+
+8. **`--only <season>`** (§5), so a club rebuilding this week's cards does not have
+   to re-read a review checklist covering ten years of archive.
+
+### 8.1 What can be built for the fetcher without a network
+
+The fetcher itself is gated on §2.1 and stays gated. What is *not* gated is its
+contract, and the contract is testable on loopback:
+
+- Serve a directory of `tools/demo.py` cards over `http.server` on 127.0.0.1 and
+  write the fetcher against that. Stdlib, no network, and it exercises retrieval,
+  naming, the not-a-PDF path, the duplicate path and the expected-count assertion
+  — everything except the real site's authentication and HTML.
+- Keep it `tools/fetch.py`, invoked separately, writing only into a directory.
+  `build.py` must not learn to fetch (§1.1).
+- The three assertions that belong to the fetcher because the builder structurally
+  cannot make them: verify the letterhead of every file before keeping it (ids are
+  sequential within a round, so an off-by-one retrieves another club's match);
+  never overwrite a card without comparing bytes first, because a corrected result
+  is a real event; and assert the expected card count per round, since from inside
+  a season a missing card and a resting team are identical (F1).
+- The classic failure — a login page saved as `card.pdf` — is already handled
+  correctly downstream: it is refused by path with a reason (F4, F5). That is a
+  safety net, not a substitute for the fetcher noticing.
+
+---
+
+## 9. The GitHub-readiness pass, and what it deliberately left
+
+Done in the run recorded as `notes/VERIFICATION.md` §10. Listed here because half of
+it changes what the *next* work should be.
+
+**Delivered.** `tools/doctor.py --redact`; the version stamped on all five generated
+artefacts from one constant; `tests/test_hostile_input.py` and the `DiscoveryError`
+bug it found; `tests/test_doctor.py`; `tools/screenshots.py` and the five README
+images; `.github/workflows/tests.yml` (3.11, 3.12, 3.13, no install step) and
+`demo.yml` (the demo season published to Pages); two issue forms, a pull-request
+template and `CONTRIBUTING.md`; a README quick start.
+
+Two of those change the shape of a support conversation, which is worth saying
+plainly. A club can now report a card that will not read *without sending the card*,
+and the wrong-number issue form asks which scoring scheme is in force before it asks
+anything else — because a ladder computed under the wrong scheme is not an error, it
+is a plausible, wrong table, which is worse and is the failure this project is most
+likely to be blamed for.
+
+**Deferred on purpose, in the order they are worth doing.**
+
+1. **The `[competitions.<id>.expected]` reconciliation table** — still §8 item 2,
+   and now the most valuable thing on the list. Unchanged by this pass, and the
+   reason it was deferred is only sequencing: it is a scoring-adjacent feature and
+   this pass was deliberately confined to packaging, so that nothing in it could
+   move a number on a page.
+
+2. **A reader registry, for other associations' scorecard layouts.** The idea is one
+   entry point that tries each known layout in turn and reports which one matched, so
+   that a club whose association prints a different letterhead is a *registration*
+   rather than a fork. Deferred because it cannot be designed yet, and the missing
+   input is a real foreign card (§6 item 5): a registry built from one layout and
+   imagination would encode this template's assumptions in the shape of the plugin
+   interface, which is the expensive kind of wrong. The honest order is: obtain a
+   card from another association, make it read, and only then factor out what the two
+   readers turned out not to share.
+
+   Note the line this must not cross. §7 rules out reading results from anything but
+   a scorecard, and that stands: a registry is about *more layouts of scorecard*, not
+   about a second kind of source. An HTML ladder, a spreadsheet or a typed-in score
+   is still refused, for the reason given there.
+
+3. **Anything for the network fetcher.** Still gated on §2.1, which is a permissions
+   question and not a coding one.

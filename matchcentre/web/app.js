@@ -2408,9 +2408,14 @@ function slotAppearanceTable(p) {
     table(['Slot', 'Played', 'Won', 'Win rate'], rows,
       { caption: 'Which of this format’s set slots the player is used in.' })
   ]));
+  // Matches, not sets: stats.py counts fill_in_appearances as the number of
+  // distinct match keys the player appeared in off their own roster -- the same
+  // keys it counts as match_ids -- so a player used in three rubbers of one
+  // night is one appearance here, not three. The word said "set" until it was
+  // checked against what the field holds.
   if (p.fill_in_appearances) {
     out.appendChild(note('warning', 'Fill-in', p.name + ' has played ' +
-      p.fill_in_appearances + ' ' + plural(p.fill_in_appearances, 'set') +
+      p.fill_in_appearances + ' ' + plural(p.fill_in_appearances, 'match', 'matches') +
       ' outside their registered roster.'));
   }
   return out;
@@ -3220,7 +3225,14 @@ function boot() {
     window.addEventListener('resize', onResize);
     var footer = document.getElementById('foot-note');
     if (footer) {
-      footer.textContent = 'Generated ' + (m.generated || '—') + ' from ' +
+      // The version leads, because this line is what somebody reads back when
+      // they report that a figure on this page looks wrong. Falls back rather
+      // than printing 'undefined' for a season.json written before the key
+      // existed -- an older document still renders, and saying the version is
+      // unrecorded is the honest form of not knowing it.
+      footer.textContent = 'matchcentre-dashboard ' +
+        (m.version || 'version not recorded') + ' · generated ' +
+        (m.generated || '—') + ' from ' +
         (m.source_dir || 'the scorecard folder') + ' · ' + SOURCE_NOTE +
         ' · points, ladder and averages computed by matchcentre/stats.py.';
     }

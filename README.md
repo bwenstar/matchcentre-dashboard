@@ -20,11 +20,34 @@ data/                      python3 build.py            site/index.html
 Nothing is typed in twice. Every score, date, round, division, team name, player
 name and rating comes off the cards themselves.
 
+![The ladder page of a dashboard, with the scoring rules that produced it printed above it](docs/screenshots/ladder.png)
+
+---
+
+## Quick start
+
+```bash
+python3 tools/demo.py     # invents a fictional club's season of scorecards
+python3 build.py          # reads them, writes site/
+```
+
+Open `site/index.html`. That is the tool working, on made-up data, in two
+commands and about ten seconds.
+
+Then delete `data/demo-season/`, put your own PDFs in `data/`, run
+`python3 build.py` again, and read what it printed. The rest of this file is
+detail: [where the PDFs come from](#getting-the-pdfs-out-of-match-centre),
+[how to name the folders](#where-to-put-them), and — the one thing you do have to
+tell it — [which scoring scheme your competition
+uses](#scoring-presets-and-picking-yours).
+
 ---
 
 ## Contents
 
+- [Quick start](#quick-start)
 - [What you get](#what-you-get)
+- [What it looks like](#what-it-looks-like)
 - [What you need](#what-you-need)
 - [See it work before you have any cards](#see-it-work-before-you-have-any-cards)
 - [Getting the PDFs out of Match Centre](#getting-the-pdfs-out-of-match-centre)
@@ -39,6 +62,7 @@ name and rating comes off the cards themselves.
 - [Troubleshooting](#troubleshooting)
 - [All the commands](#all-the-commands)
 - [Checking the tool itself](#checking-the-tool-itself)
+- [Reporting a problem](#reporting-a-problem)
 - [How it works, briefly](#how-it-works-briefly)
 - [Licence](#licence)
 
@@ -72,6 +96,39 @@ case you want to do something else with them.
 
 Each competition folder is self-contained. You can zip one and email it, and it
 opens on a machine that has never heard of this tool.
+
+---
+
+## What it looks like
+
+Every picture below is a real dashboard built by the two commands in the [quick
+start](#quick-start) — but from a season nobody played. `tools/demo.py` invents the
+club, the six teams, the eighteen players and their scorecards, so no real person
+is on this page. Yours will look like this with your club's names in it.
+
+**Every match, with its set scores and anything unusual the card recorded.**
+
+![The matches page, listing each round's matches and the set scores of every rubber](docs/screenshots/matches.png)
+
+**One team: its home and away split, its recent form, its record in each rubber,
+and its head-to-head against every other side.**
+
+![A team page showing form, home and away split, and per-rubber record](docs/screenshots/team.png)
+
+**One player: sets and games, singles and doubles apart, and how the rating printed
+on the cards moved through the season.**
+
+![A player page showing sets, games, singles and doubles records and a rating chart](docs/screenshots/player.png)
+
+**Everyone who played, sortable, with the players the tool is unsure about called
+out rather than quietly merged.**
+
+![The players page, a sortable table of every player's record](docs/screenshots/players.png)
+
+The `demo` workflow builds the same season and publishes it to GitHub Pages, so a
+fork with Pages switched on has a live copy to click around in. Turn it on under
+**Settings → Pages → Source → GitHub Actions**; the address is then the one that
+workflow prints in its own summary.
 
 ---
 
@@ -898,6 +955,9 @@ python3 build.py --discover --force     # rewrite config.toml from the cards,
 python3 tools/doctor.py CARD.pdf        # explain one PDF, and why it did or
                                         # did not read as a scorecard
 python3 tools/doctor.py --page 2 F.pdf  # look at one page of a multi-page PDF
+python3 tools/doctor.py --redact C.pdf  # the same report with every name, team,
+                                        # venue and date replaced by its shape,
+                                        # so it can be pasted into an issue
 
 python3 tools/demo.py                   # write a fictional season into data/
 python3 tools/demo.py --clean           # replace a previous demo
@@ -942,6 +1002,8 @@ being quietly wrong:
 | `test_pipeline.py` | Cards to finished dashboard, end to end |
 | `test_web_assets.py` | The page: that every promised panel is built and placed |
 | `test_cli.py` | `build.py` as a program — exit statuses, output, rebuilds |
+| `test_doctor.py` | `tools/doctor.py --redact` — that no name survives it and every measurement does |
+| `test_hostile_input.py` | Truncated, corrupt and not-really-PDF files — that each is refused in words, and none is read as a different match |
 | `test_project_complete.py` | That a fresh copy is complete, generic and empty of data |
 
 A single file runs on its own, which is quicker while you are working:
@@ -950,6 +1012,41 @@ A single file runs on its own, which is quicker while you are working:
 python3 tests/test_foundation.py          # one line per test, and a name that
                                           # says what broke
 ```
+
+The same command runs on every push here, on Python 3.11, 3.12 and 3.13, in
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml). There is no
+`pip install` step in that file either, which is how the "Python is the whole list"
+promise above stays true rather than merely intended: a dependency creeping in
+fails the workflow on the import. If you fork this, the same workflow runs on your
+branches for free.
+
+---
+
+## Reporting a problem
+
+**Please do not attach the scorecard.** It has both teams, every player who was on
+court, their ratings and the captains on it, and an issue on GitHub is public
+forever. Run this instead and paste what it prints:
+
+```bash
+python3 tools/doctor.py --redact path/to/the-card.pdf
+```
+
+`--redact` replaces every name, team, club, venue, date and path with its shape —
+`Priya Halloran` becomes `<2 words, 15 chars>` — and keeps every measurement,
+score, count and structural fact. That is the half needed to diagnose a card and
+the half that identifies nobody. Read it before you paste it.
+
+Two things are worth including whatever the problem is. The first line of the
+report `build.py` prints, which says which version and which Python produced what
+you are describing. And, if a number looks wrong, the `== rules in force` block —
+a ladder computed under the wrong scoring preset is not an error but a plausible,
+wrong table, and it is the commonest cause by a distance.
+
+There are issue forms for [a card that will not
+read](.github/ISSUE_TEMPLATE/card-not-read.yml) and for [a number that looks
+wrong](.github/ISSUE_TEMPLATE/wrong-number.yml) that ask for exactly this.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers sending a fix rather than a report.
 
 ---
 

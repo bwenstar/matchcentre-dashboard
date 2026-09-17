@@ -37,7 +37,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from . import scoring, stats, validate
+from . import __version__, scoring, stats, validate
 from .card import Card, Rejection
 from .competition import (DRAW_DECLARED, Club, Competition, Provenance,
                           merge_provenance, round_sort_key)
@@ -135,6 +135,12 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         "season_key": competition.season_key,
         "season_label": _season_label(competition),
         "seasons_mode": seasons_mode,
+        # Which build wrote this document. `format` above says what the *shape*
+        # means and is bumped only when a key changes meaning; this says which
+        # release produced the numbers, which is the question a bug report about a
+        # figure on the page actually needs answered. A constant, so it costs the
+        # byte-identical rebuild nothing.
+        "version": __version__,
         "generated": generated or datetime.now().replace(microsecond=0).isoformat(),
         # Null unless a human said how long the season is (F3). The predecessor
         # filled this with the number of rounds played, so a third of the way

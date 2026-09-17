@@ -537,13 +537,53 @@ the check is answering "were names recorded" and not "was this card any good".
 Monday's warnings went 6 → 8: the two round 2 cards keep their `no-result` lines, and
 the placeholder card gains one.
 
-### Two smaller findings this run surfaced, not yet actioned
+### Two smaller findings this run surfaced, both now fixed
 
-- `set-tied` says *level at 0-0, so nobody won the set and nothing on the card says
-  why it stopped* on rubbers that were plainly never played. Three of them here.
-  "Tied" is the wrong word for a rubber with no games in it.
-- `app.js` labels `fill_in_appearances` as sets in the players-to-check table, while
-  `stats.py` counts matches.
+Both were wording, neither moved a number, and both were figures a club can check by
+hand against a card — which is what made them worth the change.
+
+**A rubber with no games called a tie.** `set-tied` said *level at 0-0, so nobody won
+the set and nothing on the card says why it stopped* on rubbers that were plainly
+never played; three of them on the round 2 washout here. A row with no games on it is
+not a contest that finished level. Split out as its own rule, `set-no-games`, with its
+own sentence: *no games on the row at all and no box ticked, so nobody is credited the
+set. A rubber that was never played reads like this when the card does not say so.*
+
+Worth noting where it now fires and where it does not. On *these* cards it fires
+nowhere: the round 2 washout is ticked `Match Cancelled`, so it never reaches the set
+checks at all — the cancellation fix above took it out of `playable`. What it is for
+is the case one tick away from that, and the case the README documents: a night rained
+off where nobody ticked the box. That card reads as an ordinary match and every empty
+row goes through the set checks. So the finding was surfaced by a cancelled card and
+the fix serves the uncancelled one.
+
+A card whose *every* row is 0-0 is `UNPLAYED` before it gets here and is named by
+`_check_status` instead, so the new rule is about the part-played night.
+
+**A count of matches printed as sets.** `web/app.js` said *has played 1 set outside
+their registered roster* on a night a borrowed player was used in two rubbers. The
+field is `fill_in_appearances`, and `stats.py` builds it from a set of the same
+`(round, home, away)` keys it counts as `match_ids` — so the unit is matches. Now
+`plural(..., 'match', 'matches')`, with the plural spelled out because `plural()`
+otherwise appends an `s` and prints *2 matchs*.
+
+The earlier note in this file put the label in the players-to-check table. It is in
+the slot-appearance note on a player's own page; the players-to-check Note column
+prints *played outside their own roster* and names no unit at all.
+
+The report and the page deliberately count the same event differently — the report
+lists one `fill-in` warning per rubber, because a row is what a human is being asked
+to look at — and there is now a test pinning that difference so neither is "corrected"
+into the other.
+
+**Tests.** Two new classes plus one in the web-asset suite, 433 tests in all, and 15
+mutations across `validate.py`, `stats.py` and `app.js`, all caught — but only after
+two survived and were run down. Both survivors were the same hole: the season's cards
+had no row with one side on zero and the other above it, so a condition reading
+`home_games == 0` alone, or `away_games == 0` alone, behaved identically to one
+reading both. The fixture card now carries a whitewash each way (`6-0` and `0-6`)
+beside the empty row, and the assertion runs over the whole report rather than that
+card alone, since the clean rounds have whitewashes on them too.
 
 ### One documented feature that was never built
 
@@ -608,3 +648,163 @@ Two real survivors before that fix:
   explicitly, house style being explicit-though-redundant, so nothing exercised the
   dataclass default and flipping it survived. Covered by a test that builds a
   `Ruleset` by hand and asserts it pays nothing for a round nobody played.
+
+## 10. Made publishable: the version stamp, damaged files, and a report a club can paste
+
+Written while getting the project ready to be a public repository rather than a
+folder. Everything here is about the gap between "it works on this machine" and
+"somebody who has never met me can report a problem with it" — which is a
+verification question, because a bug report that omits the version, or that a club
+is unwilling to send at all, is a bug that cannot be found.
+
+### 10.1 One version, and the five places it has to be printed
+
+`matchcentre.__version__` is now the only place the number is written, and it
+reaches five generated artefacts: the report's first line (with the Python version
+and platform beside it), `meta.version` in `season.json`, the embedded
+`season-data.js` island, the front page's footer as plain HTML, and each
+competition page's footer, which `app.js` fills from `m.version`.
+
+The stamp is added in `_stamp` before any work is done, and marked `always` so
+`--quiet` keeps it, because a run that dies half way through still has to say what
+died. Every path out of `main` flushes the report, including both exception
+handlers.
+
+Six mutations, all caught by `tests/test_cli.py::TestEveryArtefactSaysWhichBuildMadeIt`
+and `tests/test_project_complete.py::TestTheVersionNumberIsOneNumber`: the report
+line losing it, `season.json` writing an empty string, the front-page footer
+dropping it, the footer element being renamed out from under `app.js`, `app.js`
+printing an empty string, and the code disagreeing with the changelog's newest
+release heading. The last one is the only guard against the number in `__init__.py`
+and the number a reader sees in `CHANGELOG.md` drifting apart, which is the way
+this normally goes wrong.
+
+### 10.2 Damaged PDFs: one real bug, and one deliberate non-fix
+
+`tests/test_hostile_input.py` is a deterministic fuzz suite: truncated files,
+corrupted cross-reference tables, cyclic object references, absurd numbers,
+scorecards with a set row removed, and bytes that are not a PDF at all. The promise
+is not that any of these read — it is that each is *refused by path with a reason*
+rather than raising, and that a build over a folder of them exits with an
+explanation.
+
+Most of the damage class changes nothing, and the reason is structural rather than
+lucky: `pdf.py` locates objects by scanning the file and measures the page from its
+own marks, and never consults the xref table, the trailer, `startxref`, `/Length`
+or `/Count`. Corrupting those is corrupting something the reader does not read.
+
+**The bug it found.** A card that had lost a set row made `discover` refuse the
+competition, and `DiscoveryError` was missing from the exception tuple in
+`build.py:145`. The refusal came out as a traceback with the whole report swallowed,
+so the one message naming the files that disagreed was never shown. Fixed by
+handling it by name; the mutation that removes it again is caught.
+
+**The non-fix, recorded rather than quietly left.** On any of those error paths
+`_flush` prints only the stamp, because `_run` adds nothing to the report until
+`_compose` at the very end. So a run that dies on a format disagreement prints the
+version, the error and no list of the files involved; `--check`, or a re-run once
+the config is fixed, prints the list. Restructuring the report so it can be
+half-composed is a bigger change than the payoff, and the safe half is already true:
+nothing wrong is published, and the exit code is nonzero. Left as it is, on purpose,
+so that nobody reads the terse error path as an unnoticed defect.
+
+### 10.3 `--redact`: which of its defences actually hold
+
+`tools/doctor.py --redact` prints the same diagnostic report with every name, team,
+club, venue, date, path and rating replaced by its shape. It exists because
+diagnosing a card that will not read needs the page's measurements, and the only
+other way to send those is to attach a PDF naming both teams, every player who took
+a court and both captains.
+
+`tests/test_doctor.py` checks it against a card whose every value is written in the
+test file, so the check knows what was on the page independently of what the
+redactor thought it learned. That distinction is the whole method: a test that asked
+the redactor what it had learned could not catch the failure that matters, which is
+a value it never learned about.
+
+Which defences are load-bearing was then established by deleting each in turn and
+re-running, rather than assumed:
+
+- **Load-bearing** — the `dd/mm/yyyy` pattern (a date has no letters in it, so the
+  word pass never learns it), the time pattern, the rating-pair pattern,
+  longest-secret-first ordering, `TEMPLATE_WORDS`, the "must contain a letter" test
+  that keeps the geometry out of the secret list, `learn_path` and `learn_card`.
+  Each of those, removed, turns this file or `test_hostile_input.py` red.
+- **Defence in depth, and said so out loud** — the ISO-date pattern. No test here
+  can be made to fail by removing it: on a card that parses, `learn_card` records
+  the same string outright, and on a card that does not parse there is no derived
+  date to print. Checked empirically rather than argued, by patching a copy of
+  `doctor.py` with both date patterns removed and running it over five cards, whole
+  and damaged, with no date leaking. The finding is written into the test beside the
+  assertion, so a green suite is not misread as evidence the pattern works.
+
+**16 of 17 mutations caught** (`/tmp/mutate8.py`); the seventeenth is the ISO
+pattern above, which is unkillable for the reason given rather than uncovered.
+
+Two of the four initial survivors were mine, not the code's: `learn_path` and
+`learn_card` are caught by test classes I had not named in the case. The driver
+pre-flights every target set unmutated, so those showed up as "still passed"
+against a set that never included the test which catches them — the §9 lesson,
+arriving again from the other direction.
+
+**The word sweep, and the three near-misses that shaped it.** Beside the
+hand-written list there is a sweep over every word the page draws, asserting none
+of them appears in the redacted report unless it is template vocabulary. It first
+failed on `Club`, `S1` and `Tue`, and all three were the report printing a word of
+its own rather than a value off the card: the page draws `Tue` and the report
+deliberately prints `Tuesday` (the weekday is kept — "why did my Tuesday card land
+in the Wednesday division" is the commonest real question this tool is asked), the
+page draws `S1` and the report's derived format line says `d1-s1-s2-d2`, the page
+draws `Club` and the report has a label called `club hint`. Fixed by matching whole
+words case-sensitively, and the resulting limitation — a leak in a different case
+escapes the sweep — is written into the test, which is why the names, teams, club
+and venue are also checked case-folded by hand.
+
+### 10.4 A stale test replaced by one that cannot go stale
+
+`test_project_complete.py` asserted that `.github/` did not exist, which was true
+when it was written and encoded a decision rather than a promise. It duly failed the
+day the workflows were added, having caught nothing but the change it was written to
+forbid. It is now a biconditional: the README mentions CI if and only if a workflow
+file exists, plus a check that every workflow the README names is a file that is
+there. A rule about which answer is correct goes stale; a rule that the README and
+the repository give the *same* answer does not.
+
+Both leak scanners were extended to `.yml` at the same time, so the new `.github/`
+metadata is covered by the existing no-club-specifics and no-dangling-reference
+guarantees. An issue form quoting an example name is exactly where a real one gets
+pasted in by accident.
+
+### 10.5 The README's pictures are generated, and were checked to be
+
+`tools/screenshots.py` invents a club with `tools/demo.py`, builds it with
+`build.py`, and photographs the result with a headless browser. Nobody in the five
+images exists. The seed is fixed, the timestamp is pinned, and both commands run
+inside the throwaway directory with relative paths so that this machine's temp path
+does not end up in the dashboard footer of a published picture.
+
+Reproducibility measured, not assumed: regenerated into a separate directory from a
+fresh demo build and a fresh browser profile, and all five PNGs are byte-identical
+to the committed ones, to the byte and to the size. The claim's scope is the same
+machine and the same browser build — a different Chrome version would re-encode —
+which is enough for the property that was wanted: a commit that touches an image is
+a commit where something on the page changed.
+
+The one thing in this project that reaches outside the standard library lives here,
+and it is confined: the browser is *shelled out to*, never imported, it is looked
+for rather than assumed, and its absence is explained and exits 2. The
+stdlib-only test still covers this file, and the suite still passes on a machine
+with no browser at all.
+
+### Tests
+
+**455 → 490 tests**, all passing (48s):
+
+```
+cd tests && rm -rf __pycache__ ../matchcentre/__pycache__ &&
+  PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -t .
+```
+
+CI runs the same command on Python 3.11, 3.12 and 3.13 with no install step of any
+kind — which is itself part of the point. A workflow that needed `pip install` would
+mean the no-dependency claim had quietly stopped being true.

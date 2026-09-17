@@ -97,6 +97,14 @@ Initial release.
   distinguishes the two real cases: a card called off before the names went in, where
   there is nothing to do, and a card that was played whose rubbers have games but
   nobody to credit them to, which wants fixing in Match Centre and exporting again.
+- A rubber with no games on it reported as a rubber nobody played rather than as a
+  set that finished level. A night rained off after two rubbers arrives as an
+  ordinary card with empty rows whenever nobody ticked `Match Cancelled`, and
+  describing those rows as level at 0-0 describes a contest that did not take
+  place. They are reported as `set-no-games`, separately from a rubber that
+  genuinely stopped level, which keeps its score in the message; a card whose every
+  row is empty is still reported once as a fixture that has not happened, rather
+  than row by row.
 - Configuration in `config.toml`, read with `tomllib`. A run that finds no config
   writes one, filled in from what the cards revealed, with every worked-out value
   written commented and annotated with what confirming it would change — and
@@ -156,6 +164,14 @@ Initial release.
   scorecard — metadata, font encodings, rectangle census, column rules, row bands,
   tick-box census, header fields, and a plain-language verdict. Exits nonzero when
   a page does not read, so it can be looped over a folder.
+- `tools/doctor.py --redact`: the same report with every name, team, club, venue,
+  date, path and rating replaced by its shape — `Priya Halloran` becomes
+  `<2 words, 15 chars>`. A card that will not read is diagnosed from the page's
+  measurements, and none of those name anybody; without this flag the only way to
+  send them to a maintainer is to attach a PDF that names both teams, every player
+  who took a court and both captains. The geometry, the scores, the counts, the
+  cross-check verdicts and the weekday are all kept, because a report nobody can
+  act on is not a support route.
 - `tools/demo.py`: writes a fictional club's season of scorecard PDFs, so the tool
   can be tried end to end without any real data. Deterministic for a given seed.
 - `README.md`, `data/README.md` and `config.example.toml` for clubs;
@@ -177,6 +193,39 @@ Initial release.
   that every sample output quoted in `README.md` — the build report, the ladder and
   the card checker's verdict — is what they actually print, and that the README's
   own cross-references land on headings that exist.
+- A version stamped on everything the build produces: the report's first line, the
+  `meta.version` field of `season.json`, the embedded data island, the front page's
+  footer and each competition page's footer. The number has one home,
+  `matchcentre.__version__`, and the suite fails if any of those five places stops
+  quoting it, if the changelog's newest release disagrees with it, or if an example
+  of the report line in the documentation goes stale. A run that fails still prints
+  the stamp, so a report pasted into an issue always says which build produced it.
+- `tests/test_hostile_input.py`: a deterministic fuzz suite over damaged PDFs —
+  truncated files, corrupted cross-reference tables, cyclic object references,
+  absurd numbers, and bytes that are not a PDF at all. The promise it holds is that
+  the reader refuses a page and names it, rather than raising; found and fixed one
+  case where a malformed folder made `build.py` print a traceback instead of an
+  explanation.
+- `tests/test_doctor.py`: holds `--redact` to both halves of its promise against a
+  card whose every value is written in the test file, so the check knows what was
+  on the page independently of what the redactor thought it learned.
+- `tools/screenshots.py`: regenerates the images in `docs/screenshots/` from the
+  demo season using a headless browser. A maintainer tool, not a dependency — it
+  shells out rather than importing anything, so the no-dependency rule still holds
+  and the suite still passes on a machine with no browser at all.
+- GitHub Actions in `.github/workflows/`: `tests.yml` runs the suite on Python
+  3.11, 3.12 and 3.13 with no install step of any kind, which is itself the point —
+  a workflow that needed `pip install` would mean the no-dependency claim had
+  quietly stopped being true. `demo.yml` builds the demo season and publishes it to
+  GitHub Pages, so a club can see a working dashboard before deciding to export
+  anything.
+- Issue forms and a pull-request template. The one for a wrong number opens by
+  asking which scoring scheme is in force, because a ladder computed under the
+  wrong scheme is not an error — it is a plausible, wrong table, which is worse.
+  Both ask for a redacted report rather than a file.
+- `CONTRIBUTING.md`: the two rules that are not negotiable (no dependencies, no
+  real people in the repository), how to run and add a test, and what to do when a
+  change alters what a number means.
 
 ### Requirements
 

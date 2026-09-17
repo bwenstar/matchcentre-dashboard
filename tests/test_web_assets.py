@@ -545,6 +545,50 @@ class TestThePlayersToCheckList(WebAssetCase):
         self.assertIn("merged", body)
 
 
+class TestTheFillInNoteCountsWhatThePythonCounts(WebAssetCase):
+    """One figure, printed in the wrong unit, in the note whose job is to explain it.
+
+    ``fill_in_appearances`` is the number of distinct *matches* a player appeared in
+    off their own roster: stats.py builds it from a set of the same
+    ``(round, home, away)`` keys it counts as ``match_ids``. The page printed it as
+    sets -- "has played 1 set outside their registered roster" on a night the player
+    was used in two rubbers -- and this is the one note on a player's page that
+    exists to explain an oddity, so a club reads it and can check it against the
+    card. That the count itself is matches is asserted against real data in
+    test_pipeline; what is asserted here is the word.
+    """
+
+    def lines_printing_the_figure(self):
+        lines = [line for line in self.assets()["app.js"].splitlines()
+                 if "fill_in_appearances" in line]
+        self.assertTrue(lines, "app.js no longer mentions fill_in_appearances at "
+                               "all, so this check has stopped seeing the code")
+        return lines
+
+    def test_the_note_prints_the_figure_as_matches(self):
+        self.assertRegex(
+            self.body("slotAppearanceTable"),
+            r"plural\(\s*p\.fill_in_appearances\s*,\s*'match'\s*,\s*'matches'\s*\)",
+            "the fill-in note does not print its figure as matches")
+
+    def test_no_line_that_prints_the_figure_calls_it_a_set(self):
+        # Aimed wider than the one note: the same mistake made anywhere else on the
+        # page is the same wrong number in front of the same club, and this table
+        # sits under a heading about set slots, which is what invited it.
+        for line in self.lines_printing_the_figure():
+            with self.subTest(line=line.strip()):
+                self.assertNotRegex(line, r"'sets?'")
+
+    def test_a_count_of_matches_is_never_pluralised_by_adding_an_s(self):
+        # plural() builds its own plural by appending one, so a caller that leaves
+        # the third argument off prints "2 matchs" -- on the page, to a club, in a
+        # sentence nothing else will contradict.
+        for line in self.assets()["app.js"].splitlines():
+            if "plural(" in line and "'match'" in line:
+                with self.subTest(line=line.strip()):
+                    self.assertIn("'matches'", line)
+
+
 class TestThePageRoundsTheWayThePythonDoes(WebAssetCase):
     """One convention, two implementations, and no engine here to run one of them.
 
