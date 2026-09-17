@@ -1,0 +1,62 @@
+# The live demo, published to GitHub Pages from a season nobody played.
+#
+# A dashboard is hard to describe and easy to show, and the alternative way to show
+# one is to publish a real club's ladder -- their players, their ratings, their
+# captains -- which this project will not do. So the demo is generated:
+# tools/demo.py invents a club and a full season of scorecards, build.py turns them
+# into the same dashboard a club gets, and that is what is served. Every name on it
+# is fictional.
+#
+# Enable it once per fork: Settings -> Pages -> Source -> GitHub Actions. Until
+# then this job builds and the deploy step is what fails, which is a clearer
+# failure than a silent one.
+name: demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a newer push wins: two pushes in a minute must not
+# race to leave the older season published.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: invent a club and a season
+        # The seed is fixed so the demo is the same season the README's screenshots
+        # show. Written outside data/, which stays empty in this repository.
+        run: python tools/demo.py --out demo-data --seed 7 --teams 6 --rounds 3
+
+      - name: build the dashboard the club would get
+        # No --generated: the page's footer should say when this really was built.
+        run: python build.py --data demo-data --out public --config demo-config.toml
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - id: pages
+        uses: actions/deploy-pages@v4

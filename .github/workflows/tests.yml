@@ -1,0 +1,61 @@
+# The suite, on every Python this project claims to support.
+#
+# There is no `pip install` step anywhere in this file, and that is the point. The
+# promise a club is given is that Python alone is enough; a workflow that installed
+# something would stop being able to check it. If a dependency ever creeps in, this
+# job fails on the import -- which is the only place that failure is cheap.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Every version reports, rather than the first failure cancelling the rest:
+      # "broken on 3.11 only" and "broken everywhere" need different fixes, and
+      # that difference is the useful thing a matrix tells you.
+      fail-fast: false
+      matrix:
+        # The floor is matchcentre.REQUIRES_PYTHON, which is 3.11 because the
+        # config loader uses tomllib. The ceiling is whatever is current.
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: the whole suite
+        # Bytecode off and no cache directories, matching how the suite is run
+        # locally: some of these tests mutate source files and then import them.
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -t tests
+
+      - name: a dashboard really does build from nothing but a folder of PDFs
+        # The end-to-end path a club takes, on a season this repository can
+        # generate: invent the cards, build the dashboard, and insist the run was
+        # clean. The suite covers this too; doing it again here as the documented
+        # two commands catches anything that only works when called as a library.
+        run: |
+          python tools/demo.py --out /tmp/demo-data --seed 7 --teams 6 --rounds 3
+          python build.py --data /tmp/demo-data --out /tmp/demo-site \
+                          --config /tmp/demo-config.toml
+          test -f /tmp/demo-site/index.html
+
+      - name: and --check reads the same cards without writing anything
+        run: |
+          python build.py --data /tmp/demo-data --out /tmp/should-not-appear \
+                          --config /tmp/demo-config.toml --check
+          test ! -e /tmp/should-not-appear

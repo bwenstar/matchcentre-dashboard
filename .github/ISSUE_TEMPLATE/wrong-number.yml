@@ -1,0 +1,75 @@
+name: A number on the dashboard looks wrong
+description: The ladder, the points, an average or a player's record does not match
+labels: [numbers]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before anything else: **which scoring scheme is the dashboard using?** No
+        scorecard records how its competition awards points, so `build.py` uses
+        whatever `config.toml` says, and the banner across the top of every page
+        says which one that is. A ladder computed under the wrong scheme is not an
+        error — it is a plausible, wrong table, which is worse, and it is by far the
+        commonest cause of a number looking wrong.
+
+        Paste the `== rules in force` block from the report below and we can rule
+        it in or out in one reading.
+
+  - type: input
+    id: version
+    attributes:
+      label: The first line of the build.py report
+      description: >
+        `matchcentre-dashboard 0.1.0  (python 3.12.3 on linux)`. The same version
+        is in the footer of the dashboard page itself.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rules
+    attributes:
+      label: The `== rules in force` block
+      description: The whole block, straight from the report. It names no players.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: wrong
+    attributes:
+      label: The number, and what it should be
+      description: >
+        Which page and which row, what it says, what you expect, and how you worked
+        the expected figure out. Team names are fine if your competition's ladder is
+        public anyway; if it is not, call them Team A and Team B.
+    validations:
+      required: true
+
+  - type: textarea
+    id: health
+    attributes:
+      label: What "Data health detail" says
+      description: >
+        Expand it on the page and paste the errors and warnings, or paste the
+        `== validation` section of the report. If a card was refused, the ladder is
+        short by that match and the report says which file.
+      render: text
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Is the whole ladder wrong, or one row?
+      options:
+        - One team or one player
+        - One match
+        - Every row by the same amount
+        - Something else
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        `python3 build.py --check` reads and validates everything without writing
+        anything, so it is safe to run as often as you like while narrowing this
+        down.

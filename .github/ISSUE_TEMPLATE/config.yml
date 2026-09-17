@@ -1,0 +1,5 @@
+# Both templates ask for a redacted report rather than a file, so the blank issue
+# stays available: someone whose problem is neither a card nor a number -- a
+# documentation sentence that is wrong, a question about config.toml, a scoring
+# scheme no preset covers -- should not have to pick the closest wrong form.
+blank_issues_enabled: true

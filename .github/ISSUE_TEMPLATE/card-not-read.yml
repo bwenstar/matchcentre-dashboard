@@ -1,0 +1,71 @@
+name: A scorecard will not read
+description: build.py refused a PDF, or read something off it wrongly
+labels: [card]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please do not attach the scorecard.** It names both teams, every player
+        who was on court, their ratings and the captains, and an issue here is
+        public forever.
+
+        Run this instead and paste what it prints:
+
+        ```
+        python3 tools/doctor.py --redact path/to/the-card.pdf
+        ```
+
+        `--redact` replaces every name, team, club, venue, date and file path with
+        its shape — `Priya Halloran` becomes `<2 words, 15 chars>` — and keeps
+        every measurement, score, count and structural fact. That is the half a
+        maintainer needs and the half that identifies nobody. Read it before you
+        paste it; if anything in there still looks identifying, say so in the issue
+        instead of pasting it, because that is a bug in the redactor and a more
+        urgent one than yours.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: The redacted doctor report
+      description: The whole thing, including the `verdict` line at the end.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the card actually says
+      description: >
+        In your own words, and with no names: the scores, which side won, and
+        anything unusual on it — a forfeit, a retirement, a washout, a rubber that
+        was never played, a fill-in player.
+    validations:
+      required: true
+
+  - type: input
+    id: report-line
+    attributes:
+      label: The first line of the build.py report
+      description: >
+        It looks like `matchcentre-dashboard 0.1.0  (python 3.12.3 on linux)`.
+        This is the whole of what says which build and which Python produced what
+        you are describing.
+    validations:
+      required: true
+
+  - type: input
+    id: rule
+    attributes:
+      label: Which rule or reason build.py gave
+      description: >
+        The rule name from the report if there is one — `F4`, `F6`, `set-count`,
+        `totals-mismatch` — or the sentence it printed.
+
+  - type: markdown
+    attributes:
+      value: |
+        If the card is one you can share because it is genuinely fictional — one
+        from `tools/demo.py`, or a test card you made yourself — attach it and say
+        so. A real card is far more useful than any description, but only its owner
+        can decide that, and the answer for a club's own fixtures is no.
