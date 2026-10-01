@@ -31,6 +31,11 @@ producer line out of the file's metadata. What it removes: names, teams, the clu
 the venue, the season label, dates, times, the Match Centre match id, ratings, and
 the file's own name and path.
 
+A redacted run ends by saying the other half of that out loud: if a name survived
+it, the fault is in this flag rather than in the card, and ``SECURITY.md`` has a
+private route for saying so. Pasting the line that leaked into a public issue is
+the one thing in this project that cannot be undone.
+
 Two deliberate choices about how it reads a page:
 
 *The patterns here are looser than the reader's.* That is the point. "The doctor
@@ -50,8 +55,8 @@ can be used in a loop over a directory.
 
 from __future__ import annotations
 
-import argparse
 import contextlib
+import dataclasses
 import io
 import os
 import re
@@ -63,8 +68,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from matchcentre import pdf, scorecard                        # noqa: E402
-from matchcentre.card import Card, CardError                  # noqa: E402
+from matchcentre import discover, pdf, redact, scorecard, version_line  # noqa: E402
+from matchcentre.card import (Card, CardError, CrossCheck, verb_side,  # noqa: E402
+                              weekday_of)
+from matchcentre.cli import WIDTH, Parser, fill                 # noqa: E402
+from matchcentre.format import SET_RULES, from_rows             # noqa: E402
+from matchcentre.model import forfeit_match_winner              # noqa: E402
+from matchcentre.scope import in_words                          # noqa: E402
+from matchcentre.scoring import RULESETS                        # noqa: E402
+from matchcentre import validate                                 # noqa: E402
 
 # Beyond this many pages the report is longer than anyone reads. A scorecard has
 # one page; the club's rules and draw PDFs are the long ones, and for those the
@@ -87,11 +99,28 @@ PAPERS = {
 KNOWN_ENCODINGS = ("WinAnsiEncoding", "MacRomanEncoding", "MacExpertEncoding",
                    "StandardEncoding", "PDFDocEncoding")
 
+# A date in any shape a card could print one, the whole of it in group 1: figures
+# day or month first or year first with any of / . - between, and a month in words
+# either side of the day, with or without an ordinal or a comma. Looser than the
+# reader, which reads the forms card.DATE_FORMS names and no others, so that "the
+# doctor found a date and the reader did not" can be said at all. One pattern for
+# the header field below and for the redaction of a date, because a date this
+# report can quote and --redact cannot see is a date published: the reader's own
+# warnings quote a date it could not use, and ``08-18-2026`` went out whole.
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+DATE_SHAPE = (
+    r"(?i)(?<![\d.])("
+    r"\d{4}[/.-]\d{1,2}[/.-]\d{1,2}"
+    r"|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}"
+    r"|\d{1,2}(?:st|nd|rd|th)?[\s-]+(?:of\s+)?" + _MONTH + r"[\s,-]+\d{2,4}"
+    r"|" + _MONTH + r"\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4}"
+    r")(?!\d|\.\d)")
+
 # Header fields, each with a pattern deliberately more tolerant than the reader's.
-# `Division`, `Grade` and `Section` all occur across associations, the ball colour
-# is optional and so is the `#id`.
+# The division and the round are looked for with the reader's own rule first
+# (READER_RULES, below); these two patterns only add to what it finds.
 HEADER_FIELDS: tuple[tuple[str, str], ...] = (
-    ("date", r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b"),
+    ("date", DATE_SHAPE),
     ("time", r"\b(\d{1,2}:\d{2}\s*[AaPp]\.?[Mm]\.?)"),
     ("division", r"\b(?:Division|Grade|Section)\s+([A-Za-z0-9][-A-Za-z0-9]*)"),
     ("round", r"\bRound\s+([A-Za-z0-9][-A-Za-z0-9]*)"),
@@ -99,7 +128,8 @@ HEADER_FIELDS: tuple[tuple[str, str], ...] = (
     # Digits required: the real template prints the "Court:" label whether or not a
     # court was entered, and a label with nothing after it is not a found field.
     ("court", r"\bCourt:?\s*(\d+)\b"),
-    ("result verb", r"\b(DEFEATS|DRAWS WITH|LOSES TO)\b"),
+    # No pattern: a verb is one the one table reads (READER_RULES, below).
+    ("result verb", ""),
     ("games header", r"\b(Games)\b"),
     ("set label", r"\b(SET)\b"),
     ("totals row", r"\b(TOTAL)\b"),
@@ -109,7 +139,8 @@ HEADER_FIELDS: tuple[tuple[str, str], ...] = (
     ("roster block", r"\b(Players)\b"),
     ("ratings", r"\b(Rating)\b"),
     ("signatures", r"\b(Signed by)"),
-    ("fill-ins", r"\b(Fill-ins?)"),
+    # No pattern: a heading is one the reader ends the roster block at (PAGE_RULES).
+    ("fill-ins", ""),
 )
 
 # Discipline markers in a row's outer marker column: `1&2` is a doubles pairing,
@@ -121,6 +152,23 @@ INDENT = "    "
 # output is being read in a terminal. Plain ASCII throughout: this gets pasted into
 # emails and issue trackers.
 LABEL = 14
+
+# The last thing a `--redact` run prints. The person reading it is the only one who
+# can tell a shape from a name -- they know the names -- and this is the moment they
+# are doing it: report finished, terminal scrolled to the bottom, about to select it
+# and paste it somewhere public. Every other place that says "read it before you
+# paste it" is read before the report exists, if at all.
+#
+# Printed after the scrub rather than inside the buffer it scrubs, for the reason
+# every other line here is printed inside it: a card whose team is called Security
+# would have this footer shaped along with the team name, and the one line that has
+# to survive a hostile card is the line saying what to do about one.
+REDACTION_FOOTER = (
+    "Read this before you paste it. Every name, team, club, venue, date, rating",
+    "and path above should be a shape like <2 words, 15 chars>. If one of them is",
+    "still a name, do not post it: that is a fault in --redact itself, and",
+    "SECURITY.md has a private route for reporting exactly that.",
+)
 
 # --- redaction ---------------------------------------------------------------
 
@@ -172,8 +220,7 @@ TEMPLATE_WORDS = frozenset(word.casefold() for word in (
 # after which the time pattern no longer matched and the report published the
 # start time as "7:00".
 _IDENTIFYING: tuple[tuple[re.Pattern[str], object], ...] = (
-    (re.compile(r"\d{4}-\d{2}-\d{2}"), lambda m: "<date>"),
-    (re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"), lambda m: "<date>"),
+    (re.compile(DATE_SHAPE), lambda m: "<date>"),
     # The am/pm is optional so that a 24-hour card is covered too. No structural
     # line in this report prints a colon between two numbers, so nothing
     # measured can be swallowed by this.
@@ -191,14 +238,6 @@ _IDENTIFYING: tuple[tuple[re.Pattern[str], object], ...] = (
 _RATING_RE = re.compile(r"\[(-|\d+(?:\.\d+)?)/(-|\d+(?:\.\d+)?)\]")
 
 
-def _shape(text: str) -> str:
-    """What a redacted string is replaced by: its size, not its content."""
-    words = len(text.split())
-    if words > 1:
-        return f"<{words} words, {len(text)} chars>"
-    return f"<{len(text)} chars>"
-
-
 def _rating_shape(match: re.Match[str]) -> str:
     return "[" + "/".join("-" if side == "-" else "x.xx"
                           for side in match.groups()) + "]"
@@ -214,7 +253,7 @@ class _Redactor:
     then scrubbed against what the page turned out to contain. One mechanism
     therefore covers the header captures, the reader's own summary, the roster
     lines, the verdict, the card's warnings *and* the text quoted inside a
-    refusal reason, including whatever any of them prints next year.
+    refusal's detail, including whatever any of them prints next year.
 
     The secret set is gathered two ways at once, so an unreadable page -- the
     case this whole tool exists for, and the case where a field-by-field
@@ -229,10 +268,18 @@ class _Redactor:
     take the report's own punctuation with it. An initial standing alone
     therefore survives, which is the one thing here that is a compromise rather
     than a decision.
+
+    What is printed inside :meth:`verbatim` is the one exception, published as
+    it was written: the causes of a refusal, which are the tool's advice in its
+    own words, and which a page printing "draw" or "it" had shaped out of it,
+    the rotation and images rows they quote, and the reason for the refusal,
+    which the reader words without quoting the page.
     """
 
     def __init__(self) -> None:
         self._secrets: set[str] = set()
+        self._kept: list[tuple[int, int]] = []      # spans of the report, verbatim
+        self.shapes: set[str] = set()               # what the scrub printed instead
 
     # --- learning ---
 
@@ -259,51 +306,109 @@ class _Redactor:
                 self._secrets.add(digits)
 
     def learn_path(self, path: Path) -> None:
-        """The file's own path, which the reader's summary prints as `source:`."""
+        """The file's own path, which the reader's summary prints as `source:`.
+
+        Whole, as given and resolved, because it is printed whole there and in
+        the reader's errors. Not its parts: a folder named ``pages`` would have
+        that word shaped wherever the report says it.
+        """
         self._secrets.add(str(path))
         self._secrets.add(str(Path(path).resolve()))
-        for part in Path(path).parts:
-            self._add(part)
-        self._add(Path(path).stem)
 
     def _add(self, text: str) -> None:
-        for candidate in (text.strip(), text.strip("'\"()[]{},.:;!?-_ ")):
-            if len(candidate) < 2:
-                continue
-            if not any(ch.isalpha() for ch in candidate):
-                continue                      # a number is a score, or an id
-            if candidate.casefold() in TEMPLATE_WORDS:
-                continue
-            self._secrets.add(candidate)
+        # The rule the build withholds players' names by, so the two cannot drift.
+        # Each also as repr quotes it, as the summary does a row's players: repr
+        # escapes a soft hyphen or a zero-width space inside a name.
+        for spelling in redact.candidates(text, TEMPLATE_WORDS):
+            self._secrets.update((spelling, repr(spelling)[1:-1]))
 
     # --- using ---
 
+    @contextlib.contextmanager
+    def verbatim(self):
+        """What the block prints is published as it was written, unscrubbed.
+
+        So nothing read off the page may be printed inside it: not a word, a
+        name or a number, nor the detail of what the reader said of the page,
+        which can quote it.
+        """
+        start = sys.stdout.tell()
+        yield
+        self._kept.append((start, sys.stdout.tell()))
+
+    def publish(self, report: str) -> str:
+        """``report`` scrubbed, but for the spans printed inside :meth:`verbatim`."""
+        out, at = [], 0
+        for start, end in self._kept:
+            out += [self.scrub(report[at:start]), report[start:end]]
+            at = end
+        return "".join(out) + self.scrub(report[at:])
+
     def scrub(self, text: str) -> str:
         for expression, replace in _IDENTIFYING:
-            text = expression.sub(replace, text)
+            text = expression.sub(lambda match, replace=replace:
+                                  self._held(replace(match)), text)
         text = _RATING_RE.sub(_rating_shape, text)
-        if self._secrets:
-            # Longest first, so a full name is shaped as a name and not as two
-            # shaped words; one pass, so a replacement cannot be re-matched.
-            # Lookarounds rather than \b because a secret can begin or end with
-            # punctuation, where \b means the opposite of what is wanted.
-            ordered = sorted(self._secrets, key=len, reverse=True)
-            pattern = re.compile(r"(?<!\w)(?:"
-                                 + "|".join(re.escape(s) for s in ordered)
-                                 + r")(?!\w)")
-            text = pattern.sub(lambda m: _shape(m.group()), text)
-        return text
+        # Case-sensitive, where the build ignores case: this report's own labels
+        # sit beside the page's words (`club hint` beside `Club`), and a scrub that
+        # ignored case would shape the report rather than the card.
+        return redact.substitute(text, self._secrets,
+                                 lambda secret: self._held(redact.shape(secret)),
+                                 ignore_case=False)
+
+    def _held(self, shape: str) -> str:
+        """*shape*, to be held whole where its line is laid out."""
+        self.shapes.add(shape)
+        return shape
 
 
 def _row(label: str, value: str, *, indent: str = "") -> None:
-    print(f"{indent}{label:<{LABEL}}{value}")
+    _flow(indent, f"{label:<{LABEL}}{value}", indent + " " * LABEL)
+
+
+# How a line is printed to be laid out to the width, by :func:`_laid_out` once
+# the report is written: its opening, the indent it goes on at and its text,
+# told apart by a noncharacter, which no line of the report prints.
+_FLOW = "\ufdd0"
+_FLOWED = re.compile(f"^( *){_FLOW}( *){_FLOW}(.*)$")
+
+
+def _flow(opening: str, text: str, hang: str) -> None:
+    """Print *text* after *opening*, to go on under *hang* past the width."""
+    print(f"{opening}{_FLOW}{hang}{_FLOW}{text}")
+
+
+def _laid_out(report: str, keep: tuple[str, ...] = ()) -> str:
+    """*report* with every line past :data:`WIDTH` filled to it by :func:`fill`.
+
+    A line :func:`_flow` printed goes on under its hang, and any other under its
+    own indent; a line that fits is printed as it was. Laid out once the report
+    is written, and under ``--redact`` once it is scrubbed, so that a line is
+    measured as it is published and a name is never parted before its shape is
+    known; each of *keep*, the path or a shape, is held whole (4.186). A word
+    too long for any line, a path or a font's name, is printed whole on a line
+    of its own: the report's words are what a club sends, and none is cut.
+    """
+    out = []
+    for line in report.split("\n"):
+        marked = _FLOWED.match(line)
+        if marked:
+            opening, hang, text = marked.groups()
+        else:
+            text = line.lstrip(" ")
+            opening = hang = line[:len(line) - len(text)]
+        out.append(opening + text if len(opening) + len(text) <= WIDTH
+                   else fill(text, hang, first=opening, keep=keep))
+    return "\n".join(out)
+
+
+def _verbatim(redactor: _Redactor | None):
+    """:meth:`_Redactor.verbatim` under ``--redact``, and nothing otherwise."""
+    return redactor.verbatim() if redactor is not None else contextlib.nullcontext()
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
-        prog="tools/doctor.py",
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = Parser(prog="tools/doctor.py", description=__doc__)
     ap.add_argument("paths", nargs="+", type=Path, metavar="FILE",
                     help="the PDF to explain; repeatable")
     ap.add_argument("--page", type=int, default=None, metavar="N",
@@ -312,6 +417,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="replace every name, team, date and path with its "
                          "shape, so the report can be pasted into a public "
                          "issue without publishing who played")
+    # Answered without a card, although `paths` is required: argparse acts on a
+    # version action while parsing and exits before it asks what is missing. This
+    # is the command a club is sent to when something is wrong, so it is the one
+    # most likely to be asked which version it is.
+    ap.add_argument("--version", action="version", version=version_line(),
+                    help="print this build and the Python running it, then stop")
     args = ap.parse_args(argv)
 
     worst = 0
@@ -321,6 +432,16 @@ def main(argv: list[str] | None = None) -> int:
                 print()
             worst = max(worst, _one_file(path, page=args.page,
                                         redact=args.redact, number=index + 1))
+        if args.redact:
+            # Once for the run and not once per file, so that the documented
+            # `doctor.py --redact data/Round1/*.pdf` over a whole round ends with
+            # one notice rather than with one per card, which is one to skim past.
+            # Outside the per-file loop it also survives the case a leak is
+            # likeliest in: a file that never parsed has no verdict block, and a
+            # redactor that learned nothing off it has nothing to shape.
+            print()
+            for line in REDACTION_FOOTER:
+                print(line)
         sys.stdout.flush()
     except BrokenPipeError:
         # `doctor.py card.pdf | head` closes the pipe while there is still report
@@ -333,6 +454,30 @@ def main(argv: list[str] | None = None) -> int:
         # truncated by the reader, not by a problem with the file.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return worst
+
+
+def _surprise(exc: BaseException, doing: str, *, redacting: bool) -> None:
+    """A failure the reader does not know how to refuse, said in words.
+
+    ``scorecard.read`` already turns one of these into a rejection so that a bad byte
+    cannot cost a build its season; this is the same guard for the tool a club is sent
+    to when a card will not read. Without it, the one thing in the project that still
+    printed a traceback was the diagnostic.
+
+    Under ``--redact`` the message is withheld and only the type is printed. An
+    exception raised inside the reader can quote bytes off the page, and the redactor
+    knows only the values it managed to learn -- from a page that did not read, that
+    may be none of them. Naming the flag that would show it keeps the report honest
+    about what it is holding back.
+    """
+    print(f"{INDENT}The reader failed unexpectedly while {doing}.")
+    if redacting:
+        print(f"{INDENT}{type(exc).__name__}; the message is withheld, since it may "
+              f"quote the page. Run again without --redact to read it.")
+    else:
+        print(f"{INDENT}{type(exc).__name__}: {exc}")
+    print(f"{INDENT}That is a bug in this reader rather than a verdict on the file. "
+          f"Please report it with the report above.")
 
 
 def _one_file(path: Path, *, page: int | None, redact: bool = False,
@@ -354,21 +499,64 @@ def _one_file(path: Path, *, page: int | None, redact: bool = False,
     with contextlib.redirect_stdout(buffer):
         code = _report(path, page=page, redactor=redactor,
                        label=f"#{number}  (name and path withheld by --redact)")
-    print(redactor.scrub(buffer.getvalue()), end="")
+    print(_laid_out(redactor.publish(buffer.getvalue()),
+                    keep=tuple(sorted(redactor.shapes))), end="")
     return code
 
 
 def _report(path: Path, *, page: int | None, label: str,
             redactor: _Redactor | None) -> int:
+    """The report on *path*, laid out to the width here unless it is to be
+    scrubbed first, which :func:`_one_file` lays it out after."""
+    if redactor is not None:
+        return _written(path, page=page, label=label, redactor=redactor)
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            return _written(path, page=page, label=label, redactor=None)
+    finally:
+        print(_laid_out(buffer.getvalue(), keep=(str(path),)), end="")
+
+
+def _written(path: Path, *, page: int | None, label: str,
+             redactor: _Redactor | None) -> int:
     print("=" * 72)
-    print(f"file          {label}")
+    _row("file", label)
     print("=" * 72)
 
-    if not path.is_file():
+    # Every branch below is a real thing a club types at the moment they already have
+    # a problem, since build.py names this command beside every card it refused. One
+    # of them used to be a traceback and two of them used to be the same wrong
+    # sentence -- "There is no file at that path" is false about a directory, and
+    # about a symlink whose target has gone. Each gets the answer it actually earns.
+    if path.is_dir():
+        print(f"{INDENT}That is a directory, not a file. This tool explains one "
+              f"scorecard at a time; name the PDFs inside it instead, which a "
+              f"shell will expand for you:")
+        print(f"{INDENT}{INDENT}python3 tools/doctor.py data/Round1/*.pdf")
+        return 1
+    if path.is_symlink() and not path.exists():
+        print(f"{INDENT}That is a symbolic link and there is nothing at the other "
+              f"end of it. If the cards live on a share, it may not be mounted.")
+        return 1
+    if not path.exists():
         print(f"{INDENT}There is no file at that path.")
         return 1
+    if not path.is_file():
+        print(f"{INDENT}That path is not a regular file, so there is nothing to "
+              f"read from it.")
+        return 1
 
-    raw = path.read_bytes()
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        # The path exists and this process may not have it. Only the reason is
+        # printed, never the errno's copy of the path, so this line is as safe under
+        # --redact as the rest of the report.
+        print(f"{INDENT}This file cannot be read: {exc.strerror or exc}.")
+        print(f"{INDENT}A build cannot read it either, so it will be refused and "
+              f"reported rather than scored.")
+        return 1
     fonts_ok = _file_facts(path, raw)
 
     try:
@@ -380,6 +568,18 @@ def _report(path: Path, *, page: int | None, label: str,
         print("verdict")
         print(f"{INDENT}This file cannot be opened by the reader at all.")
         print(f"{INDENT}{exc}")
+        return 1
+    except OSError as exc:
+        print()
+        print("verdict")
+        print(f"{INDENT}This file could not be read a second time: "
+              f"{exc.strerror or exc}.")
+        return 1
+    except Exception as exc:                          # noqa: BLE001 - see below
+        print()
+        print("verdict")
+        _surprise(exc, "counting the pages of this file",
+                  redacting=redactor is not None)
         return 1
 
     print(f"pages         {count}")
@@ -452,9 +652,10 @@ def _file_facts(path: Path, raw: bytes) -> bool:
         _row("fonts", "none found")
         return True
     width = max(len(name) for name, _, _, _ in fonts)
+    widest = max(len(encoding) for _, _, encoding, _ in fonts)
     for position, (name, subtype, encoding, usable) in enumerate(fonts):
         _row("fonts" if position == 0 else "",
-             f"{name:<{width}}  {subtype:<9} {encoding:<20} "
+             f"{name:<{width}}  {subtype:<9} {encoding:<{widest}} "
              f"{'has a decode table' if usable else 'no /ToUnicode, no /Encoding'}")
     if descendants:
         _row("", f"({descendants} CID descendant font object(s) folded into the "
@@ -553,6 +754,16 @@ def _one_page(path: Path, index: int, count: int, raw: bytes, *,
     except pdf.PdfError as exc:
         print(f"{INDENT}This page cannot be read: {exc}")
         return 1
+    except OSError as exc:
+        # The file was read whole a moment ago, so this means it changed underneath:
+        # a share that unmounted, a folder mid-sync. Not the page's fault, and not to
+        # be reported as though it were.
+        print(f"{INDENT}This page could not be read from the file: "
+              f"{exc.strerror or exc}.")
+        return 1
+    except Exception as exc:                          # noqa: BLE001 - see below
+        _surprise(exc, f"reading page {index + 1}", redacting=redactor is not None)
+        return 1
 
     if redactor is not None:
         # Before anything below it prints. The page is parsed a second time here,
@@ -570,9 +781,14 @@ def _one_page(path: Path, index: int, count: int, raw: bytes, *,
     _row("size", f"{page.width:g} x {page.height:g} pt  "
                  f"({paper or 'not a standard paper size'})", indent=INDENT)
     rotation = _rotation(raw)
-    _row("rotation", rotation, indent=INDENT)
+    with _verbatim(redactor):
+        # The tool's words and a number of degrees, as the causes quote it.
+        _row("rotation", rotation, indent=INDENT)
     _row("words", str(len(page.words)), indent=INDENT)
     _row("rects", str(len(page.rects)), indent=INDENT)
+    with _verbatim(redactor):
+        # A count and a share in the tool's words, which a cause quotes.
+        _row("images", _images(page), indent=INDENT)
     if not fonts_ok:
         # Ran both ways in this session on cards written with and without a
         # /ToUnicode map: the reader recovered all 196 words from the map-less one
@@ -580,23 +796,30 @@ def _one_page(path: Path, index: int, count: int, raw: bytes, *,
         # diagnosis. Which of the two it is depends entirely on this word count.
         if page.words:
             _row("", "a font here has no decode table, yet words came back "
-                     "anyway:", indent=INDENT)
-            _row("", "the reader fell back to the font's built-in encoding, so "
-                     "this is", indent=INDENT)
-            _row("", "not what is wrong with the page", indent=INDENT)
+                     "anyway: the reader fell back to the font's built-in "
+                     "encoding, so this is not what is wrong with the page",
+                 indent=INDENT)
         else:
             _row("", "no words, and a font with no decode table: byte codes map "
-                     "to", indent=INDENT)
-            _row("", "glyph numbers only, so the page reads as blank rather than "
-                     "broken", indent=INDENT)
+                     "to glyph numbers only, so the page reads as blank rather "
+                     "than broken", indent=INDENT)
 
     _rect_census(page)
     rules, bands = _table(page)
     _checkboxes(page, bands)
     found, missing = _header_fields(page)
-    _describe(page)
+    try:
+        taken, failure = _taken(page), None
+    except Exception as exc:                          # noqa: BLE001
+        # The verdict reads the page again and says it was refused, or raises
+        # what the reader or the build's rules raised where it asked them
+        # before they were asked here, so the summary is printed as it was:
+        # raised here, a failure would take the summary with it (4.134).
+        taken, failure = {}, exc
+    _describe(page, redactor=redactor, taken=taken)
     return _verdict(page, path=path, index=index, rules=rules, bands=bands,
-                    found=found, missing=missing, rotation=rotation)
+                    found=found, missing=missing, rotation=rotation,
+                    redactor=redactor, taken=taken, failure=failure)
 
 
 def _rect_census(page: pdf.Page) -> None:
@@ -614,12 +837,20 @@ def _rect_census(page: pdf.Page) -> None:
     _row("rect census", f"{len(sizes)} distinct size(s)", indent=INDENT)
     for (w, h, filled) in sorted(sizes, key=lambda k: (-sizes[k], k)):
         count = sizes[(w, h, filled)]
-        print(f"{INDENT}  {w:>8.2f} x {h:<8.2f} {count:>4}  "
-              f"{'filled' if filled else 'stroked'}  {_rect_role(w, h)}")
+        row = (f"{w:>8.2f} x {h:<8.2f} {count:>4}  "
+               f"{'filled' if filled else 'stroked'}  ")
+        _flow(f"{INDENT}  ", row + _rect_role(w, h, filled),
+              f"{INDENT}  " + " " * len(row))
 
 
-def _rect_role(w: float, h: float) -> str:
-    """A guess at what a rectangle of this shape is for, by shape alone."""
+def _rect_role(w: float, h: float, filled: bool) -> str:
+    """A guess at what a rectangle of this shape is for, by shape alone.
+
+    Alone but for one question: a tick is the fill and nothing else, so a square
+    of a box's size that is stroked is the box drawn again, and calling it a tick
+    here would contradict the checkbox census below, which counts only fills.
+    Measured, rasterised: the inside of a stroked one is not painted at all.
+    """
     thin = min(w, h)
     long_side = max(w, h)
     if thin < 1.5 and long_side > 20:
@@ -627,7 +858,8 @@ def _rect_role(w: float, h: float) -> str:
     if thin < 1.5:
         return "checkbox outline hairline"
     if abs(w - h) <= 0.35 * long_side and long_side <= 20:
-        return "ticked checkbox fill"
+        return ("ticked checkbox fill" if filled
+                else "box-sized square, not a tick: its inside is not painted")
     if thin > 20:
         return "background panel"
     if long_side > 100 and 5 < thin < 30:
@@ -675,16 +907,13 @@ def _table(page: pdf.Page) -> tuple[list[float], list[tuple[float, float]]]:
     for left, right in zip(widths, reversed(widths)):
         if abs(left - right) > 2.0:
             _row("", f"the row is not symmetric about its centre: {left:g}pt "
-                     f"against {right:g}pt", indent=INDENT)
-            _row("", "on the mirroring cell, so the wider one is two cells with "
-                     "no rule", indent=INDENT)
-            _row("", "between them", indent=INDENT)
+                     f"against {right:g}pt on the mirroring cell, so the wider "
+                     f"one is two cells with no rule between them", indent=INDENT)
             break
     if xs[0] < 0 or xs[-1] > page.width:
         _row("", f"rules run outside the 0 to {page.width:g}pt page: the table is "
-                 f"shifted", indent=INDENT)
-        _row("", "off the sheet, so a column is clipped and its column is "
-                 "unreadable", indent=INDENT)
+                 f"shifted off the sheet, so a column is clipped and its column "
+                 f"is unreadable", indent=INDENT)
 
     merged = _merge_bands(bands)
     heights = sorted(round(b - t, 2) for t, b in merged)
@@ -799,10 +1028,8 @@ def _checkboxes(page: pdf.Page, bands: list[tuple[float, float]]) -> None:
                  f"{'as expected' if agrees else 'MISMATCH'}", indent=INDENT)
         if not agrees:
             _row("", "a box count that does not match the row count means a flag "
-                     "was", indent=INDENT)
-            _row("", "missed or invented, so the per-set status read off this card",
-                 indent=INDENT)
-            _row("", "cannot be trusted", indent=INDENT)
+                     "was missed or invented, so the per-set status read off this "
+                     "card cannot be trusted", indent=INDENT)
     for fill in sorted(ticks, key=lambda r: (round(r.cy, 1), r.cx)):
         label = _label_right_of(page, fill)
         _row("", f"ticked at x {fill.cx:7.2f} y {fill.cy:7.2f}  "
@@ -847,28 +1074,91 @@ def _label_right_of(page: pdf.Page, fill: pdf.Rect,
     return " ".join(row[:3])
 
 
+def _result_verb_in(line: str, *, short: bool = False) -> str:
+    """The first run of words in capitals on ``line`` that the one table reads.
+
+    Longest first, so ``DEF. BY`` is found whole and not as ``DEF.``. In capitals,
+    as the template prints its verb, so a rules sheet's "a draw" or "the tie" is
+    none; and a separator states no result, so it is no result verb either.
+    """
+    words = line.split()
+    for start in range(len(words)):
+        for size in (3, 2, 1):
+            run = " ".join(words[start:start + size])
+            if len(run.split()) == size and run.isupper() and verb_side(run):
+                return run
+    return ""
+
+
+# A field the reader has a rule for is found by that rule, so the doctor cannot
+# call a division missing that the reader goes on to read, or a result verb
+# missing that the one table reads.
+READER_RULES = {"division": scorecard.division_in, "round": scorecard.round_in,
+                "result verb": _result_verb_in}
+
+
+def _fill_ins_heading(page: pdf.Page) -> str:
+    """The fill-ins heading the reader ends the roster block at, if the page prints
+    one (:func:`scorecard.fill_ins_heading`), looked up when it is asked."""
+    return scorecard.fill_ins_heading(page)
+
+
+# A field the reader finds on the page and not on a line: the fill-ins heading is
+# the one under `Players` it ends the roster block at, and not a line above that
+# reads like one, as a team's name in brackets in the result line can.
+PAGE_RULES = {"fill-ins": _fill_ins_heading}
+
+
+def _as_read(name: str, text: str) -> str:
+    """What the reader's own rule finds on any one line, long forms first."""
+    rule = READER_RULES.get(name)
+    if rule is None:
+        return ""
+    lines = text.splitlines()
+    return next((value for short in (False, True)
+                 for value in (rule(line, short=short) for line in lines)
+                 if value), "")
+
+
 def _header_fields(page: pdf.Page) -> tuple[list[str], list[str]]:
-    """Which header fields a tolerant pattern can find, and which it cannot."""
+    """Which header fields the reader's rule or a tolerant pattern can find."""
     text = page.text()
     found: list[str] = []
     missing: list[str] = []
     print(f"{INDENT}header fields")
     for name, pattern in HEADER_FIELDS:
-        match = re.search(pattern, text)
-        if match:
+        match = re.search(pattern, text) if pattern else None
+        rule = PAGE_RULES.get(name)
+        value = ((rule(page) if rule else _as_read(name, text))
+                 or (match.group(1) if match else ""))
+        if value:
             found.append(name)
-            print(f"{INDENT}  {name:<16} found     {match.group(1)!r}")
+            # Past the width it goes on under the name: a value with no space
+            # in it, a match id of fifty digits, is as wide under itself as
+            # beside the name (4.186).
+            print(f"{INDENT}  {name:<16} found     {value!r}")
         else:
             missing.append(name)
             print(f"{INDENT}  {name:<16} not found")
     return found, missing
 
 
-def _describe(page: pdf.Page) -> None:
-    """What the reader itself makes of the page structure."""
+def _describe(page: pdf.Page, redactor: _Redactor | None = None, *,
+              taken: dict[tuple[str, str], tuple[tuple[str, str], ...]]) -> None:
+    """What the reader itself makes of the page structure.
+
+    A stage's reason for refusing the page is the reader's own words, and is
+    published as written under ``--redact``; the rest, its detail with it, is
+    scrubbed. The reader says which lines are reasons: a line is not taken for
+    one by what it says, which a page can print inside a word.
+
+    The reader hands a check on without the club's rules, so a hand-off is said
+    as the verdict says it, under the rules *taken* (4.134), and every line goes
+    on under its label past the width (4.186).
+    """
     print(f"{INDENT}reader's own summary")
     try:
-        summary = scorecard.describe(page)
+        summary = scorecard.describe_lines(page)
     except Exception as exc:                     # noqa: BLE001
         # The one place a bare catch is right: the reader raising while describing
         # a page is itself the diagnosis, and swallowing it into a traceback would
@@ -876,8 +1166,14 @@ def _describe(page: pdf.Page) -> None:
         print(f"{INDENT}  scorecard.describe() raised "
               f"{type(exc).__name__}: {exc}")
         return
-    for line in summary.splitlines():
-        print(f"{INDENT}  {line}")
+    for entry in summary:
+        if isinstance(entry, scorecard.CheckLine):
+            entry = scorecard.CheckLine.of(_as_reported(entry.check, taken))
+        with _verbatim(redactor if isinstance(entry, scorecard.Reason) else None):
+            for line in entry.splitlines():
+                text = line.lstrip(" ")
+                opening = f"{INDENT}  {line[:len(line) - len(text)]}"
+                _flow(opening, text, opening + "    ")
 
 
 def _rotation(raw: bytes) -> str:
@@ -895,7 +1191,7 @@ def _rotation(raw: bytes) -> str:
         return "0 (none declared)"
     if values == [0]:
         return "0"
-    turned = ", ".join(f"{v}" for v in values)
+    turned = in_words(f"{v}" for v in values)
     return (f"{turned} degrees -- the page is turned, and every coordinate on it "
             f"with it")
 
@@ -903,27 +1199,126 @@ def _rotation(raw: bytes) -> str:
 # --- verdict ----------------------------------------------------------------
 
 
+def _date_fact(card: Card) -> str:
+    """The date the reader read with its weekday, and the one printed if they differ.
+
+    The card's weekday used to be the date's own, so the two could not disagree
+    here; it is now what the card prints, and a card dated a Tuesday that prints
+    ``Wed`` is the question this tool is asked most. So both are named, with which
+    of them files the card. That and the disagreement are asked of
+    :mod:`matchcentre.discover`, whose rule they are, so that the verdict cannot
+    say one night while the build files the card under another.
+    """
+    dated, day = weekday_of(card.date), discover.filing_day(card)
+    files = ("the date is what files it" if dated and day == dated
+             else f"filed by the {day} it prints")
+    if not dated:
+        return f"(none read; {files})" if day else "(none read)"
+    disputed = discover.disputed_weekday(card)
+    if disputed:
+        return f"{card.date} {dated} (the card prints {disputed}; {files})"
+    return f"{card.date} {dated}"
+
+
+def _rules_where(combos: set[tuple[str, str]]) -> str:
+    """Where the club's set rule and scoring are one of *combos*, in words.
+
+    "the club's set rule is fast4 or pro-8 or where it is first-to-6 and its
+    scoring is simple": the set rules sharing their scorings named together, in
+    the order :data:`SET_RULES` holds them, and the scorings only where not all.
+    """
+    by_scorings: dict[tuple[str, ...], list[str]] = {}
+    for name in SET_RULES:
+        scorings = tuple(scoring for scoring in RULESETS
+                         if (name, scoring) in combos)
+        if scorings:
+            by_scorings.setdefault(scorings, []).append(name)
+    clauses = []
+    for scorings, names in by_scorings.items():
+        clause = "where it is " if clauses else "the club's set rule is "
+        clause += in_words(names, "or")
+        if len(scorings) < len(RULESETS):
+            clause += f" and its scoring is {in_words(scorings, 'or')}"
+        clauses.append(clause)
+    return in_words(clauses, "or")
+
+
+def _as_reported(check: CrossCheck, taken: dict[tuple[str, str], tuple[
+        tuple[str, str], ...]]) -> CrossCheck:
+    """*check* as the table says it, a hand-off said as reported where it is.
+
+    The reader hands a check to another without the club's rules, and under the
+    rules the build fails a forfeit's rows under, *taken*, ``forfeit-contradicted``
+    reports what it names, and F6 passes it by (4.134).
+    """
+    onward = {combo for combo, named in taken.items()
+              if check.name in {name for name, _ in named}}
+    if not check.reported_by or not onward:
+        return check
+    own = {(name, scoring) for name in SET_RULES for scoring in RULESETS} - onward
+    if not own:
+        return dataclasses.replace(check, reported_by="forfeit-contradicted",
+                                   detail="")
+    return dataclasses.replace(
+        check, reported_by=in_words([check.reported_by, "forfeit-contradicted"],
+                                    "or"),
+        detail=f"{check.detail}, where {_rules_where(own)}, and by "
+               f"forfeit-contradicted where {_rules_where(onward)}")
+
+
+def _taken(page: pdf.Page) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Under each set rule and scoring the build fails a forfeit's rows under,
+    what ``forfeit-contradicted`` names there, which nothing else reports.
+
+    The build holds a forfeit's rows to its box under the club's set rule and
+    scoring, which this is not given, so it asks the build's rules under each
+    (4.134): once, so that the reader's summary and the verdict say one thing.
+    What the reader raises of the page, its refusal with the rest, is raised.
+    """
+    card = scorecard.read_page(page)
+    taken: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+    for name, rule in SET_RULES.items():
+        for scoring, rules in RULESETS.items():
+            if validate.rows_against_box(card, rule, rules):
+                taken[name, scoring] = validate.restating_box(
+                    card, from_rows(card.doubles_flags, rule=rule))
+    return taken
+
+
 def _verdict(page: pdf.Page, *, path: Path, index: int,
              rules: list[float], bands: list[tuple[float, float]],
-             found: list[str], missing: list[str], rotation: str) -> int:
-    """Whether the page reads as a scorecard, and if not, the likeliest cause."""
+             found: list[str], missing: list[str], rotation: str,
+             redactor: _Redactor | None = None,
+             taken: dict[tuple[str, str], tuple[tuple[str, str], ...]],
+             failure: Exception | None = None) -> int:
+    """Whether the page reads as a scorecard, and if not, the likeliest cause.
+
+    The causes are the tool's own words, and are published as they are written
+    under ``--redact``, as the footer is, and so is the reason above them, which
+    the reader words without quoting the page. The detail can quote it, and is
+    scrubbed with the rest. *failure* is what asking the build's rules raised,
+    raised here, after the rows it follows (4.134).
+    """
     print(f"{INDENT}verdict")
     try:
         card = scorecard.read_page(page)
     except CardError as exc:
-        print(f"{INDENT}  This page was refused: {exc.reason}")
+        with _verbatim(redactor):
+            _flow(f"{INDENT}  ", f"This page was refused: {exc.reason}",
+                  f"{INDENT}      ")
         if exc.detail:
-            print(f"{INDENT}  detail: {exc.detail}")
-        for line in _causes(page, rules=rules, bands=bands, found=found,
-                            rotation=rotation):
-            print(f"{INDENT}  {line}")
+            _flow(f"{INDENT}  ", f"detail: {exc.detail}", f"{INDENT}      ")
+        with _verbatim(redactor):
+            for line in _causes(page, refusal=exc, rules=rules, bands=bands,
+                                found=found, rotation=rotation):
+                print(f"{INDENT}  {line}")
         return 1
 
     print(f"{INDENT}  This page reads as a scorecard.")
     facts = [
         ("division", card.division or "(none printed)"),
         ("round", card.round or "(none printed)"),
-        ("date", f"{card.date} {card.weekday}".strip() or "(none printed)"),
+        ("date", _date_fact(card)),
         ("home", card.home_name or "(none printed)"),
         ("away", card.away_name or "(none printed)"),
         ("verb", card.verb or "(none printed)"),
@@ -935,35 +1330,143 @@ def _verdict(page: pdf.Page, *, path: Path, index: int,
         ("winner tick", card.winner_tick or "none"),
     ]
     for label, value in facts:
-        print(f"{INDENT}    {label:<14}{value}")
+        _row(label, value, indent=f"{INDENT}    ")
 
     available = card.cross_checks_available
     failed = card.cross_checks_failed
-    print(f"{INDENT}    {'cross-checks':<14}"
-          f"{len(available)} available, {len(failed)} disagreeing")
-    for check in card.checks:
-        state = ("not printed on this card" if not check.available
-                 else "agrees" if check.agrees else "DISAGREES")
-        print(f"{INDENT}      {check.name:<14}{state}"
-              f"{'  ' + check.detail if check.detail else ''}")
+    # A printed check whose disagreement another check reports is neither "not
+    # printed" nor a failure of its own; it is counted apart only where there is
+    # one, so every other card is described in the same words as before.
+    reported = [check for check in available if check.reported_by]
+    _row("cross-checks", f"{len(available)} available, {len(failed)} disagreeing"
+         + (f", {len(reported)} reported by another check" if reported else ""),
+         indent=f"{INDENT}    ")
+    if failure is not None:
+        raise failure
+    # Where the rows are against the box, and what forfeit-contradicted names
+    # there, as _taken asked it of the build's rules (4.134).
+    combos = {(name, scoring) for name in SET_RULES for scoring in RULESETS}
+    others = {combo for combo in combos for check in failed
+              if check.name not in {name for name, _ in taken.get(combo, ())}}
+    for check in (_as_reported(check, taken) for check in card.checks):
+        state = check.state("not printed on this card")
+        _row(check.name, f"{state}{'  ' + check.detail if check.detail else ''}",
+             indent=f"{INDENT}      ")
     for warning in card.warnings:
-        print(f"{INDENT}    warning     {warning}")
-    if not available:
-        print(f"{INDENT}  No independent cross-check is printed on this card, so "
-              f"its numbers")
+        _flow(f"{INDENT}    ", f"warning     {warning}", f"{INDENT}    " + " " * 12)
+    claims = validate.winner_claims(card) if discover.called_off(card) else []
+    if claims:
+        # The one finding the build makes of it is an error, and the verdict says
+        # so in the words the report names the claims by.
+        print(f"{INDENT}  Match Cancelled is ticked, so build.py counts nothing on "
+              f"this card and holds nothing it prints to the set rows. But "
+              f"{in_words(claims)}, and a match called off has no winner, so the "
+              f"card contradicts itself: build.py reports the match once, as "
+              f"cancelled, and as an error, which fails the run.")
+    elif discover.called_off(card):
+        print(f"{INDENT}  Match Cancelled is ticked, so build.py counts nothing on "
+              f"this card")
+        print(f"{INDENT}  and holds nothing it prints to the set rows: it reports "
+              f"the match")
+        print(f"{INDENT}  once, as cancelled.")
+    elif not available:
+        # Beside a table line saying a verb is printed, not that none is (4.133).
+        first = ("Nothing this card prints can serve as a cross-check, so its numbers"
+                 if any(check.unusable for check in card.checks) else
+                 "No independent cross-check is printed on this card, so its numbers")
+        print(f"{INDENT}  {first}")
         print(f"{INDENT}  rest on the set rows alone (F6 warns rather than "
               f"refuses).")
+    elif failed and not others:
+        # forfeit-contradicted names every one, under every rule (4.134).
+        pass
     elif failed:
-        print(f"{INDENT}  A cross-check disagrees with the set rows. The card "
-              f"states its")
-        print(f"{INDENT}  result more than once and the readings differ, so "
-              f"something was")
-        print(f"{INDENT}  misread; build.py reports this as an error rather than "
-              f"scoring it.")
+        # What each was held to, from the check: a played card's reads as it
+        # always did, word for word (4.152), laid out to the width as every
+        # line is (4.186), and where only under some rules, the rules (4.134).
+        held = in_words(sorted({check.held_to for check in failed}))
+        where = "" if others == combos else f"where {_rules_where(others)}, "
+        print(f"{INDENT}  A cross-check disagrees with {held}. The card states its "
+              "result more than once and the readings differ, so something was "
+              f"misread; {where}build.py reports this as an error rather than "
+              "scoring it.")
+    elif reported:
+        print(f"{INDENT}  A cross-check disagrees with what the card is scored on, "
+              f"and")
+        print(f"{INDENT}  build.py reports that once, as "
+              f"{in_words(sorted({c.reported_by for c in reported}))}.")
+    # It names the rules it fails the card under, and none it does not, and
+    # under each what the finding names.
+    by_words: dict[tuple[str, ...], set[tuple[str, str]]] = {}
+    for combo, named in taken.items():
+        by_words.setdefault(tuple(what for _, what in named), set()).add(combo)
+    for words, under in by_words.items():
+        print(f"{INDENT}  Where {_rules_where(under)}, the set rows give the match "
+              f"to {card.forfeited_by}, and {scorecard._box(card.forfeited_by)} "
+              f"gives it to {forfeit_match_winner(card.forfeited_by)}"
+              f"{validate.as_restating(words)}: build.py reports that once, as "
+              "forfeit-contradicted, an error, which fails the run.")
     return 0
 
 
-def _causes(page: pdf.Page, *, rules: list[float],
+# How much of a page its images must cover for it to be a picture of a card,
+# when it has no table rules. Measured: a card's PNG that Chrome printed to PDF
+# covers 15.6 per cent of the page, a screenshot of it on a web page 71, and a
+# scan all of it, while a club's logo on the letterhead, 60 x 30 points, covers
+# under 1 per cent. A tenth sits between the two.
+_PICTURE_SHARE = 0.1
+
+
+def _picture_share(page: pdf.Page) -> float:
+    """The share of the page its images cover, at most the whole of it.
+
+    Added up image by image, so a scan painted in strips covers the page as one
+    painted whole does; an image off the page covers none of it.
+    """
+    whole = pdf.Rect(0.0, 0.0, page.width, page.height, True)
+    area = page.width * page.height
+    if area <= 0:
+        return 0.0
+    return min(1.0, sum(whole.overlaps(image) for image in page.images) / area)
+
+
+def _images(page: pdf.Page) -> str:
+    """The images row: how many the page paints, and how much of it they cover.
+
+    Rounded down, so that no page is shown covering the share that makes it a
+    picture when it covers less. An image painted beside the page, or on a page
+    of no size, covers none of it, and is shown so.
+    """
+    if not page.images:
+        return "none"
+    cover = _picture_share(page)
+    share = int(cover * 100)
+    shown = f"{share}%" if share else "under 1%" if cover else "none"
+    return f"{len(page.images)}, covering {shown} of the page"
+
+
+# The header fields a page can print without a word of the card's. Both are
+# figures, and Chrome, printing with its headers and footers on, prints both at
+# the top of the page: a screenshot of a card on a web page, printed to PDF by
+# Chrome, was measured with no rects and these two fields found, and nothing
+# else. A fixture list prints both too, and a rules sheet a start time. Every
+# other field is found by a word of the card's, or for the match id by the
+# card's own `#`. Chrome prints the page's title too, so a screenshot whose
+# title names a round finds that round as well.
+_FIELDS_A_BROWSER_PRINTS = ("date", "time")
+
+# What a page that is no scorecard is told to do with it, after each cause that
+# says it may be one. build.py reports every PDF under data/ that it cannot read
+# as an error (F4) and exits 1 while the file is there, so the file is fine and
+# its place is not.
+_NOT_A_SCORECARD = (
+    "If the page is one of those, the file is fine, but keep it in a folder",
+    "of its own outside data/: build.py reports every PDF under data/ that it",
+    "cannot read as an error (F4), and exits 1.",
+)
+
+
+def _causes(page: pdf.Page, *, refusal: CardError, rules: list[float],
             bands: list[tuple[float, float]], found: list[str],
             rotation: str) -> list[str]:
     """The likeliest explanations for a refusal, most likely first.
@@ -973,13 +1476,116 @@ def _causes(page: pdf.Page, *, rules: list[float],
     different one. Anything left over is a page that is simply not a scorecard,
     which is the common and harmless case -- a club keeps its draw and its rules
     sheet in the same folder as its cards.
+
+    Four causes are not inferred at all. A card on which a checkbox it needs
+    could not be named is refused with one of three kinds of refusal, one for the
+    squares, one for the labels beside them and one for a page that lacks what
+    some of its boxes need, and a card that ticks a box nothing reads with a
+    fourth, and each is explained first, from the kind, whatever this tool's own
+    tests above made of the page.
+
+    A line that fits is printed as it is given and a longer one is laid out, so
+    no sentence is broken by hand past the width: laid out again where the width
+    falls, a word or two of it was left alone on a line (4.186).
     """
     out: list[str] = []
+    if isinstance(refusal, scorecard.MissingCheckboxes):
+        # A download that stopped early, measured, and not another template:
+        # the reader gives this kind only when what the page lacks is a square
+        # or a word some of its own boxes have, so it is the copy that is short,
+        # or the word of a flag printed once for its one box, which a template
+        # that words that flag another way leaves the same, and which a copy
+        # downloaded again tells apart.
+        out.append("Likeliest cause: part of the card did not reach this file "
+                   "-- a download that stopped early, or a copy damaged on the "
+                   "way -- so the square of a box the card needs, or the label "
+                   "that names it, is not on the page; the detail line says "
+                   "which. A tick in a box that is not there cannot be seen, so "
+                   "the card cannot be read as it is. Download it again from "
+                   "Match Centre, and if the new copy is refused the same way, "
+                   "send this verdict (--redact takes the names out) to whoever "
+                   "maintains this tool.")
+        return out
+    if isinstance(refusal, scorecard.UnlabelledCheckboxes):
+        # Asked of the reader, not worked out here. The header fields above
+        # look for the same words with this tool's own patterns, and a second
+        # test of whether a label is there is a second answer to it -- one
+        # that finds the words on a page whose boxes sit off their line.
+        out.append("Likeliest cause: the card was printed from another "
+                   "template -- another association's, a translation, or a "
+                   "card retyped by hand -- which words its tick-box labels "
+                   "differently or lays them out another way; the detail line "
+                   "says which. A box is only what its label says it is, so the "
+                   "card cannot be read as it is. If Match Centre can export "
+                   "this match, use that export instead; if not, send this "
+                   "verdict (--redact takes the names out) to whoever "
+                   "maintains this tool, which has to be taught the new words "
+                   "or the new layout.")
+        return out
+    if isinstance(refusal, scorecard.UnlocatedCheckboxes):
+        # The census above can disagree with the reader here, by design: it is
+        # the looser test, and a page it finds boxes on and the reader does not
+        # is the reason it exists. So the cause names both counts' sources
+        # rather than leaving "looks like a scorecard" under a MISMATCH.
+        out.append("Likeliest cause: the tick boxes are not drawn the way "
+                   "Match Centre draws")
+        out.append("them, as filled hairlines whose top and bottom are a box "
+                   "side apart, so")
+        out.append("no box could be rebuilt. The census above counts outlines "
+                   "by a looser")
+        out.append("test, and the reader's own count is the one in its "
+                   "summary. Another")
+        out.append("program re-saving or re-printing the card is the usual "
+                   "reason: export it")
+        out.append("again from Match Centre, and if that export is refused "
+                   "too, send this")
+        out.append("verdict (--redact takes the names out) to whoever "
+                   "maintains this tool.")
+        return out
+    if isinstance(refusal, scorecard.UnreadTick):
+        # Every box the card needs is named, so none of the three causes above
+        # fits: the card has a box more, and the tick is in it.
+        out.append("Likeliest cause: the card draws a tick box that Match "
+                   "Centre's card")
+        out.append("does not have, and it is ticked: a set's box away from "
+                   "the set rows, or")
+        out.append("a square no label names; the detail line says where. "
+                   "Nothing is read")
+        out.append("from that box, so what the tick records cannot be known "
+                   "and the card")
+        out.append("cannot be read as it is. Export it again from Match "
+                   "Centre, and if that")
+        out.append("export is refused the same way, send this verdict "
+                   "(--redact takes the")
+        out.append("names out) to whoever maintains this tool.")
+        return out
+    if _picture_share(page) >= _PICTURE_SHARE and not rules:
+        # Before the empty page: a scan has no words and no rects, and a scan a
+        # scanning app laid the card's words over has every field of the card's.
+        out.append("Likeliest cause: an image covers much of the page, as the "
+                   "images line")
+        out.append("above shows, and the page has no table rules, so it is an "
+                   "image of a")
+        out.append("card rather than a card. A scan or a screenshot printed to "
+                   "PDF cannot be")
+        out.append("read: re-export the scorecard from Match Centre instead. A "
+                   "draw or a")
+        out.append("team list with a photograph on it can look like this too.")
+        out.extend(_NOT_A_SCORECARD)
+        return out
     if not page.words and not page.rects:
-        out.append("Likeliest cause: the page is empty, or its content is inside "
-                   "a structure")
-        out.append("this reader skips (a form XObject, or a compressed object "
-                   "stream).")
+        # Not that the page is empty: its annotations are never read, nor a
+        # path that is not a rectangle, so this reader cannot know. A form
+        # XObject it reads, and a compressed object stream it refuses before a
+        # page gets here (4.183).
+        out.append("Likeliest cause: the page draws nothing this reader reads "
+                   "a card by: no text, and no rectangle. It may still show a "
+                   "card, in what this reader never reads: annotations, where a "
+                   "form filled in on screen keeps its fields, or letters and "
+                   "lines drawn as outlines. Export the card again from Match "
+                   "Centre, and if that export is refused the same way, send "
+                   "this verdict (--redact takes the names out) to whoever "
+                   "maintains this tool.")
         return out
     if not page.words:
         out.append("Likeliest cause: no text could be decoded. Check the font "
@@ -988,12 +1594,40 @@ def _causes(page: pdf.Page, *, rules: list[float],
                    "every glyph,")
         out.append("so the page has rectangles and no words.")
         return out
+    if not page.rects and set(found) <= set(_FIELDS_A_BROWSER_PRINTS):
+        out.append("Likeliest cause: the page prints words, but none of a "
+                   "card's other than")
+        out.append("a date or a time, as the header fields above show. It "
+                   "paints no")
+        out.append("rectangle, and no image large enough to be a picture of a "
+                   "card. A draw,")
+        out.append("a rules sheet, a fixture list or a team list typed out "
+                   "looks like this.")
+        out.extend(_NOT_A_SCORECARD)
+        return out
     if not page.rects:
-        out.append("Likeliest cause: the page paints no rectangles, so it is an "
-                   "image of a")
-        out.append("card rather than a card. A scan or a screenshot printed to "
-                   "PDF cannot be")
-        out.append("read: re-export the scorecard from Match Centre instead.")
+        # The card's words and none of its rectangles. Measured on a card whose
+        # every rect is filled as a closed path instead, as LibreOffice Draw
+        # exports one: 16 of the 17 fields found, and no rect recorded. A
+        # picture of the card with its words laid invisibly over it, as a
+        # scanning app that reads the text makes one, reads alike, and is told
+        # above that it is a picture, since this reader records where one is.
+        out.append("Likeliest cause: the page prints a card's words, as the "
+                   "header fields")
+        out.append("above show, but paints no rectangle, and rectangles are "
+                   "all this reader")
+        out.append("records of a card's lines and boxes. So its shapes are "
+                   "drawn in a way")
+        out.append("this reader does not record. A program that opens a card "
+                   "and saves it")
+        out.append("again can draw them so. Export it again from Match Centre, "
+                   "and if that")
+        out.append("export is refused too, send this verdict (--redact takes "
+                   "the names out)")
+        out.append("to whoever maintains this tool. A draw, a rules sheet or a "
+                   "team list")
+        out.append("typed out, with no table, can look like this too.")
+        out.extend(_NOT_A_SCORECARD)
         return out
     if not rules:
         out.append("Likeliest cause: the set table's vertical rules are absent, "
@@ -1009,21 +1643,19 @@ def _causes(page: pdf.Page, *, rules: list[float],
         return out
     if not rotation.startswith("0"):
         out.append(f"Note: the page declares a rotation ({rotation}). Every "
-                   f"position on it is")
-        out.append("measured after that turn is applied.")
+                   f"position on it is measured after that turn is applied.")
     missing_core = [name for name in ("division", "round", "date")
                     if name not in found]
     if missing_core:
         out.append(f"Likeliest cause: the header line is missing "
-                   f"{', '.join(missing_core)}. That line")
-        out.append("is the only place the division, the round and the date "
-                   "appear, and a")
-        out.append("page without it cannot be routed to a competition -- which "
-                   "is exactly")
-        out.append("what a draw, a rules sheet or a team list looks like. If "
-                   "this is one of")
-        out.append("those, nothing is wrong: build.py counts it as refused and "
-                   "carries on.")
+                   f"{in_words(missing_core)}.")
+        out.append("That line is the only place the division, the round and the "
+                   "date")
+        out.append("appear, and a page without it cannot be routed to a "
+                   "competition --")
+        out.append("which is exactly what a draw, a rules sheet or a team list "
+                   "looks like.")
+        out.extend(_NOT_A_SCORECARD)
         return out
     out.append("The structure above looks like a scorecard, so the refusal came "
                "from a")

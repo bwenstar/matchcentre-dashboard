@@ -45,6 +45,8 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .scope import in_words
+
 __all__ = ["PdfError", "Word", "Rect", "Page", "extract", "page_count",
            "group_lines", "parse_cmap", "Matrix", "IDENTITY", "mat_mul",
            "mat_apply"]
@@ -78,8 +80,10 @@ def mat_apply(m: Matrix, x: float, y: float) -> tuple[float, float]:
 class PdfError(Exception):
     """The file is not the kind of PDF this extractor can read.
 
-    Always carries the path, and — for a feature that is refused rather than
-    absent — what a human can do to get a readable file instead.
+    Says what is wrong and names neither the file nor the page, which every reader
+    that prints one prints beside it already, the page numbered from 1. For a
+    feature that is refused rather than absent it says what a human can do to get a
+    readable file instead.
     """
 
 
@@ -164,6 +168,10 @@ class Page:
     # file, and so a warning about a bad page can name which page it was.
     index: int = 0              # 0-based, in page-tree order
     page_count: int = 1
+    # The box each image is painted into, an image XObject drawn by `Do` or an
+    # inline image, as a filled rect, since an image paints the whole of it. Where
+    # a picture is and nothing of what it shows: it gives no word and no rule.
+    images: tuple[Rect, ...] = ()
 
     def lines(self, tol: float = 2.0) -> list[list[Word]]:
         """Words grouped into lines by baseline, each line sorted left to right."""
@@ -919,14 +927,137 @@ def _read_literal(buf: bytes, i: int) -> tuple[bytes, int]:
     return bytes(out), i
 
 
+# An `EI` that could end an inline image's bytes: after white space, and before
+# white space, a delimiter or the end of the stream. The bytes are anything, so
+# one among them looks the same; `_inline_end` says which ends the image.
+_INLINE_END_RE = re.compile(rb"(?<=\s)EI(?=[\s%/\[\]<>(){}]|\Z)")
+# The `EI` where the length an image's dictionary gives says its bytes end.
+_INLINE_AT_RE = re.compile(rb"\s*EI(?=[\s%/\[\]<>(){}]|\Z)")
+# A `BI` the same way, where the next inline image would begin.
+_INLINE_BEGIN_RE = re.compile(rb"(?<=\s)BI(?=[\s%/\[\]<>(){}]|\Z)")
+# The byte after an operator: white space or a delimiter.
+_OPERATOR_END_RE = re.compile(rb"[\s%/\[\]<>(){}]")
+_SPACE_RE = re.compile(rb"\s*")
+
+# The 73 operators of a content stream, ISO 32000-1 Annex A.
+_OPERATORS = frozenset(b"""
+    b B b* B* BDC BI BMC BT BX c cm CS cs d d0 d1 Do DP EI EMC ET EX f F f* G g gs
+    h i ID j J K k l m M MP n q Q re RG rg ri s S SC sc SCN scn sh T* Tc Td TD Tf
+    Tj TJ TL Tm Tr Ts Tw Tz v w W W* y ' "
+    """.split())
+# Those that can come after an image: all but the two that only an image's own
+# dictionary and bytes come before.
+_AFTER_AN_IMAGE = _OPERATORS - {b"ID", b"EI"}
+# Words the operator pattern matches that are objects, and so operands.
+_KEYWORDS = frozenset((b"true", b"false", b"null"))
+# How far past a candidate `EI` its content is read, so that an image full of
+# candidates costs a bounded look at each.
+_INLINE_LOOKAHEAD = 1024
+# Where no token matches, what one the look's end cuts off begins as: a hex string
+# or `<<` not yet closed, or the first `>` of `>>`.
+_CUT_RE = re.compile(rb"(?:<[0-9A-Fa-f\s]*|>)\Z")
+
+
+def _inline_length(dictionary: bytes) -> int | None:
+    """The ``/L`` or ``/Length`` an inline image's dictionary gives, if a count."""
+    tokens = list(_tokenize(dictionary))
+    for (kind, key), (vkind, value) in zip(tokens, tokens[1:]):
+        if (kind == "name" and key in ("L", "Length") and vkind == "num"
+                and value >= 0 and value == int(value)):
+            return int(value)
+    return None
+
+
+def _reads_as_content(buf: bytes, at: int) -> bool | None:
+    """Whether what follows ``at`` reads as content that can follow an image.
+
+    That is operands, then an operator other than ``ID`` and ``EI``, which follow
+    only an image's own dictionary and bytes, so an ``EI`` among an image's bytes
+    followed by its real one is not taken for the end; or the stream's end, with
+    no operand left waiting. A byte no token begins, a word no operator is, and
+    operands the stream ends among, a string left open included, say no. The look
+    reads the lookahead's bytes at most, and None says they ran out before the
+    stream did, in the middle of a token or not, with nothing yet decided.
+    """
+    window = buf[at:at + _INLINE_LOOKAHEAD]
+    whole = at + _INLINE_LOOKAHEAD >= len(buf)
+    operands = False
+    j = 0
+    while True:
+        j = _SPACE_RE.match(window, j).end()
+        if j >= len(window):
+            return not operands if whole else None
+        m = _TOKEN_RE.match(window, j)
+        if m is None:
+            return None if not whole and _CUT_RE.match(window, j) else False
+        j = m.end()
+        if m.lastgroup == "comment":
+            continue
+        if m.lastgroup == "lparen":
+            _, j = _read_literal(window, j)
+        elif m.lastgroup == "op" and m.group() not in _KEYWORDS:
+            if j == len(window) and not whole:
+                return None                # the word may run on past the look
+            return (m.group() in _AFTER_AN_IMAGE
+                    and (j == len(window) or _OPERATOR_END_RE.match(window, j)
+                         is not None))
+        operands = True
+
+
+def _inline_end(buf: bytes, i: int, length: int | None) -> int | None:
+    """Where the inline image whose bytes follow ``ID`` at ``i`` ends, past its EI.
+
+    With a ``length``, counted from the byte after ``ID``'s white space, the image
+    ends there if EI is next. Otherwise it ends at the first candidate EI whose
+    following bytes read as content; failing that, at the first whose look ran out
+    undecided; and failing that, at the first. No candidate past a ``BI`` after the
+    one before it is tried, since an EI there ends another image. None where there
+    is no EI at all.
+    """
+    if length is not None:
+        start = i + 1 if buf[i:i + 1].isspace() else i
+        at = _INLINE_AT_RE.match(buf, start + length)
+        if at:
+            return at.end()
+    first = undecided = last = None
+    for end in _INLINE_END_RE.finditer(buf, i):
+        if last is not None and _INLINE_BEGIN_RE.search(buf, last, end.start()):
+            break
+        content = _reads_as_content(buf, end.end())
+        if content:
+            return end.end()
+        if content is None and undecided is None:
+            undecided = end.end()
+        if first is None:
+            first = end.end()
+        last = end.end()
+    return first if undecided is None else undecided
+
+
 def _tokenize(buf: bytes):
     i = 0
+    begun = None
     while i < len(buf):
         m = _TOKEN_RE.search(buf, i)
         if m is None:
             return
         i = m.end()
         if m.lastgroup == "comment":
+            continue
+        if m.lastgroup == "op" and m.group() == b"BI":
+            begun = i
+        if m.lastgroup == "op" and m.group() == b"ID":
+            # An inline image's bytes, passed over whole: a `(` among them read as
+            # content opens a string that swallows the rest of the stream. With no
+            # `EI` the stream ends inside the image, and nothing is left to read.
+            yield ("op", "ID")
+            length = None if begun is None else _inline_length(buf[begun:m.start()])
+            begun = None
+            end = _inline_end(buf, i, length)
+            if end is None:
+                return
+            i = end
+            yield ("op", "EI")
             continue
         if m.lastgroup == "lparen":
             s, i = _read_literal(buf, i)
@@ -998,6 +1129,7 @@ class _Interpreter:
         self.doc = doc
         self.glyphs: list[_Glyph] = []
         self.rects: list[Rect] = []
+        self.images: list[Rect] = []
         self.trace = _Trace()
         self.run = -1
         self._fonts: dict[bytes, dict[str, _Font]] = {}
@@ -1119,6 +1251,9 @@ class _Interpreter:
                         pending_ctm.clear()
                 elif op == "Do" and operands:
                     self._do_xobject(operands[-1], resources, gs.ctm, depth)
+                elif op == "EI":
+                    # Recorded at its end, so that an image that never ends is not.
+                    self.images.append(_image_box(gs.ctm))
                 elif op == "BT":
                     tm = tlm = IDENTITY
                     self.run += 1
@@ -1183,8 +1318,9 @@ class _Interpreter:
         page with no words and no rules, which downstream cannot tell from an
         empty card, so a form is *interpreted*: its own ``/Matrix`` premultiplies
         the current transformation, and its own ``/Resources`` supply its fonts.
-        An image carries neither words nor grid lines, so it is skipped. Anything
-        else, or a form that cannot be decoded, raises.
+        An image carries neither words nor grid lines, so only the box it is
+        painted into is recorded. Anything else, or a form that cannot be
+        decoded, raises.
 
         The form's ``/BBox`` is *not* applied as a clip, on the same grounds as the
         interpreter's other clipping paths: reporting a mark that a viewer would
@@ -1203,6 +1339,7 @@ class _Interpreter:
         body = self.doc.body(num)
         subtype = self.doc.entry(body, "Subtype") or b""
         if subtype == b"/Image":
+            self.images.append(_image_box(ctm))
             return
         if subtype != b"/Form" and not self.doc.entry(body, "BBox"):
             raise PdfError(
@@ -1222,6 +1359,13 @@ class _Interpreter:
             self.run_stream(content, inner, mat_mul(matrix, ctm), depth + 1)
         finally:
             self._active.discard(num)
+
+
+def _image_box(ctm: Matrix) -> Rect:
+    """The box an image is painted into: the unit square, through ``ctm``."""
+    xs, ys = zip(*(mat_apply(ctm, x, y)
+                   for x, y in ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0))))
+    return Rect(min(xs), min(ys), max(xs), max(ys), True)
 
 
 def _matrix_entry(doc: _Doc, body: bytes) -> Matrix | None:
@@ -1311,9 +1455,9 @@ def extract(path: str | Path, *, page: int = 0) -> Page:
     read ``Page.page_count`` off a page already in hand.
     """
     p, doc = _open(path)
-    order = _page_objects(doc, p)
+    order = _page_objects(doc)
     if not 0 <= page < len(order):
-        raise PdfError(f"{p}: no page {page}; the document has {len(order)} "
+        raise PdfError(f"no page {page}; the document has {len(order)} "
                        f"page(s), numbered from 0")
     body = doc.body(order[page])
 
@@ -1322,7 +1466,7 @@ def extract(path: str | Path, *, page: int = 0) -> Page:
     if len(nums) != 4:
         nums = [0.0, 0.0, 595.0, 842.0]
     box_w, box_h = abs(nums[2] - nums[0]), abs(nums[3] - nums[1])
-    rotation = _rotation(doc, body, p, page)
+    rotation = _rotation(doc, body)
     # A quarter-turn swaps the page's proportions. Reporting the unrotated pair
     # would leave every caller measuring an A4 card against a landscape page.
     width, height = (box_h, box_w) if rotation in (90, 270) else (box_w, box_h)
@@ -1331,12 +1475,12 @@ def extract(path: str | Path, *, page: int = 0) -> Page:
 
     contents_raw = doc.entry(body, "Contents")
     if not contents_raw:
-        raise PdfError(f"{p}: page {page} has no /Contents")
+        raise PdfError("the page has no /Contents")
     chunks = []
     for num in doc.refs(contents_raw):
         chunks.append(doc.stream(num))
     if not chunks:
-        raise PdfError(f"{p}: page {page}'s /Contents resolved to no streams")
+        raise PdfError("the page's /Contents resolved to no streams")
     content = b"\n".join(chunks)
 
     # The MediaBox origin may be non-zero, and /Rotate may turn the page; both are
@@ -1348,15 +1492,15 @@ def extract(path: str | Path, *, page: int = 0) -> Page:
     words = _to_words(interp.glyphs)
     words.sort(key=lambda w: (round(w.baseline, 1), w.x0))
     if not words and interp.trace.shown:
-        blame = ", ".join(sorted(interp.trace.undecodable)) or "no font at all"
+        blame = in_words(sorted(interp.trace.undecodable)) or "no font at all"
         raise PdfError(
-            f"{p}: page {page} draws text but not one glyph could be decoded to a "
+            f"the page draws text but not one glyph could be decoded to a "
             f"character ({interp.trace.shown} show-text operators); the fonts this "
             f"reader could not read are {blame}. A page reported as empty would be "
             f"scored as a card with nothing on it, so it is refused instead")
     return Page(width=width, height=height, words=tuple(words),
                 rects=tuple(interp.rects), source=str(p),
-                index=page, page_count=len(order))
+                index=page, page_count=len(order), images=tuple(interp.images))
 
 
 def page_count(path: str | Path) -> int:
@@ -1365,8 +1509,8 @@ def page_count(path: str | Path) -> int:
     Cheap enough to call before an :func:`extract` loop: it scans the object
     table and walks the page tree, but decompresses nothing.
     """
-    p, doc = _open(path)
-    return len(_page_objects(doc, p))
+    _, doc = _open(path)
+    return len(_page_objects(doc))
 
 
 def _base_matrix(x0: float, y0: float, w: float, h: float,
@@ -1390,7 +1534,7 @@ def _base_matrix(x0: float, y0: float, w: float, h: float,
     return mat_mul(shift, turn)
 
 
-def _rotation(doc: _Doc, body: bytes, source: Path, page: int) -> int:
+def _rotation(doc: _Doc, body: bytes) -> int:
     """A page's ``/Rotate``, inherited if need be, normalised to 0/90/180/270.
 
     An exported card is normally unrotated, but a scan or a re-save can carry a
@@ -1408,7 +1552,7 @@ def _rotation(doc: _Doc, body: bytes, source: Path, page: int) -> int:
         return 0
     value = int(m.group()) % 360
     if value % 90:
-        raise PdfError(f"{source}: page {page} has /Rotate {m.group().decode()}, "
+        raise PdfError(f"the page has /Rotate {m.group().decode()}, "
                        f"which is not a multiple of 90; the page geometry cannot "
                        f"be placed")
     return value
@@ -1436,20 +1580,20 @@ def _open(path: str | Path) -> tuple[Path, _Doc]:
     try:
         data = p.read_bytes()
     except OSError as exc:
-        raise PdfError(f"{p}: cannot read ({exc})") from exc
+        raise PdfError(f"cannot read: {exc.strerror or exc}") from exc
     if not data.startswith(b"%PDF"):
-        raise PdfError(f"{p}: not a PDF")
+        raise PdfError("not a PDF")
     # The old check looked only at the last 2 kB, which misses an /Encrypt in the
     # first of several trailers in an incrementally updated file — and an
     # encrypted file read as plaintext yields compressed-looking garbage, not an
     # error.
     if _ENCRYPT_RE.search(data):
-        raise PdfError(f"{p}: the file is encrypted (/Encrypt in the trailer); "
+        raise PdfError(f"the file is encrypted (/Encrypt in the trailer); "
                        f"this reader has no decryption. Re-export or re-save it "
                        f"without a password or permissions password")
     if _OBJSTM_RE.search(data):
         raise PdfError(
-            f"{p}: objects are packed into a compressed object stream "
+            f"objects are packed into a compressed object stream "
             f"(/Type /ObjStm). This reader finds objects by scanning for "
             f"'N G obj' in the file, so objects inside such a stream are "
             f"invisible to it and the page would come out blank. Re-save it "
@@ -1458,7 +1602,7 @@ def _open(path: str | Path) -> tuple[Path, _Doc]:
             f"or re-export the card from Match Centre")
     if _XREFSTM_RE.search(data) and not _CLASSIC_XREF_RE.search(data):
         raise PdfError(
-            f"{p}: the cross-reference is a stream (/Type /XRef) with no classic "
+            f"the cross-reference is a stream (/Type /XRef) with no classic "
             f"'xref' table. Without one this reader cannot tell which definition "
             f"of an object number is current, and a stale or missing object shows "
             f"up as missing words rather than as an error. Re-save it as PDF 1.4, "
@@ -1467,7 +1611,7 @@ def _open(path: str | Path) -> tuple[Path, _Doc]:
     return p, _Doc(data)
 
 
-def _page_objects(doc: _Doc, source: str | Path = "<pdf>") -> list[int]:
+def _page_objects(doc: _Doc) -> list[int]:
     """Object numbers of every page, in the document's own page order.
 
     Order comes from Catalog -> Pages -> /Kids, depth first, because /Kids *is*
@@ -1510,7 +1654,7 @@ def _page_objects(doc: _Doc, source: str | Path = "<pdf>") -> list[int]:
         if re.search(rb"/Type\s*/Page(?![sA-Za-z])", obj.body):
             order.append(num)
     if not order:
-        raise PdfError(f"{source}: no page object found")
+        raise PdfError("no page object found")
     return order
 
 

@@ -24,10 +24,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .format import MatchFormat
+from .scope import choices
+from .slugs import did_you_mean, nearest
 
 __all__ = ["Ruleset", "RULESETS", "ruleset", "ScoringError",
            "DEFAULT_RULESET", "LADDER_KEYS", "UNPLAYED_MODES",
-           "UNPLAYED_AVERAGE", "UNPLAYED_ZERO", "unplayed_detail"]
+           "UNPLAYED_AVERAGE", "UNPLAYED_ZERO", "unplayed_worth",
+           "unplayed_detail", "draws_detail"]
 
 
 class ScoringError(ValueError):
@@ -45,6 +48,8 @@ LADDER_KEYS = ("points_average", "points", "wins", "games_diff", "games_won",
 #               where the non-forfeiting side's scoreline is filled in)
 #   full-games  the winner is credited a clean sweep, the forfeiter nothing
 #   fixed       a flat number of points, ignoring games
+# A scheme whose points are the sets won pays nothing for the outcome, so under
+# as-played and full-games alike its winner is paid every rubber of the format.
 FORFEIT_AWARDS = ("as-played", "full-games", "fixed")
 
 # What a round a team did not play is worth: a bye, a washout, a week called off.
@@ -72,7 +77,9 @@ class Ruleset:
     ``draw = None`` means the competition cannot draw. That is not the same as
     ``draw = 0``: with ``None``, a level match is reported as a data problem
     (something was misread, or a tiebreak result was not recorded) instead of
-    being silently scored.
+    being silently scored. No preset sets it -- a club reaches it through
+    ``[rules] draws = false``, the way it reaches ``average_unplayed`` through
+    ``[rules] unplayed``.
     """
 
     name: str
@@ -104,15 +111,17 @@ class Ruleset:
             raise ScoringError(f"decide_by repeats itself: {self.decide_by}")
         if self.forfeit_award not in FORFEIT_AWARDS:
             raise ScoringError(
-                f"forfeit_award must be one of {FORFEIT_AWARDS}, "
-                f"got {self.forfeit_award!r}")
+                f"forfeit_award = \"{self.forfeit_award}\" is not "
+                f"{choices(FORFEIT_AWARDS)}."
+                f"{did_you_mean(nearest(str(self.forfeit_award), FORFEIT_AWARDS))}")
         if self.forfeit_award == "fixed" and self.forfeit_points is None:
             raise ScoringError(
                 "forfeit_award='fixed' needs forfeit_points")
         for key in self.ladder_by:
             if key not in LADDER_KEYS:
                 raise ScoringError(
-                    f"unknown ladder key {key!r}; known: {', '.join(LADDER_KEYS)}")
+                    f"ladder key \"{key}\" is not {choices(LADDER_KEYS)}."
+                    f"{did_you_mean(nearest(str(key), LADDER_KEYS))}")
         if not self.ladder_by:
             raise ScoringError("ladder_by cannot be empty: the ladder needs an order")
         if "name" != self.ladder_by[-1]:
@@ -147,13 +156,15 @@ class Ruleset:
     def forfeit_win_points(self, fmt: MatchFormat) -> float:
         """What a side gets for a win by forfeit.
 
-        Only used when ``forfeit_award`` is not ``as-played``; otherwise the card's
-        own printed games flow through the normal path.
+        Only used when ``forfeit_award`` is not ``as-played``, or when the points
+        are the sets won; otherwise the card's own printed games flow through the
+        normal path. Where the points are the sets won it is every rubber of the
+        format, unless ``forfeit_award`` is ``fixed``, whose ``forfeit_points`` is
+        paid whatever the scheme.
         """
         if self.forfeit_award == "fixed":
             return float(self.forfeit_points)
-        games = fmt.max_games_per_match
-        sets = len(fmt.slots)
+        sets, games = fmt.forfeit_worth
         if self.points_are_sets_won:
             return float(sets)
         return self.win + self.game_bonus * games + self.set_bonus * sets
@@ -166,42 +177,106 @@ class Ruleset:
 
     # --- results --------------------------------------------------------
 
-    def outcome(self, *, home_games: int, away_games: int,
-                home_sets: int, away_sets: int) -> str | None:
-        """``"home"``, ``"away"``, ``None`` for a draw.
+    def deciding_basis(self, *, home_games: int, away_games: int,
+                       home_sets: int, away_sets: int) -> str | None:
+        """Which entry in ``decide_by`` separated the two sides, or ``None``.
 
-        Applies ``decide_by`` in order. Returning ``None`` is a genuine draw only
-        when every basis is level; callers must check :attr:`allows_draw` before
-        treating it as one.
+        The dashboard needs this to explain a level scoreline: a match tied on
+        games has a winner beside it only because something else broke the tie,
+        and *which* something is the ruleset's decision. Under the default order it
+        is sets; under ``sets-first`` a card level on games was never going to be
+        decided on games at all, so a page that hardcoded "decided on sets" would
+        be describing rules nobody played under.
         """
         pairs = {"games": (home_games, away_games), "sets": (home_sets, away_sets)}
         for basis in self.decide_by:
             mine, theirs = pairs[basis]
             if mine != theirs:
-                return "home" if mine > theirs else "away"
+                return basis
         return None
+
+    def outcome(self, *, home_games: int, away_games: int,
+                home_sets: int, away_sets: int) -> str | None:
+        """``"home"``, ``"away"``, ``None`` for a draw.
+
+        Applies ``decide_by`` in order, through :meth:`deciding_basis` rather than
+        beside it, so the winner and the reason given for it cannot disagree.
+        Returning ``None`` is a genuine draw only when every basis is level;
+        callers must check :attr:`allows_draw` before treating it as one.
+        """
+        basis = self.deciding_basis(home_games=home_games, away_games=away_games,
+                                    home_sets=home_sets, away_sets=away_sets)
+        if basis is None:
+            return None
+        mine, theirs = ({"games": (home_games, away_games),
+                         "sets": (home_sets, away_sets)}[basis])
+        return "home" if mine > theirs else "away"
 
     @property
     def allows_draw(self) -> bool:
         return self.draw is not None
 
     def describe(self) -> str:
+        # "no draw" is said rather than left out. A scheme with `draw = None`
+        # described itself as "win 4, loss 2" -- the same sentence as a scheme whose
+        # draw is worth nothing, which is the opposite arrangement: there a level
+        # night is a result, here it is a result nobody recorded. This string is the
+        # only place a club that set `draws = false` can see the setting took
+        # effect, since it is printed in the run report and in the page's banner.
         parts = [f"win {_num(self.win)}"]
-        if self.draw is not None:
+        if self.draw is None:
+            parts.append("no draw")
+        else:
             parts.append(f"draw {_num(self.draw)}")
         parts.append(f"loss {_num(self.loss)}")
         if self.points_are_sets_won:
             parts = ["points = sets won"]
+            if self.draw is None:
+                parts.append("no draw")
         if self.game_bonus:
             parts.append(f"{_num(self.game_bonus)} per game")
         if self.set_bonus:
             parts.append(f"{_num(self.set_bonus)} per set")
-        decided = " then ".join(self.decide_by)
-        return f"{', '.join(parts)}; decided on {decided}"
+        clauses = [", ".join(parts)]
+        # Nobody wins a set on a forfeit's empty rows, so "points = sets won" alone
+        # said the side that turned up was paid nothing. It is paid what
+        # forfeit_win_points pays, and this says so from the same field.
+        if self.points_are_sets_won:
+            points = self.forfeit_points
+            clauses.append("a match forfeited whole pays the side that turned up "
+                           + (f"{_num(points)} point{'' if points == 1 else 's'}"
+                              if self.forfeit_award == "fixed" else "every rubber"))
+        clauses.append(f"decided on {' then '.join(self.decide_by)}")
+        return "; ".join(clauses)
 
 
 def _num(value: float) -> str:
     return f"{value:g}"
+
+
+def unplayed_worth(average_unplayed: bool) -> str:
+    """What a round nobody played is worth, as a clause needing a subject.
+
+    The sentence below is the form for a table of rules, where the subject has to
+    be named because nothing around it says which rule is being described. This is
+    the form for the places that have already named it: a bye's own row on the
+    dashboard, and the card of a match that was washed out. Both of those are
+    looking at one unplayed round and asking what it earned, and "a bye or a
+    washout is credited…" said there tells a reader something they can see.
+
+    So: no subject, no capital, no full stop, and no mention of byes or washouts.
+    The callers supply "a bye or a washout is", "bye — " and "The round itself is".
+
+    Split out rather than duplicated because the duplicate existed and had already
+    drifted. ``byeRow`` in app.js used to carry its own pair of strings — "scored at
+    the team's own average", which never says what the round counts *in*, and "no
+    points, by this competition's rules", which never says it is not a match played
+    — so the page's two accounts of one rule disagreed with each other and with
+    this module, and the one a reader saw depended on which page they were on.
+    """
+    if average_unplayed:
+        return "credited the team's own average, and counts in that average"
+    return "scored as nothing, and not counted as a match played"
 
 
 def unplayed_detail(average_unplayed: bool) -> str:
@@ -212,12 +287,45 @@ def unplayed_detail(average_unplayed: bool) -> str:
     team its own average cannot move any team's average, so only the points column
     changes — and a club comparing totals against its association's sheet needs to
     know which convention produced the number it is looking at.
+
+    "Counts in that average" rather than "counts as a match played", which is what
+    this said and is what associations call it: the ladder's ``P`` column is the
+    matches a team's result was decided in, and ``W``, ``L`` and ``D`` add up to it.
+    A credited round is in the average's divisor and not in that column, so the
+    sentence has to name the thing it is really in — the dashboard prints this line
+    a scroll above the column that would otherwise contradict it.
+
+    Composed from :func:`unplayed_worth` rather than written out, so that the two
+    forms of one rule cannot say different things.
     """
-    if average_unplayed:
-        return ("a bye or a washout is credited the team's own average, "
-                "and counts as a match played")
-    return ("a bye or a washout scores nothing, and is not counted "
-            "as a match played")
+    return "a bye or a washout is " + unplayed_worth(average_unplayed)
+
+
+def draws_detail(allows_draw: bool) -> str:
+    """What becomes of a level card, or ``""`` where a draw is an ordinary result.
+
+    Companion to :func:`unplayed_detail`, and here for the same reason: one sentence,
+    beside the rule, printed by both the run report and the dashboard's rules banner
+    so the terminal and the page cannot word it differently.
+
+    The empty string is load-bearing rather than tidy. Both callers print the row
+    only when there is something in it, so a club whose grade draws like every other
+    grade is not shown a line telling them so — ``Ruleset.describe`` one row up
+    already says what a draw is worth. Only the club that turned the setting on pays
+    for the row, which is the club that has to act on it.
+
+    Keyed on ``allows_draw`` rather than on ``Config.draws``: the fact, not one of
+    the routes to it. A competition can override the setting, and the page has no
+    config at all.
+    """
+    if allows_draw:
+        return ""
+    # Names the setting, because the sentence is otherwise a mystery to whoever
+    # inherits the config file — and says the night is *reported*, not dropped,
+    # since a figure quietly missing is the thing this project exists to avoid.
+    return ("this competition decides every match, so a level card is reported "
+            "as a result nobody recorded and left out of the ladder "
+            "(draws = false)")
 
 
 RULESETS: dict[str, Ruleset] = {
@@ -264,5 +372,5 @@ def ruleset(name: str) -> Ruleset:
         return RULESETS[name]
     except KeyError:
         raise ScoringError(
-            f"unknown scoring scheme {name!r}; known: {', '.join(sorted(RULESETS))}"
-        ) from None
+            f"scoring scheme \"{name}\" is not {choices(sorted(RULESETS))}."
+            f"{did_you_mean(nearest(name, RULESETS))}") from None

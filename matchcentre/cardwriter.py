@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .format import DEFAULT_SET_RULE, SetRule, set_rule as named_set_rule, set_winner
-from .model import SetStatus, other_side
+from .model import SetStatus, forfeit_set_winner, other_side, stopped_short
 
 __all__ = ["CardSpec", "SetRow", "RosterRow", "write_card", "write_card_file",
            "MAX_SET_ROWS", "AUTO", "NO_TICK"]
@@ -397,15 +397,25 @@ class CardSpec:
     competition_line: str = "Example District Tennis Club Night Fixtures 2026"
     season_line: str = "Season 1"
 
-    # the identity line, and the date that is the only source of the weekday
+    # the identity line; the date is printed with its own weekday unless `when` is set
     date: str = "2026-08-18"          # ISO; printed as dd/mm/yyyy with its weekday
     start_time: str = "7:00 PM"
+    # The date-and-time line verbatim, for a card that prints its date some other
+    # way (a worded month, a two-digit year, no weekday, the wrong weekday). AUTO
+    # prints ``date`` and ``start_time`` the way every measured card does; "" prints
+    # no date line at all.
+    when: str = AUTO
     venue: str = "Example Courts"
     court: str = "01"
     division: str = "C"
     ball: str = "Yellow Ball"         # optional on real cards; "" omits it
     round_label: str = "1"
     match_id: str = "1000001"
+    # What separates the identity fields. Every real card measured prints " / ",
+    # which is the default; " " is here because a template that leaves the slashes
+    # out is the case where a division has to end at the right word rather than at
+    # the next punctuation mark, and nothing else can produce that line.
+    identity_separator: str = " / "
 
     # the banner
     home_name: str = "EXAMPLE ALPHAS"
@@ -431,6 +441,16 @@ class CardSpec:
     home_fill_ins: tuple[str, ...] = ()
     away_fill_ins: tuple[str, ...] = ()
     comments: str = ""
+    # The headings under the roster block. Every real card measured prints
+    # `Fill-ins (Home Team)` beside `Fill-ins (Away Team)`, then `Comments`; these
+    # are here because a template that words any of them differently, or leaves one
+    # out, is the case where the roster block has to end somewhere other than at a
+    # word the reader knows, and nothing else can produce that page. The fill-ins
+    # headings are home's then away's, each printed over its own column exactly as
+    # given; "" prints no heading there.
+    fill_ins_headings: tuple[str, str] = ("Fill-ins (Home Team)",
+                                          "Fill-ins (Away Team)")
+    comments_heading: str = "Comments"
 
     # --- deliberate defects, for the anti-fixtures -------------------------
     # Each keeps the PDF structurally valid and makes the card wrong in one
@@ -456,6 +476,10 @@ class CardSpec:
     omit_totals: bool = False         # print no TOTAL row at all
     omit_verb: bool = False           # print no result verb between the team names
     omit_to_unicode: bool = False     # embed the font with no CMap
+    # Print the fill-ins headings where a template of three roster rows does,
+    # however long the squads, as this writer did before it moved them under the
+    # longer squad: a fifth row then prints too close above them to be read.
+    fixed_fill_ins: bool = False
 
     @property
     def rule(self) -> SetRule:
@@ -479,13 +503,18 @@ def _row_set_winner(row: SetRow, rule: SetRule) -> str | None:
 
     Kept deliberately identical: the printed TOTAL row is one of the reader's
     cross-checks (F6), so a writer that counted sets differently from the model
-    would make every card it wrote fail its own validation.
+    would make every card it wrote fail its own validation. A forfeited row is the
+    one where "identical" is not a matter of writing the same three lines twice —
+    the answer is in the ticks as well as the games — so that part is one shared
+    function and not a copy.
     """
     if row.status is SetStatus.FORFEIT:
-        if row.home_games == row.away_games:
-            return None
-        return "home" if row.home_games > row.away_games else "away"
-    if row.status in (SetStatus.RETIRED, SetStatus.INCOMPLETE):
+        home_forfeit, away_forfeit = _row_status_sides(row)
+        return forfeit_set_winner(home_forfeit=home_forfeit,
+                                  away_forfeit=away_forfeit,
+                                  home_games=row.home_games,
+                                  away_games=row.away_games)
+    if stopped_short(row.status):
         return None
     return set_winner(row.home_games, row.away_games, rule)
 
@@ -575,6 +604,8 @@ def _row_markers(spec: CardSpec) -> tuple[str, ...]:
 
 def _when(spec: CardSpec) -> str:
     """``Tue 18/08/2026 7:00 PM``: the card's only statement of when it was played."""
+    if spec.when != AUTO:
+        return spec.when
     day = datetime.date.fromisoformat(spec.date)
     stamp = f"{day.strftime('%a')} {day.day:02d}/{day.month:02d}/{day.year}"
     return f"{stamp} {spec.start_time}".strip()
@@ -587,7 +618,7 @@ def _identity_line(spec: CardSpec) -> str:
     parts.append(f"Round {spec.round_label}")
     if spec.match_id:
         parts.append(f"#{spec.match_id}")
-    return " / ".join(parts)
+    return spec.identity_separator.join(parts)
 
 
 # --- painting ---------------------------------------------------------------
@@ -911,11 +942,16 @@ def _paint_foot(art: _Painter, spec: CardSpec, layout: _Layout) -> None:
                       name_x, baseline, TEXT_SIZE_BODY)
             art.words(_rating_text(entry), rating_x, baseline, TEXT_SIZE_BODY)
 
-    fill_in_baseline = layout.below(FILL_INS_DY)
-    art.words("Fill-ins (Home Team)", HOME_FILL_INS_X, fill_in_baseline,
-              TEXT_SIZE_BODY)
-    art.words("Fill-ins (Away Team)", AWAY_FILL_INS_X, fill_in_baseline,
-              TEXT_SIZE_BODY)
+    # Where the template prints the headings, or a pitch under the longer squad's
+    # last row if that is lower: printed at the template's place, a fifth row is too
+    # close above them for the reader's band to hold it.
+    longer = max(len(spec.home_roster), len(spec.away_roster))
+    fill_in_baseline = layout.below(FILL_INS_DY if spec.fixed_fill_ins else max(
+        FILL_INS_DY, ROSTER_FIRST_ROW_DY + longer * ROSTER_ROW_PITCH))
+    for heading, x in zip(spec.fill_ins_headings,
+                          (HOME_FILL_INS_X, AWAY_FILL_INS_X)):
+        if heading:
+            art.words(heading, x, fill_in_baseline, TEXT_SIZE_BODY)
     for names, x in ((spec.home_fill_ins, HOME_FILL_INS_X),
                      (spec.away_fill_ins, AWAY_FILL_INS_X)):
         for index, name in enumerate(names):
@@ -924,7 +960,8 @@ def _paint_foot(art: _Painter, spec: CardSpec, layout: _Layout) -> None:
                       TEXT_SIZE_BODY)
 
     comments_baseline = layout.below(COMMENTS_DY)
-    art.centred("Comments", layout.centre_x, comments_baseline, TEXT_SIZE_BODY)
+    art.centred(spec.comments_heading, layout.centre_x, comments_baseline,
+                TEXT_SIZE_BODY)
     art.centred(spec.comments, layout.centre_x,
                 comments_baseline + ROSTER_ROW_PITCH, TEXT_SIZE_BODY)
 

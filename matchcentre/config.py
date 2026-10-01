@@ -18,24 +18,74 @@ uses rather than pulling in a general emitter.
 
 from __future__ import annotations
 
+import re
+import sys
+import textwrap
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterable, NamedTuple
 
 from . import format as fmt_mod
 from . import scoring
-from .slugs import slugify, team_slug
+from .card import round_key
+from .scope import choices, echoed, in_words
+from .slugs import did_you_mean, label_key, near_misses, nearest, slugify, team_slug
+
+if TYPE_CHECKING:
+    from .competition import Competition
 
 __all__ = ["Config", "CompetitionConfig", "RoundConfig", "ConfigError",
-           "load", "render", "DEFAULT_PATH", "SEASON_MODES"]
+           "load", "render", "commented_teams", "team_list_lines",
+           "teams_instruction", "named", "DEFAULT_PATH", "SEASON_MODES",
+           "PLAYER_MODES", "RULES_SETTINGS", "SECTIONS", "WIDTH"]
 
 DEFAULT_PATH = "config.toml"
 
+# The name of the config `tools/demo.py --seasons multi` writes, and how it begins,
+# written there from these constants. The demo writes that file again on every run,
+# so a line typed into it is gone the next time, and no note or review of a build
+# that reads it asks for one, nor the rules' footer. A copy under another name is
+# the club's to edit.
+DEMO_CONFIG = "demo-seasons.toml"
+DEMO_MARKER = "# Written by tools/demo.py"
+
 SEASON_MODES = ("single", "multi")
+
+# What `[build] players` may say: whether the dashboards print the players' names,
+# or withhold them (see matchcentre/anonymise.py). "names" is the default.
+PLAYER_MODES = ("names", "initials", "numbered")
+
+RULES_SETTINGS = ("scoring", "sets", "unplayed", "draws", "format", "slots",
+                  "min_sets_for_result")
+"""Every setting ``[rules]`` accepts, and every one a competition may override.
+
+Named once because four places have to agree about it: the two ``_reject_unknown``
+calls that decide whether a line is honoured or warned about, the example config a
+club copies the line out of, and the test that holds the second to the first. Spelt
+out as a literal rather than derived from :class:`Config`'s fields, because the two
+are deliberately not the same set -- ``[rules] slots`` is a list of set kinds and
+``Config.slots`` is a tuple, ``[club] name`` is a field and not a rule -- so a
+derived set would either be wrong or would need a list of exceptions as long as
+this one.
+"""
 
 
 class ConfigError(ValueError):
     """The config file exists but cannot be honoured."""
+
+
+class NotToml(ValueError):
+    """TOML :func:`read_toml` cannot read, and why, in the words a club reads.
+
+    ``invalid`` is true only for ``tomllib``'s own mistake, a file that breaks
+    TOML's grammar. A number too long to print and lists nested too deep are
+    valid TOML that this program still cannot read, and are not called invalid.
+    """
+
+    def __init__(self, why: str, *, invalid: bool = False) -> None:
+        super().__init__(why)
+        self.invalid = invalid
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,14 +98,53 @@ class RoundConfig:
     was read properly a list was coerced with ``str()``, which produced one team
     whose name was every resting team's name run together. A wrong answer with no
     error, in a program that otherwise fails closed.
+
+    ``finals`` is what the club typed, and ``None`` where it typed nothing: read as
+    true or not, a ``finals = false`` on a round labelled ``SF`` was the same as no
+    line, and the label made a final of it anyway.
     """
 
     number: str
     date: str = ""
     fixtures: tuple[tuple[str, str], ...] = ()
     byes: tuple[str, ...] = ()
-    finals: bool = False
+    finals: bool | None = None
     note: str = ""
+
+    @property
+    def is_finals(self) -> bool:
+        """Whether the round is a final: as typed, or by its label if nothing was."""
+        from .competition import is_finals_label
+        return is_finals_label(self.number) if self.finals is None else self.finals
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedLine:
+    """One team's row off the association's sheet, as the club typed it.
+
+    ``points`` is decimal text rather than a number, because the places it was
+    typed to are part of what it claims: ``"10.9"`` says one place and ``"10.90"``
+    two. ``""`` and ``None`` are a figure the club did not type, which is checked
+    by nothing -- never a zero.
+    """
+
+    key: str
+    points: str = ""
+    played: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedSheet:
+    """``[competitions.<id>.expected]``: what the association's sheet says.
+
+    An expectation, never a result. Nothing reads a figure out of it but the check
+    that holds it up against the cards, so no ladder figure can come from here.
+    ``after_round`` is the last regular round the sheet covers, as a whole number in
+    text; team keys are kept as typed, and matched to teams once the cards are read.
+    """
+
+    after_round: str
+    lines: tuple[ExpectedLine, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,13 +173,69 @@ class CompetitionConfig:
     scoring: str = ""
     sets: str = ""
     unplayed: str = ""
+    draws: bool | None = None
     format: str = ""
     slots: tuple[str, ...] = ()
     min_sets_for_result: int | None = None
+    expected: ExpectedSheet | None = None
+    # A sheet table with something typed in it that the loader could compare no line
+    # of: no usable after_round, or every line refused. ``expected`` says nothing of
+    # it, and ``--discover --force`` writes none of it back, so its refusal names it.
+    expected_unusable: bool = False
+    # The lines, by key, of a table it does compare that had a figure refused, or
+    # that were typed as no table of figures at all. The table is written back as
+    # it was read, so what was refused goes, and the refusal names the line.
+    expected_refused: tuple[str, ...] = ()
 
     @property
     def teams_declared(self) -> bool:
         return bool(self.teams)
+
+    @property
+    def season_length(self) -> int | None:
+        """How many rounds the regular season has, as far as the club has said.
+
+        ``rounds_total`` if it gave one, and otherwise the rounds its draw lists,
+        finals left out: the rounds a club published are the rounds it intends to
+        play, so declaring the draw declares the length. One rule for the page and
+        for the file, because ``--discover --force`` drops the draw and writes the
+        length it gave as ``rounds_total``: counted in two places, a length only the
+        draw stated went with it. And counted off the declared rounds rather than
+        the rounds built from them, which a round listed with no fixtures leaves
+        once its cards arrive -- nine rounds read as six by round three.
+        """
+        if self.rounds_total is not None:
+            return self.rounds_total
+        return sum(1 for r in self.rounds if not r.is_finals) or None
+
+    @property
+    def length_by_labels(self) -> int | None:
+        """``season_length`` with each round a final by its label, as ``--force`` writes.
+
+        The rewrite drops the draw, and every ``finals`` typed in it with the draw, so
+        the run after it tells a final by its label alone. Counted under the typed
+        flags, the length it wrote was a round short when a round was typed a final
+        against its label, and F3 stopped the next run, or a round long when a final
+        was typed regular. The same rule over the same rounds, so a ``rounds_total``
+        the club typed is theirs and comes back as typed.
+        """
+        return replace(self, rounds=tuple(replace(r, finals=None)
+                                          for r in self.rounds)).season_length
+
+    @property
+    def can_claim_cards(self) -> bool:
+        """Whether a card could ever be routed to this section.
+
+        A day and a division together are how a card finds its settings, so a
+        section giving both names a competition that exists whether or not its
+        scorecards have arrived. A section giving only one of them names nothing
+        in particular: several competitions match it, and the front page would
+        have to pick a night for it. That is the whole difference between a
+        section this tool can list as awaiting results and one it can only
+        complain about, so the test is written down once and shared by the router,
+        the report and the front page rather than being spelled out three times.
+        """
+        return bool(self.day and self.division)
 
     def byes_by_round(self) -> dict[str, tuple[str, ...]]:
         """``byes`` transposed: round number to the teams resting in it.
@@ -118,43 +263,86 @@ class Config:
 
     path: Path
     exists: bool = False
+    # The demo's own file (:func:`written_by_demo`): no note, review or footer
+    # asks for a line of it.
+    demo: bool = False
     club_name: str = ""
     strip_team_prefix: str = ""
     seasons_mode: str = "single"
     title: str = ""
-    scoring: str = scoring.DEFAULT_RULESET
-    sets: str = fmt_mod.DEFAULT_SET_RULE
+    players_mode: str = "names"
+    # '' is "not declared", as in a [competitions] section: the defaults are
+    # applied by ruleset_for and set_rule_for, so whether a club chose them is kept.
+    scoring: str = ""
+    sets: str = ""
     unplayed: str = ""
+    # Tri-state, and it has to be: ``None`` is "the preset decides", ``False`` is a
+    # club saying its grade cannot draw. Collapsing the two into a bool would make
+    # the setting unsettable, since its whole purpose is the falsy value.
+    draws: bool | None = None
     format: str = ""
     slots: tuple[str, ...] = ()
     min_sets_for_result: int | None = None
     season_labels: dict[str, str] = field(default_factory=dict)
     team_names: dict[str, str] = field(default_factory=dict)
+    # Each [team_names] key as typed -> the slugs the loader filed it under, so
+    # whether a line reached a team is asked of what the loader did.
+    team_name_keys: dict[str, tuple[str, ...]] = field(default_factory=dict)
     player_names: dict[str, str] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)
+    # Player slug -> the team slugs whose roster rows are each a person of their
+    # own. The inverse of ``aliases``, which folds two spellings into one player.
+    namesakes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     competitions: dict[str, CompetitionConfig] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
 
     # --- rules ----------------------------------------------------------
 
     def ruleset_for(self, comp: CompetitionConfig | None = None) -> scoring.Ruleset:
-        """The preset, with ``unplayed`` applied over it if the club set one.
+        """The preset, with ``unplayed`` and ``draws`` applied over it.
 
-        Each preset carries an opinion about what a bye is worth, and it is only an
-        opinion: two associations running identical points schemes routinely differ
-        on this one line, so it has to be settable without inventing a preset per
-        pairing. Left unset, the preset's own value stands.
+        Each preset carries an opinion about what a bye is worth, and about whether
+        a night can end level, and both are only opinions: two associations running
+        identical points schemes routinely differ on either line, so they have to be
+        settable without inventing a preset per pairing. Left unset, the preset's own
+        values stand.
+
+        Both clauses are applied, not one or the other. An early return after the
+        first would silently drop the second, and which one got dropped would depend
+        on the order they happen to be read in.
         """
-        name = (comp.scoring if comp and comp.scoring else self.scoring)
-        base = scoring.ruleset(name)
-        mode = (comp.unplayed if comp and comp.unplayed else self.unplayed)
-        if not mode:
-            return base
-        return replace(base, average_unplayed=(mode == scoring.UNPLAYED_AVERAGE))
+        base = scoring.ruleset(self._declared_rule(comp, "scoring")
+                               or scoring.DEFAULT_RULESET)
+        mode = self._declared_rule(comp, "unplayed")
+        if mode:
+            base = replace(base, average_unplayed=(mode == scoring.UNPLAYED_AVERAGE))
+        # Asked with ``is None`` and never for truth: ``draws = false`` is the point
+        # of the setting, so ``comp.draws or self.draws`` would read a competition
+        # that has said "no" as one that has said nothing.
+        draws = self.draws if comp is None or comp.draws is None else comp.draws
+        if draws is False:
+            base = replace(base, draw=None)
+        return base
 
     def set_rule_for(self, comp: CompetitionConfig | None = None) -> fmt_mod.SetRule:
-        name = (comp.sets if comp and comp.sets else self.sets)
-        return fmt_mod.set_rule(name)
+        return fmt_mod.set_rule(self._declared_rule(comp, "sets")
+                                or fmt_mod.DEFAULT_SET_RULE)
+
+    def _declared_rule(self, comp: CompetitionConfig | None, key: str) -> str:
+        """``scoring``, ``sets`` or ``unplayed`` as declared: the section's, else
+        [rules]'s, else ''."""
+        return getattr(comp, key) if comp and getattr(comp, key) else getattr(self, key)
+
+    def rules_left_to_default(self, comp: CompetitionConfig | None = None
+                              ) -> tuple[str, ...]:
+        """Which of ``scoring`` and ``sets`` *comp* is scored under nobody chose.
+
+        No card prints either, so the default is a guess until a club declares it,
+        in the competition's section or under [rules]. One of the two declared is
+        not both: the other is still the program's guess, and is the one named.
+        """
+        return tuple(key for key in ("scoring", "sets")
+                     if not self._declared_rule(comp, key))
 
     def declared_format(self, comp: CompetitionConfig | None = None
                         ) -> fmt_mod.MatchFormat | None:
@@ -166,8 +354,7 @@ class Config:
         format, and the two need opposite responses.
         """
         rule = self.set_rule_for(comp)
-        minimum = ((comp.min_sets_for_result if comp else None)
-                   or self.min_sets_for_result)
+        minimum = self.min_sets_for(comp)
         slots = (comp.slots if comp and comp.slots else self.slots)
         if slots:
             return fmt_mod.from_slot_spec(slots, rule=rule,
@@ -177,7 +364,53 @@ class Config:
             return fmt_mod.match_format(name, rule=rule, min_sets_for_result=minimum)
         return None
 
+    def min_sets_for(self, comp: CompetitionConfig | None = None) -> int | None:
+        """The sets a result needs, as the club said it: own section, else [rules].
+
+        ``None`` when neither says, which is the match format's default and is the
+        one answer the review list asks about. Asked with ``is None`` and never for
+        truth, so a number is either the club's or nobody's.
+        """
+        if comp is not None and comp.min_sets_for_result is not None:
+            return comp.min_sets_for_result
+        return self.min_sets_for_result
+
+    def rules_minimum(self, competitions: Iterable[Competition]) -> int | None:
+        """The one ``[rules] min_sets_for_result`` that changes no result, or None.
+
+        A ``[rules]`` number reaches every competition that does not set its own,
+        so it is offered only when all of those already need that number.
+        """
+        return _agreed(comp.fmt.min_sets_for_result for comp in
+                       self._inheriting(competitions, "min_sets_for_result"))
+
+    def rules_format(self, competitions: Iterable[Competition]) -> str | None:
+        """The one ``[rules] format`` that refuses no card, or None. As above."""
+        return _agreed(comp.fmt.name for comp in
+                       self._inheriting(competitions, "format", "slots"))
+
+    def _inheriting(self, competitions: Iterable[Competition], *keys: str
+                    ) -> list[Competition]:
+        """The competitions a ``[rules]`` line of these keys would reach."""
+        out = []
+        for comp in competitions:
+            own = self.competition(comp.id)
+            if own is None or all(getattr(own, key) in (None, "", ())
+                                  for key in keys):
+                out.append(comp)
+        return out
+
     # --- names ----------------------------------------------------------
+
+    def club_display(self, letterhead: str) -> str:
+        """The club's name as the pages show it: the club's own, else the letterhead's.
+
+        One rule, one function, for discovery, which names the club the pages are
+        headed with, and for :func:`render`, which makes the title it suggests from
+        the same name. Each wrote the line out for itself, so the suggestion could
+        follow one name while the heading followed another.
+        """
+        return self.club_name or letterhead
 
     def team_display(self, slug: str) -> str | None:
         return self.team_names.get(slug)
@@ -185,11 +418,50 @@ class Config:
     def player_display(self, slug: str) -> str | None:
         return self.player_names.get(slug)
 
+    def split_namesake(self, slug: str, team: str) -> str:
+        """The player slug to use for a printed name a club has said is two people.
+
+        One rule, one function, because the squad builder, the set rows, the roster
+        lists, the ratings and the declared captain all have to reach the same
+        identity from the same name, and the only way they can is to ask here.
+
+        Undeclared names and teams the declaration did not name come back exactly
+        as they went in. The split is a statement a human made and never a guess:
+        one name in two teams' roster blocks is equally a player who changed teams
+        mid-season, and splitting that would invent somebody who does not exist.
+        """
+        if team and team in self.namesakes.get(slug, ()):
+            return f"{slug}-{team}"
+        return slug
+
     def competition(self, comp_id: str) -> CompetitionConfig | None:
         return self.competitions.get(comp_id)
 
     def season_label(self, key: str) -> str:
-        return self.season_labels.get(key, "")
+        """The ``[seasons]`` label of the season keyed *key*, or ``""``.
+
+        Each key is read by the rule a folder under ``data/`` is read by, so
+        ``"2026-Winter"`` labels the season ``data/2026-winter/`` files its cards
+        under: asked as typed, it labelled nothing, and nothing said so. Two keys
+        that rule reads as one season settle whatever order the file lists them
+        in: the one spelt as the season is, else a label every one of them agrees
+        on, else none. :func:`~matchcentre.discover.discover` says which, once.
+        """
+        typed = self.season_label_keys(key)
+        if key in typed:
+            return self.season_labels[key]
+        labels = {self.season_labels[line] for line in typed}
+        return labels.pop() if len(labels) == 1 else ""
+
+    def season_label_keys(self, key: str) -> set[str]:
+        """The ``[seasons]`` keys, as typed, that the folder rule reads as *key*.
+
+        Empty for ``""``, which is no season: the rule reads a key like ``"!!!"``
+        as nothing, and a card keyed by nothing is not one that line labels.
+        """
+        from .discover import season_key_of_folder
+        return {line for line in self.season_labels
+                if key and season_key_of_folder(line) == key}
 
     @property
     def multi_season(self) -> bool:
@@ -197,6 +469,53 @@ class Config:
 
 
 # --- reading ----------------------------------------------------------------
+
+
+def read_toml(text: str) -> dict:
+    """*text* read as TOML, or :class:`NotToml` saying why it cannot be.
+
+    The one reader for both TOML files this program takes, the config and the
+    fetcher's index. ``tomllib`` raises three things, and only one is its own: a
+    ``TOMLDecodeError``, whose text names the line and column and is kept; a
+    plain ValueError for a decimal whole number longer than Python prints
+    (``sys.get_int_max_str_digits()``); and a RecursionError for lists or tables
+    nested past Python's stack. A hexadecimal number is read at any length and
+    raised the same ValueError later, wherever it was printed, so every number
+    read is held to the limit here, once. Only a hexadecimal, octal or binary
+    number can be that long here, and TOML gives those no sign. The refusal
+    counts the decimal digits Python would print, so it is true of a number
+    written in hexadecimal too. It names no key: tomllib's ValueError gives no
+    line, and naming one for the hexadecimal spelling alone would say one
+    mistake two ways.
+    """
+    limit = sys.get_int_max_str_digits()
+    too_long = f"a whole number in it is more than {limit} decimal digits long"
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise NotToml(str(exc), invalid=True) from None
+    except ValueError:
+        raise NotToml(too_long) from None
+    except RecursionError:
+        raise NotToml("its lists or tables are nested too deep to read") from None
+    if limit:
+        ceiling = 10 ** limit
+        stack: list[object] = [data]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+            elif isinstance(value, int) and value >= ceiling:
+                raise NotToml(too_long)
+    return data
+
+
+def written_by_demo(path: Path, text: str) -> bool:
+    """Whether *text*, read from *path*, is the config the demo writes again: the
+    file of its name, begun as it begins it."""
+    return path.name == DEMO_CONFIG and text.startswith(DEMO_MARKER)
 
 
 def load(path: str | Path = DEFAULT_PATH) -> Config:
@@ -211,54 +530,72 @@ def load(path: str | Path = DEFAULT_PATH) -> Config:
     if not target.exists():
         return Config(path=target, exists=False)
     try:
-        raw = tomllib.loads(target.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{target}: not valid TOML — {exc}") from None
+        text = target.read_text(encoding="utf-8")
+        raw = read_toml(text)
+    except NotToml as exc:
+        what = "not valid TOML" if exc.invalid else "not TOML this can read"
+        raise ConfigError(f"{target}: {what} — {exc}") from None
     except OSError as exc:
-        raise ConfigError(f"{target}: cannot be read — {exc}") from None
-    return _from_raw(raw, target)
+        # Chained, unlike the TOML branch above: the message carries the number for a
+        # caller that only prints it, and the exception carries the original for a
+        # caller that can say what to do about that particular refusal. Which
+        # `build.py` does -- a folder standing where the file should be and a file this
+        # account may not read are two different jobs for whoever is at the keyboard,
+        # and `errno` is the only thing that tells them apart.
+        raise ConfigError(f"{target}: cannot be read — {exc}") from exc
+    return replace(_from_raw(raw, target), demo=written_by_demo(target, text))
 
 
-_TOP_LEVEL = {"club", "build", "rules", "seasons", "team_names", "player_names",
-              "aliases", "competitions"}
+# Every section this file may contain. Public because `config.example.toml` is the
+# only place a club can find out that a section exists, and the suite holds the two
+# to each other: a section added here and not documented there is one nobody outside
+# this repository can learn about.
+SECTIONS = ("club", "build", "rules", "seasons", "team_names", "player_names",
+            "aliases", "namesakes", "competitions")
 
 
 def _from_raw(raw: dict, path: Path) -> Config:
     warnings: list[str] = []
 
-    for key in sorted(set(raw) - _TOP_LEVEL):
+    for key in sorted(set(raw) - set(SECTIONS)):
         # A mistyped section does nothing at all, which is the kind of silence
-        # this project exists to avoid. Name it on every run.
+        # this project exists to avoid. Name it on every run, and name the section
+        # it is one keystroke from as well.
         warnings.append(f"[{key}] is not a section this program understands "
-                        f"and was ignored")
+                        f"and was ignored.{_did_you_mean(key, SECTIONS)}")
 
     club = _table(raw, "club", warnings)
     build = _table(raw, "build", warnings)
     rules = _table(raw, "rules", warnings)
+    # Before `[build]` is checked for keys it does not know, because a players line
+    # this program cannot honour is refused rather than warned about.
+    players = _players_mode(raw, path)
 
     _reject_unknown(club, {"name", "strip_team_prefix"}, "club", warnings)
-    _reject_unknown(build, {"seasons", "title"}, "build", warnings)
-    _reject_unknown(rules, {"scoring", "sets", "unplayed", "format", "slots",
-                            "min_sets_for_result"}, "rules", warnings)
+    _reject_unknown(build, {"seasons", "title", "players"}, "build", warnings)
+    _reject_unknown(rules, set(RULES_SETTINGS), "rules", warnings)
 
     mode = str(build.get("seasons", "single")).strip().lower()
     if mode not in SEASON_MODES:
         raise ConfigError(
-            f"{path}: [build] seasons must be one of {SEASON_MODES}, got {mode!r}")
+            f"{path}: [build] seasons = {toml_value(build['seasons'])} is not "
+            f"{choices(SEASON_MODES)}.{_did_you_mean(mode, SEASON_MODES)}")
 
     prefix = str(club.get("strip_team_prefix", "") or "")
 
-    scheme = str(rules.get("scoring", scoring.DEFAULT_RULESET) or
-                 scoring.DEFAULT_RULESET)
-    set_name = str(rules.get("sets", fmt_mod.DEFAULT_SET_RULE) or
-                   fmt_mod.DEFAULT_SET_RULE)
+    # Left as '' when not declared, so whether the club chose them is not lost.
+    scheme = str(rules.get("scoring", "") or "")
+    set_name = str(rules.get("sets", "") or "")
     # Fail here rather than three modules later, while we can still name the file.
     try:
-        scoring.ruleset(scheme)
-        fmt_mod.set_rule(set_name)
+        if scheme:
+            scoring.ruleset(scheme)
+        if set_name:
+            fmt_mod.set_rule(set_name)
     except (scoring.ScoringError, fmt_mod.FormatError) as exc:
         raise ConfigError(f"{path}: [rules] {exc}") from None
 
+    team_keys: dict[str, tuple[str, ...]] = {}
     config = Config(
         path=path,
         exists=True,
@@ -266,19 +603,25 @@ def _from_raw(raw: dict, path: Path) -> Config:
         strip_team_prefix=prefix,
         seasons_mode=mode,
         title=str(build.get("title", "") or ""),
+        players_mode=players,
         scoring=scheme,
         sets=set_name,
         unplayed=_unplayed(rules.get("unplayed"), "[rules] unplayed", path),
+        draws=_draws(rules.get("draws"), "[rules] draws", path),
         format=str(rules.get("format", "") or ""),
         slots=tuple(str(s) for s in rules.get("slots", ()) or ()),
-        min_sets_for_result=_optional_int(rules.get("min_sets_for_result"),
+        min_sets_for_result=_minimum_sets(rules.get("min_sets_for_result"),
                                           "[rules] min_sets_for_result", path),
-        season_labels=_str_map(raw.get("seasons"), "seasons", warnings),
-        team_names=_name_map(raw.get("team_names"), "team_names", prefix, warnings),
+        season_labels=_season_labels(raw.get("seasons"), mode, warnings),
+        team_names=_name_map(raw.get("team_names"), "team_names", prefix, warnings,
+                             team_keys),
+        team_name_keys=team_keys,
         player_names=_name_map(raw.get("player_names"), "player_names", None,
                                warnings),
         aliases=_alias_map(raw.get("aliases"), warnings),
-        competitions=_competitions(raw.get("competitions"), path, prefix, warnings),
+        namesakes=_namesakes(raw.get("namesakes"), prefix, warnings),
+        competitions=_competitions(raw.get("competitions"), path, prefix, warnings,
+                                   multi=mode == "multi"),
         warnings=tuple(warnings),
     )
     # Validate the declared format now, for the same reason.
@@ -287,6 +630,148 @@ def _from_raw(raw: dict, path: Path) -> Config:
     except fmt_mod.FormatError as exc:
         raise ConfigError(f"{path}: [rules] {exc}") from None
     return config
+
+
+def _players_mode(raw: dict, path: Path) -> str:
+    """``[build] players``, or the refusal of a players line this program cannot honour.
+
+    The one setting in this file that is refused rather than warned about when it is
+    wrong, and on purpose, which departs from how a misplaced ``seasons`` is
+    treated. Every other mistake here costs a wrong label; a ``players`` line that
+    is ignored publishes the names it was written to withhold, and a weekly script
+    does not read warnings. So three mistakes stop the build, in one function:
+
+    * a value of ``[build] players`` that is not one of :data:`PLAYER_MODES`;
+    * a key in ``[build]`` that is one slip from ``players``;
+    * a players line anywhere but ``[build]``, at any depth -- the top of the file,
+      ``[rules]``, a competition's own section, a misspelt ``[biuld]`` -- that
+      asks for a mode, one slip from a mode, or any other text, even beside
+      ``[build] players = "names"``, because a club withholding one division is a
+      club whose other divisions a build would publish.
+
+    The last two only while ``[build] players`` prints names, and never for a line
+    that asks for names itself: ignored, neither publishes a name somebody asked to
+    withhold, so each is left to the warning it already gets. So is a line outside
+    ``[build]`` whose value is not text, such as ``[rules] players = 3``, and a key
+    in a table of the club's own names whose value is no mode, such as a team
+    called the Players.
+    """
+    build = raw.get("build")
+    build = build if isinstance(build, dict) else {}
+    mode = _build_players(build, path)
+    if mode != "names":
+        return mode
+    for where, key, value in _players_lines(raw, ()):
+        in_build = where == ("build",)
+        if in_build and key == "players" or _read_here(where, key):
+            continue
+        meant = _meant(value)
+        if meant == "names":
+            continue
+        if in_build:
+            raise ConfigError(
+                f"{path}: [build] {key} is not a setting this program understands. "
+                f"Did you mean players? Nothing was built: a misspelt players line "
+                f"would publish the names it was written to withhold.")
+        if not isinstance(value, str) or (meant is None and _names_the_keys(where)):
+            continue
+        # The table as the file writes it, so the club can search for the line.
+        name = ".".join(toml_key(part) for part in where if part != "[]")
+        place = ("at the top of the file" if not where
+                 else f"under [[{name}]]" if where[-1] == "[]"
+                 else f"under [{name}]")
+        if value.strip().lower() == meant:
+            raise ConfigError(
+                f"{path}: {toml_key(key)} = {toml_value(meant)} is written {place}, "
+                f"where it sets nothing. It is a [build] setting, for every dashboard "
+                f"at once: "
+                f"write players = {toml_value(meant)} under [build]. Nothing was "
+                f"built, because building would publish the names this line was "
+                f"written to withhold.")
+        said = toml_value(value)
+        raise ConfigError(
+            f"{path}: {toml_key(key)} = {said} is written {place}, where it sets "
+            f"nothing, and {said} is not {choices(PLAYER_MODES)}. It is a [build] "
+            f"setting, for every dashboard at once."
+            + (f" Did you mean players = {toml_value(meant)} under [build]?"
+               if meant else "")
+            + " Nothing was built: a players line this program cannot read is not "
+              "guessed at, and ignoring it would publish the names it may have been "
+              "written to withhold.")
+    return mode
+
+
+def _build_players(build: dict, path: Path) -> str:
+    """``[build] players`` as a mode: names when it is missing, refused when unread."""
+    if "players" not in build:
+        return "names"
+    value = build["players"]
+    mode = str(value).strip().lower()
+    if isinstance(value, str) and mode in PLAYER_MODES:
+        return mode
+    raise ConfigError(
+        f"{path}: [build] players = {toml_value(value)} is not "
+        f"{choices(PLAYER_MODES)}.{_did_you_mean(mode, PLAYER_MODES)} Nothing "
+        f"was built: this line decides whether players' names are published, so a "
+        f"value this program cannot read is not guessed at.")
+
+
+def _meant(value: object) -> str | None:
+    """The mode a players line asks for, as written or one slip from it, if any."""
+    if not isinstance(value, str):
+        return None
+    said = value.strip().lower()
+    if said in PLAYER_MODES:
+        return said
+    near = near_misses(said, PLAYER_MODES)
+    return near[0] if near else None
+
+
+# The tables whose keys are the club's own names, a team's or a player's or a
+# season's, and a competition's tables of its teams. A key there that says player
+# is somebody's name, and only a value that is a mode is read as a players line.
+_NAMED_TABLES = ("seasons", "team_names", "player_names", "aliases", "namesakes")
+_NAMED_TABLES_OF_A_COMPETITION = ("captains", "courts", "codes", "byes", "expected")
+
+# The keys of one team's line in [competitions.<id>.expected], the sheet as typed.
+EXPECTED_KEYS = ("points", "played")
+
+
+def _read_here(where: tuple[str, ...], key: str) -> bool:
+    """Whether *key* is a setting this program reads in the table at *where*.
+
+    A team's ``played`` in the sheet table is two slips from ``players``, and is the
+    matches the sheet says that team has played: no players line.
+    """
+    return (len(where) == 4 and where[0] == "competitions" and where[2] == "expected"
+            and key in EXPECTED_KEYS)
+
+
+def _names_the_keys(where: tuple[str, ...]) -> bool:
+    """Whether the table at *where* is keyed by the club's names and not settings."""
+    if where[:1] and where[0] in _NAMED_TABLES:
+        return True
+    return (len(where) > 2 and where[0] == "competitions"
+            and where[2] in _NAMED_TABLES_OF_A_COMPETITION)
+
+
+def _players_lines(table: dict, where: tuple[str, ...]):
+    """Every ``(table, key, value)`` whose key reads as ``players``, at any depth."""
+    for key, value in table.items():
+        if isinstance(value, dict):
+            yield from _players_lines(value, where + (key,))
+        elif isinstance(value, list) and value and all(
+                isinstance(item, dict) for item in value):
+            for item in value:
+                yield from _players_lines(item, where + (key, "[]"))
+        elif _means_players(key):
+            yield where, key, value
+
+
+def _means_players(key: str) -> bool:
+    """Whether *key* is an attempt at ``players``: it says player, or is a slip."""
+    folded = key.casefold()
+    return "player" in folded or bool(near_misses(folded, ["players"]))
 
 
 def _table(raw: dict, key: str, warnings: list[str]) -> dict:
@@ -302,7 +787,48 @@ def _reject_unknown(table: dict, known: set[str], name: str,
                     warnings: list[str]) -> None:
     for key in sorted(set(table) - known):
         warnings.append(f"[{name}] {key} is not a setting this program "
-                        f"understands and was ignored")
+                        f"understands and was ignored."
+                        f"{_did_you_mean(key, known)}")
+
+
+def _did_you_mean(key: str, known: object) -> str:
+    """`` Did you mean club?`` -- or ``""`` when nothing in ``known`` is close.
+
+    The nearest of ``known`` by :func:`~matchcentre.slugs.nearest`, asked about by
+    :func:`~matchcentre.slugs.did_you_mean`, as a misspelt team or player is: an
+    ignored key is already named on every run, and what the club still has to do
+    is find the one they meant. ``known`` is whichever set of names was legal
+    *where the key was written* -- the section names for a section, that section's
+    own settings for a setting -- so a `[rules]` typo is never answered with a
+    section name. The candidates are the loader's own for that reason, and not the
+    team rule's: a setting has no sibling, a side of a club told apart by a tag.
+
+    Suggested, never applied, and only within two edits. Reading ``naem`` as ``name``
+    would mean a config taking effect in a spelling nobody wrote; guessing further
+    out than two edits would send a reader to a setting that does something else,
+    which costs them more than the silence did.
+    """
+    return did_you_mean(nearest(key, sorted(known)))
+
+
+def _agreed(values: Iterable[object]) -> object | None:
+    """The value every one of these shares, or None if they differ or are none."""
+    found = set(values)
+    return found.pop() if len(found) == 1 else None
+
+
+def _minimum_sets(value: object, label: str, path: Path) -> int | None:
+    """``min_sets_for_result``, refused below 1 where it is typed.
+
+    0 was read as leaving the line out, because the number was resolved with
+    ``or``, and a number declared now answers the review list's question about it.
+    """
+    number = _optional_int(value, label, path)
+    if number is not None and number < 1:
+        raise ConfigError(f"{path}: {label} must be 1 or more, got {number}: it is "
+                          "how many of a match's sets must finish before it has a "
+                          "result, and a result needs at least one")
+    return number
 
 
 def _optional_int(value: object, label: str, path: Path) -> int | None:
@@ -328,10 +854,33 @@ def _unplayed(value: object, label: str, path: Path) -> str:
     mode = str(value).strip().casefold()
     if mode not in scoring.UNPLAYED_MODES:
         raise ConfigError(
-            f"{path}: {label} must be one of "
-            f"{', '.join(repr(m) for m in scoring.UNPLAYED_MODES)}, "
-            f"got {value!r}")
+            f"{path}: {label} = {toml_value(value)} is not "
+            f"{choices(scoring.UNPLAYED_MODES)}."
+            f"{_did_you_mean(mode, scoring.UNPLAYED_MODES)}")
     return mode
+
+
+def _draws(value: object, label: str, path: Path) -> bool | None:
+    """``[rules] draws`` and a round's ``finals``: a TOML boolean, or refused.
+
+    TOML's own booleans and nothing else. ``"false"`` is a non-empty string and ``0``
+    is a number, and both are spellings a club would reasonably read back as the
+    setting working -- accepted loosely, ``draws = "false"`` would leave draws
+    allowed, which is the one outcome the club was writing the line to prevent.
+
+    Rejected rather than warned about, for the reason ``_unplayed`` is: falling back
+    to the preset means every level card is scored as a draw in a competition that
+    has none, and the ladder that comes out is wrong rather than incomplete.
+
+    A round's ``finals`` is read here too, and for the same reason: read loosely,
+    ``finals = "false"`` made a final of the round the club was keeping on the ladder.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ConfigError(f"{path}: {label} must be true or false, "
+                          f"got {value!r}")
+    return value
 
 
 def _str_map(value: object, name: str, warnings: list[str]) -> dict[str, str]:
@@ -344,24 +893,89 @@ def _str_map(value: object, name: str, warnings: list[str]) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items()}
 
 
+# Keys a club writes inside [seasons] when they are reaching for the mode. Read
+# together with a value that is a mode word: a folder labelled "mode" is nobody's
+# season, but a folder labelled "Modest Cup" is, and only one of the two is a
+# setting written in the wrong place.
+_MODE_KEYS = ("mode", "season", "seasons")
+
+
+def mode_among_labels(key: str, label: str) -> bool:
+    """Whether ``[seasons] key = label`` is the mode, written among the labels."""
+    return (key.strip().lower() in _MODE_KEYS
+            and label.strip().lower() in SEASON_MODES)
+
+
+def _season_labels(value: object, mode: str, warnings: list[str]) -> dict[str, str]:
+    """``[seasons]`` read as folder labels, naming the three ways it sets nothing.
+
+    The mode -- one ladder per season or the whole archive on one -- is ``seasons``
+    under ``[build]``. This section is the labels, and it is one word from the mode,
+    so all three of these are a club asking for multi-season mode and getting
+    silence: ``seasons = "multi"`` written at the top of the file, where it arrives
+    here as a string instead of a table; ``mode = "multi"`` written inside this
+    section, where it is a perfectly good label for a folder called ``mode``; and a
+    table of correct labels while the mode is still ``single``, where there is no
+    season for a label to name.
+
+    Every one of them ends the same way, which is why they are worth three warnings:
+    single-season mode files every card under ``data/`` into one competition, so the
+    second season lands on the first season's fixtures.
+
+    Nothing here is applied and nothing is dropped. A mode taken from an undocumented
+    line would make the shape of a dashboard depend on a spelling, and a label table
+    the program has silently edited is one a club cannot match to the warning about
+    it, so the misplaced line stays where it was written and the warning names the
+    line to add.
+    """
+    if isinstance(value, str) and value.strip().lower() in SEASON_MODES:
+        warnings.append(
+            f'seasons = "{value.strip().lower()}" is written where the [seasons] '
+            f'table of labels goes, so it set nothing. The mode is a [build] '
+            f'setting: write seasons = "{value.strip().lower()}" under [build].')
+        return {}
+    labels = _str_map(value, "seasons", warnings)
+    misplaced = [key for key, label in labels.items()
+                 if mode_among_labels(key, label)]
+    for key in misplaced:
+        warnings.append(
+            f'[seasons] {key} = "{labels[key]}" was read as the label of a season '
+            f'folder called {key!r}, not as the mode. Write '
+            f'seasons = "{labels[key].strip().lower()}" under [build] instead.')
+    if mode == "single" and set(labels) - set(misplaced):
+        warnings.append(
+            f"[seasons] labels {len(labels)} season"
+            f"{'' if len(labels) == 1 else 's'}, but [build] seasons is \"single\", "
+            f"so every card under data/ is one season and no label is used. Set "
+            f"seasons = \"multi\" under [build] to give each season its own ladder.")
+    return labels
+
+
 def _name_map(value: object, name: str, prefix: str | None,
-              warnings: list[str]) -> dict[str, str]:
+              warnings: list[str],
+              keys: dict[str, tuple[str, ...]] | None = None) -> dict[str, str]:
     """Display-name overrides, keyed by slug.
 
     Forgiving about the key: discovery writes slugs, but a club member editing by
     hand will reasonably type the name as it appears on the card, so both are
-    registered.
+    registered. ``keys``, where given, is told each key as typed and the slugs it
+    was registered under.
     """
     plain = _str_map(value, name, warnings)
     out: dict[str, str] = {}
     for key, display in plain.items():
         try:
-            out[slugify(key)] = display
+            filed = (slugify(key),)
+            out[filed[0]] = display
             if prefix:
-                out[team_slug(key, strip_prefix=prefix)] = display
+                filed += (team_slug(key, strip_prefix=prefix),)
+                out[filed[1]] = display
         except ValueError:
             warnings.append(f"[{name}] key {key!r} has no letters or digits "
                             f"in it and was ignored")
+            continue
+        if keys is not None:
+            keys[key] = filed
     return out
 
 
@@ -377,15 +991,69 @@ def _alias_map(value: object, warnings: list[str]) -> dict[str, str]:
     return out
 
 
+def _namesakes(value: object, prefix: str,
+               warnings: list[str]) -> dict[str, tuple[str, ...]]:
+    """``[namesakes]``: one printed name, one person per team named against it.
+
+    Forgiving about both sides for the same reason ``_name_map`` is: the report
+    prints a line to paste, which carries slugs, while somebody editing by hand
+    will type the name and the teams as the card spells them.
+
+    Fewer than two teams is warned about rather than accepted. It would split
+    nothing -- a single team's roster row is already a player of its own -- so a
+    club that wrote one has either mistyped a team or misread what the setting
+    does, and either way silence would leave them believing it had taken effect.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        warnings.append('[namesakes] should be a section of "name" = ["Team A", '
+                        '"Team B"] pairs; ignored')
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for key, listed in value.items():
+        if isinstance(listed, str) or not isinstance(listed, (list, tuple)):
+            warnings.append(f"[namesakes] {key!r} should be a list of the teams "
+                            f"whose players share that name; ignored")
+            continue
+        try:
+            slug = slugify(str(key))
+        except ValueError:
+            warnings.append(f"[namesakes] key {key!r} has no letters or digits in "
+                            f"it and was ignored")
+            continue
+        teams: list[str] = []
+        for name in listed:
+            try:
+                team = team_slug(str(name), strip_prefix=prefix)
+            except ValueError:
+                warnings.append(f"[namesakes] {key!r} names a team with no letters "
+                                f"or digits in it ({name!r}); it was ignored")
+                continue
+            if team not in teams:
+                teams.append(team)
+        if len(teams) < 2:
+            warnings.append(f"[namesakes] {key!r} needs at least two teams to "
+                            f"separate; it names {len(teams)} and was ignored")
+            continue
+        out[slug] = tuple(teams)
+    return out
+
+
 def _competitions(value: object, path: Path, prefix: str,
-                  warnings: list[str]) -> dict[str, CompetitionConfig]:
+                  warnings: list[str], *,
+                  multi: bool) -> dict[str, CompetitionConfig]:
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise ConfigError(f"{path}: [competitions] should be a section")
+    # Its own settings, plus every [rules] setting, because a competition may
+    # override any of them. Unioned rather than re-typed: a rule added to
+    # RULES_SETTINGS and not here would be honoured at the top of the file and
+    # warned about one section down, which is the worst of both answers.
     known = {"label", "day", "division", "season", "season_key", "rounds_total",
-             "teams", "captains", "courts", "codes", "rounds", "byes", "scoring",
-             "sets", "unplayed", "format", "slots", "min_sets_for_result"}
+             "teams", "captains", "courts", "codes", "rounds",
+             "byes", "expected"} | set(RULES_SETTINGS)
     out: dict[str, CompetitionConfig] = {}
     for comp_id, table in value.items():
         if not isinstance(table, dict):
@@ -402,7 +1070,7 @@ def _competitions(value: object, path: Path, prefix: str,
             day=str(table.get("day", "") or ""),
             division=str(table.get("division", "") or ""),
             season=str(table.get("season", "") or ""),
-            season_key=str(table.get("season_key", "") or ""),
+            season_key=_season_key(table.get("season_key")),
             rounds_total=_optional_int(table.get("rounds_total"),
                                        f"[competitions.{comp_id}] rounds_total",
                                        path),
@@ -419,13 +1087,98 @@ def _competitions(value: object, path: Path, prefix: str,
             sets=str(table.get("sets", "") or ""),
             unplayed=_unplayed(table.get("unplayed"),
                                f"[competitions.{comp_id}] unplayed", path),
+            draws=_draws(table.get("draws"),
+                         f"[competitions.{comp_id}] draws", path),
             format=str(table.get("format", "") or ""),
             slots=tuple(str(s) for s in table.get("slots", ()) or ()),
-            min_sets_for_result=_optional_int(
+            min_sets_for_result=_minimum_sets(
                 table.get("min_sets_for_result"),
                 f"[competitions.{comp_id}] min_sets_for_result", path),
+            expected=(sheet := _expected_table(table.get("expected"), comp_id,
+                                               warnings, refused=(lost := []))),
+            expected_unusable=(_sheet_in_use(table.get("expected"))
+                               and not (sheet and sheet.lines)),
+            # A table it compares no line of is named whole, and not line by line.
+            expected_refused=tuple(lost) if sheet and sheet.lines else (),
         )
+    _refuse_double_claims(out, path, multi=multi)
     return out
+
+
+def _season_key(value: object) -> str:
+    """A declared ``season_key``, slugged as the folder name it stands for.
+
+    A card's key is its folder's name slugged -- ``data/2026-Winter/`` files its
+    cards under ``2026-winter`` -- and a section's was compared with that as typed,
+    so ``season_key = "2026-Winter"``, the folder's name exactly as the refusal for
+    two seasons of one division asks for it, claimed no card. Slugged here, once, so
+    the router, the double-claim check and the id all read the key the folder has.
+    One with nothing in it to slug is kept as typed; it matches no folder either way.
+    """
+    text = str(value or "")
+    return slugify_or_none(text) or text
+
+
+def _refuse_double_claims(comps: dict[str, CompetitionConfig], path: Path, *,
+                          multi: bool) -> None:
+    """Two sections claiming one competition, refused before anything is built.
+
+    Cards are routed on ``day`` and ``division`` (and, in multi-season mode,
+    ``season_key``), so two sections filling those in identically both claim the same
+    cards and only one of them can have them. The loser's team list, captains, byes,
+    round dates and ``rounds_total`` then stop taking effect with nothing on the page to
+    say so, which turns a closed roster back into an open one and an uncredited bye into
+    a missing night. Neither section is more right than the other, so this is refused
+    rather than resolved -- the same treatment as a team listed twice or a round declared
+    twice, and for the same reason: the file contradicts itself and only its author can
+    say which way.
+
+    Sections that fill in only one of the two fields are skipped, because the router
+    skips them too. They claim no cards at all, which the report already says.
+
+    ``multi`` is the mode, and it changes one sentence. The advice for two seasons of
+    one division is the mode and a season key each; a club already in multi-season
+    mode has done the first half, and was being told to do it again -- in the file
+    ``--discover`` wrote for it, before that wrote ``season_key``.
+    """
+    claimed: dict[tuple[str, str, str], str] = {}
+    for comp in comps.values():
+        if not (comp.day and comp.division):
+            continue
+        # Keyed exactly as the router matches: the day and division by label, so two
+        # spellings of one night collide here as well, and the season key as loaded,
+        # slugged as its folder is and then compared exactly, since looseness in that
+        # comparison is what merged two seasons in the predecessor.
+        key = (label_key(comp.day), label_key(comp.division), comp.season_key)
+        first = claimed.setdefault(key, comp.id)
+        if first != comp.id:
+            season = (f" and season_key {comp.season_key!r}" if comp.season_key
+                      else "")
+            # Two fixes, because there are two ways to arrive here and they are not
+            # each other's answer. Usually a section was renamed or copied and the old
+            # one left behind, and the fix is to delete or merge it. But a club keeping
+            # last season's section beside this one has two real competitions and
+            # wants them apart, not merged -- so the season key is offered too, and
+            # only when neither section has one, since a pair that already agrees on a
+            # season key is not that case.
+            if comp.season_key:
+                apart = ""
+            elif multi:
+                apart = (" If they are two seasons of one division, give each "
+                         "section its own season_key: the name of the folder under "
+                         "data/ its cards are in. seasons is already \"multi\" "
+                         "under [build], and in that mode the folder is what keeps "
+                         "two seasons of one division apart.")
+            else:
+                apart = (" If they are two seasons of one division, set seasons = "
+                         "\"multi\" under [build] and give each section its own "
+                         "season_key.")
+            raise ConfigError(
+                f"{path}: [competitions.{first}] and [competitions.{comp.id}] both "
+                f"claim day {comp.day!r} and division {comp.division!r}{season}. "
+                f"Cards are matched on those fields, not on the section name, so "
+                f"every card would go to one of the two and the other's settings "
+                f"would quietly do nothing. Delete one, or merge them.{apart}")
 
 
 def _int_map(value: object, name: str, path: Path) -> dict[str, int]:
@@ -512,7 +1265,7 @@ def _byes_table(value: object, comp_id: str, teams: tuple[str, ...],
         name = str(team)
         label = f"[competitions.{comp_id}.byes] {name!r}"
         if known and slugify_or_none(name) not in known:
-            listed = ", ".join(sorted(teams))
+            listed = in_words(sorted(teams))
             raise ConfigError(
                 f"{path}: {label} is not one of this competition's teams. "
                 f"A bye credits points for playing nothing, so an unrecognised "
@@ -535,12 +1288,190 @@ def _byes_table(value: object, comp_id: str, teams: tuple[str, ...],
                     f"{path}: {label} lists {number!r}, which is not a round "
                     f"number. Rounds are written as in the draw: [1, 6] or "
                     f"[\"SF\"].")
-            text = str(number).strip()
+            text = round_key(str(number))
             if text and text not in numbers:
                 numbers.append(text)
         if numbers:
             out[name] = tuple(numbers)
     return out
+
+
+# What a figure in the sheet table was typed as when it is not one: kept apart from
+# ``None``, which is a figure the club left blank and is owed no warning about.
+_INVALID = object()
+_SHEET_DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
+_SHEET_WHOLE = re.compile(r"[0-9]+")
+
+
+def _expected_table(value: object, comp_id: str, warnings: list[str], *,
+                    refused: list[str] | None = None) -> ExpectedSheet | None:
+    """``[competitions.<id>.expected]``: the association's sheet, typed in.
+
+    ::
+
+        [competitions.tuesday-division-b.expected]
+        after_round = 3
+        "Hilltop Aces" = { points = 10.9, played = 3 }
+
+    Every mistake in it is a warning and costs only the part it is in, because the
+    table credits nothing: a typo here can make the check say less, and can never
+    change a figure. Which is the opposite of the byes table beside it, where a
+    typo pays a team points and is refused.
+
+    The table is *in use* once any team line carries anything typed, and only then
+    is a missing ``after_round`` worth a warning. A table with nothing in it is a
+    table nobody has filled in yet. ``after_round`` is a whole number or nothing:
+    finals are not on the ladder (F11), so a sheet "after SF" is the ladder after
+    the last regular round, and that round's number is the one to write.
+
+    Team keys are kept as typed. A derived team list exists only once the cards
+    are read, so that is where a key is matched to a team. The key of each line
+    that had something refused goes on *refused*, once, for ``--force`` to name:
+    the file is written from what was read, and a refused figure was read as none.
+    """
+    if value is None:
+        return None
+    where = f"[competitions.{comp_id}.expected]"
+    refused = [] if refused is None else refused
+    if not isinstance(value, dict):
+        warnings.append(f'{where} should be a section of "Team name" = '
+                        f'{{ points = …, played = … }} lines, so it was not '
+                        f'compared.')
+        return None
+    entries = [(str(key), entry) for key, entry in value.items()
+               if key != "after_round"]
+    if not _sheet_in_use(value):
+        return None
+    raw_round = value.get("after_round", "")
+    number = _expected_round(raw_round)
+    if number is None:
+        warnings.append(f"{where} has no after_round, so it was not compared. Add "
+                        f"the last round your association's sheet covers — "
+                        f"after_round = 5 — so the check stays right when later "
+                        f"cards arrive.")
+    elif number is _INVALID:
+        warnings.append(f"{where} after_round = "
+                        f"{echoed(raw_round, quoted=True)} is not a round "
+                        f"number, so the table was not compared. Write the last "
+                        f"regular round the sheet covers as a whole number, "
+                        f"after_round = 5: finals are not on a ladder.")
+    lines: list[ExpectedLine] = []
+    for key, entry in entries:
+        if not isinstance(entry, dict):
+            warnings.append(f"{where} {echoed(key, quoted=True)} = "
+                            f"{echoed(entry, quoted=True)} does not say which "
+                            f"figure it is, so that team was not compared. Write "
+                            f"it as {toml_key(key)} = {{ points = 10.9, played = "
+                            f"3 }}, with the sheet's own figures.")
+            refused.append(key)
+            continue
+        _reject_unknown(entry, set(EXPECTED_KEYS),
+                        f"competitions.{comp_id}.expected.{toml_key(key)}", warnings)
+        points = _expected_points(entry.get("points", ""))
+        if points is _INVALID:
+            warnings.append(f"{where} {echoed(key, quoted=True)} points = "
+                            f"{echoed(entry['points'], quoted=True)} is not "
+                            f"a number, so its points were not compared. Type it "
+                            f"as the sheet prints it: points = 10.9.")
+            points = None
+            refused.append(key)
+        played = _expected_played(entry.get("played", ""))
+        if played is _INVALID:
+            warnings.append(f"{where} {echoed(key, quoted=True)} played = "
+                            f"{echoed(entry['played'], quoted=True)} is not "
+                            f"a whole number of matches, so its matches played "
+                            f"were not compared.")
+            played = None
+            if key not in refused:
+                refused.append(key)
+        if points is None and played is None:
+            continue
+        lines.append(ExpectedLine(key=key, points=points or "", played=played))
+    if not isinstance(number, str):
+        return None
+    return ExpectedSheet(after_round=number, lines=tuple(lines))
+
+
+def _sheet_in_use(value: object) -> bool:
+    """Whether a sheet table has a team line with anything typed in it.
+
+    The one rule for a table nobody has filled in yet, which is no table and no
+    warning, asked by the loader and by what ``--discover --force`` says it drops.
+    """
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        return True
+    return any(_sheet_typed(entry) for key, entry in value.items()
+               if key != "after_round")
+
+
+def _sheet_typed(entry: object) -> bool:
+    """Whether a sheet line has anything in it: a blank figure is not typed."""
+    if not isinstance(entry, dict):
+        return True
+    return any(not (isinstance(v, str) and not v.strip()) for v in entry.values())
+
+
+def _expected_round(value: object) -> object:
+    """``after_round`` as a whole number in text, ``None`` blank, or ``_INVALID``."""
+    if isinstance(value, bool):
+        return _INVALID     # an ``int`` in Python, and not a round
+    if isinstance(value, int):
+        return str(value) if value >= 1 else _INVALID
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            if _SHEET_WHOLE.fullmatch(text) and int(text) >= 1:
+                return str(int(text))
+        except ValueError:      # digits past int()'s 4300-digit limit
+            pass
+    return _INVALID
+
+
+def _expected_points(value: object) -> object:
+    """Points as the decimal text typed, ``None`` blank, or ``_INVALID``.
+
+    A float is kept as ``repr`` gives it back, which is the shortest text that is
+    that float: ``12.0`` stays ``"12.0"``, a claim to one place. NaN, infinity and a
+    negative fail the same pattern a quoted figure has to match.
+    """
+    # Belt and braces: ``str(True)`` is ``"True"``, which the pattern below refuses
+    # anyway. Kept so that the table's three readers open alike: in the other two
+    # a bool is an ``int`` that would otherwise pass.
+    if isinstance(value, bool):
+        return _INVALID
+    if isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, float):
+        text = repr(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+    else:
+        return _INVALID
+    return text if _SHEET_DECIMAL.fullmatch(text) else _INVALID
+
+
+def _expected_played(value: object) -> object:
+    """Matches played as a whole number, ``None`` blank, or ``_INVALID``."""
+    if isinstance(value, bool):
+        return _INVALID
+    if isinstance(value, int):
+        return value if value >= 0 else _INVALID
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if _SHEET_WHOLE.fullmatch(text):
+            try:
+                return int(text)
+            except ValueError:  # digits past int()'s 4300-digit limit
+                return _INVALID
+    return _INVALID
 
 
 def slugify_or_none(name: str) -> str | None:
@@ -572,7 +1503,7 @@ def _rounds(value: object, comp_id: str, path: Path,
         _reject_unknown(entry, {"number", "date", "fixtures", "bye", "byes",
                                 "finals", "note"},
                         f"competitions.{comp_id}.rounds", warnings)
-        number = str(entry.get("number", "") or "").strip()
+        number = round_key(str(entry.get("number", "") or ""))
         if not number:
             raise ConfigError(f"{path}: [[competitions.{comp_id}.rounds]] entry "
                               f"{index} has no number")
@@ -586,10 +1517,14 @@ def _rounds(value: object, comp_id: str, path: Path,
             fixtures.append((str(pair[0]), str(pair[1])))
         out.append(RoundConfig(
             number=number,
-            date=str(entry.get("date", "") or ""),
+            # Stripped as the number is, so a date of spaces is no date to every
+            # reader alike: the front page's card, the dashboard's draw, and a
+            # round's fallback to its cards' own date.
+            date=str(entry.get("date", "") or "").strip(),
             fixtures=tuple(fixtures),
             byes=_round_byes(entry, comp_id, number, path),
-            finals=bool(entry.get("finals", False)),
+            finals=_draws(entry.get("finals"),
+                          f"[competitions.{comp_id}] round {number}: finals", path),
             note=str(entry.get("note", "") or ""),
         ))
     numbers = [r.number for r in out]
@@ -603,6 +1538,144 @@ def _rounds(value: object, comp_id: str, path: Path,
 # Only the TOML this schema needs. Deliberately not a general emitter: a small,
 # readable writer that puts a comment next to everything a human should check is
 # worth more here than full syntax coverage.
+
+WIDTH = 78
+"""How wide the file this module writes is allowed to be.
+
+The same number as ``build.WIDTH``, and it has to be: the review section prints
+:func:`toml_lines` output at the report's width, and the same team list wrapped to
+two different numbers breaks in two places in the two places a club reads it.
+
+Two constants rather than one import, because a package module cannot import the
+script that imports it. A test in ``tests/test_foundation.py`` holds them equal,
+which is the honest way round -- the alternative was this module reaching for
+``build`` at runtime and failing in every context except a build.
+"""
+
+
+def _option_lines(name: str, detail: str, *, pad: int) -> list[str]:
+    """One row of an option table: ``#   name    what it does``, wrapped.
+
+    Wrapped under the description rather than back at the margin, so that the column
+    of names stays a column a club can run its eye down. Three of these tables are the
+    only place the file says what a preset *does*, and the ``scoring`` one describes the
+    setting the report reprints on every run because getting it wrong reorders a ladder
+    -- so the sentences are folded and never shortened.
+    """
+    opening = f"#   {name:<{pad}} "
+    return textwrap.wrap(detail, width=WIDTH, initial_indent=opening,
+                         subsequent_indent="#" + " " * (len(opening) - 1),
+                         break_long_words=False, break_on_hyphens=False)
+
+
+def _chosen_rule_lines(config: Config, comps: list[Competition], key: str,
+                       default: str) -> list[str]:
+    """``[rules] scoring`` or ``sets``: live as the club chose it, else behind a #.
+
+    No card says either, so a line written live for a club that chose neither
+    read as its choice, and silenced the note that asks a club to check them.
+    Where every competition sets its own, those the cards built and those only
+    declared, a [rules] line reaches none of them and the default is in force for
+    none, so none is offered: "in force until you choose" over it was untrue.
+    """
+    declared = getattr(config, key)
+    if declared:
+        return [f"{key} = {toml_value(declared)}"]
+    if comps and not config._inheriting(comps, key) and all(
+            getattr(section, key) for section in config.competitions.values()):
+        return _comment_flow(f"{key} is set in each [competitions] section below, "
+                             "because each of them sets its own.")
+    return [*_comment_flow("Commented out, this is the program's default, in force "
+                           "until you choose. Remove the # once it is your "
+                           "competition's."),
+            f"# {key} = {toml_value(default)}"]
+
+
+def _comment_flow(text: str, *, indent: str = "# ") -> list[str]:
+    """A paragraph of prose as comment lines, none of them over the width."""
+    return textwrap.wrap(text, width=WIDTH, initial_indent=indent,
+                         subsequent_indent=indent, break_long_words=False,
+                         break_on_hyphens=False)
+
+
+def commented_teams(names: list[str]) -> tuple[list[str], str]:
+    """The commented ``teams`` array, and the words for deleting its ``#``.
+
+    The two come back together because they have to agree, and they are told to a club
+    in two different places: this file writes the array with the instruction above it,
+    and the run's own report tells a club to go and do it. Both said "remove the #"
+    while the array was one line. Wrapped to the width -- four commented lines for four
+    ordinary team names -- one ``#`` out of four leaves ``teams = [`` on its own and a
+    file that will not load, so a club doing exactly what it was told gets a parse
+    error naming a line this program wrote.
+
+    Which is why :func:`teams_instruction`, which words the report's note, asks this
+    for the sentence, and for the array where the file is this run's to write: a
+    second copy of the arithmetic behind it is how the two would drift back apart.
+    """
+    block = toml_lines(f"teams = {toml_value(list(names))}", width=WIDTH, indent="# ")
+    return block, ("remove the # from every line of" if len(block) > 1
+                   else "remove the # from")
+
+
+def team_list_lines(comp_id: str, names: Iterable[str]) -> list[str]:
+    """The TOML that declares a competition's team list, as the review offers it.
+
+    One place, so that the note that sends a club to the list and the review that
+    prints it ask the file about the same lines.
+    """
+    return [f"[competitions.{toml_key(comp_id)}]",
+            f"teams = {toml_value(list(names))}"]
+
+
+def named(path: Path | str) -> str:
+    """The config file as a published sentence names it: its name, not its folders.
+
+    A finding that sends a club to a line of the config is written into a season's
+    document, and the front page says which file declared a competition with no
+    cards, so both name the file the build read through this, and so does the
+    refusal of a player's name, which gives every name by its shape. The name and
+    not the path, because a path typed with ``--config`` holds the club's own
+    folders. The report's own notes give the file as ``--config`` gave it.
+    """
+    return Path(path).name
+
+
+def teams_instruction(comp_id: str, names: list[str], path: Path | str,
+                      text: str | None) -> str:
+    """What a club does to the file at *path* to declare the team list *names*.
+
+    Worded from :func:`held_in` of the lines the review offers, in the config
+    *text*: the list is behind a ``#``, live, split between headers, or not in the
+    file at all, and its table live or not (:func:`opens`). *text* is None where
+    this run writes the file, which is asked of the lines it writes, the table and
+    :func:`commented_teams`' array under it. The step and the file, as the sentence
+    around it gives the rest. The file is *path* as given, as ``--config`` gave it,
+    which is how every other note of the report names it: the note is the
+    report's, and never published (:func:`named`).
+    """
+    lines = team_list_lines(comp_id, names)
+    table = lines[0]
+    block, uncomment = commented_teams(names)
+    if text is None:
+        text = "\n".join([table, *block]) + "\n"
+    held = held_in(lines, text)
+    if held == "commented" and opens(table, text):
+        # Behind a # under a header behind one too: the list's lines alone, with
+        # no # in front, land in whatever table is above them.
+        return (f"remove the # from {table} in {path}, and "
+                f"{uncomment.removeprefix('remove the # ')} teams = [...] under it")
+    if held == "commented":
+        return f"{uncomment} teams = [...] under {table} in {path}"
+    if held == "split":
+        return (f"gather teams = [...] under one # {table} in {path}, as a file "
+                f"declares a table once, and {uncomment} it")
+    if held == "live":
+        return (f"fill in teams under {table} in {path}: the line is there, and "
+                f"lists no team")
+    if opens(table, text):
+        return f"add {table} to {path}, and teams = [...] under it"
+    return f"add teams = [...] under {table} in {path}"
 
 
 def toml_string(value: str) -> str:
@@ -628,12 +1701,333 @@ def toml_value(value: object) -> str:
     return toml_string(str(value))
 
 
+# How far an array's items are indented under the key they belong to. Four, not
+# two: the caller's own indent may be two, and an item at the same indent as its
+# key reads as another key.
+_ITEM_INDENT = "    "
+
+
+def toml_lines(assignment: str, *, width: int, indent: str = "") -> list[str]:
+    """One ``key = value`` line, indented, as however many lines ``width`` allows.
+
+    Here rather than in the report that calls it because the only breaks worth
+    taking are the ones TOML allows, and knowing which those are is this module's
+    job. A club pastes these lines into its config file, so a break that leaves the
+    paste unparseable is worse than a line running off the edge of a terminal: the
+    error it gets back names a line this program wrote.
+
+    Arrays break between items and never inside one -- a draw split down the middle
+    of ``["Aces", "Iguanas"]`` still loads, as two teams playing nobody. Anything
+    else long is handed back whole: a TOML basic string cannot be continued on the
+    next line, so for a club name that runs over there is nothing honest to do.
+
+    ``indent`` is passed in rather than added by the caller afterwards, so that the
+    indent and the width cannot disagree. A caller that printed these six columns in
+    and asked for the whole width got lines six columns over it, and the subtraction
+    that would have fixed that was invisible from both ends.
+    """
+    if len(indent) + len(assignment) <= width:
+        return [indent + assignment]
+    key, sep, value = assignment.partition(" = ")
+    value = value.strip()
+    if not sep or not (value.startswith("[") and value.endswith("]")):
+        return [indent + assignment]
+    items = _toml_items(value[1:-1])
+    if not items:
+        return [indent + assignment]
+
+    out = [f"{indent}{key} = ["]
+    body = indent + _ITEM_INDENT
+    row = ""
+    for item in items:
+        # Trailing comma on every item, the last one included. TOML allows it, and
+        # it means a club adding a team appends a line rather than editing two.
+        piece = f"{item},"
+        if row and len(body) + len(row) + 1 + len(piece) > width:
+            out.append(body + row)
+            row = piece
+        else:
+            row = f"{row} {piece}" if row else piece
+    if row:
+        out.append(body + row)
+    out.append(f"{indent}]")
+    return out
+
+
+def _toml_items(inner: str) -> list[str]:
+    """The top-level items of an array's contents, splitting only where it is safe.
+
+    A comma inside a quoted name and a comma between two fixtures look the same to
+    ``str.split``, and a club whose team is called "Rockets, Reserves" is the one
+    who would find out.
+    """
+    items: list[str] = []
+    depth = 0
+    quote = ""
+    start = 0
+    i = 0
+    while i < len(inner):
+        char = inner[i]
+        if quote:
+            # Only a basic string has escapes; in a literal string a backslash is a
+            # backslash, so skipping the next character there would eat a quote.
+            if char == "\\" and quote == '"':
+                i += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            items.append(inner[start:i].strip())
+            start = i + 1
+        i += 1
+    items.append(inner[start:].strip())
+    return [item for item in items if item]
+
+
+def slots_line(fmt: fmt_mod.MatchFormat) -> str:
+    """The ``slots`` line that declares *fmt*'s shape, set by set in row order."""
+    words = ["doubles" if slot.doubles else "singles" for slot in fmt.slots]
+    return f"slots = {toml_value(words)}"
+
+
+def shape_line(fmt: fmt_mod.MatchFormat) -> str:
+    """The one line that declares *fmt*'s shape: its name, or its slots if it has none.
+
+    One rule for the file :func:`render` writes and for the review list's item, which
+    says of that line "delete the # to adopt it". Both offered ``format = <name>``
+    whatever the shape, and a shape format.py has no name for is named by its
+    pattern: ``format = "d1-d2-s1"``, adopted, stopped the next run at exit 2 with
+    "unknown match format". ``slots`` is the key that declares any shape at all.
+    """
+    name = fmt_mod.shape_name(fmt.slots)
+    return f"format = {toml_value(name)}" if name else slots_line(fmt)
+
+
+# A statement's key at the start of a line: bare, dotted or quoted, then `=`.
+_KEY_START = re.compile(r"""\s*(?:"[^"\n]*"|'[^'\n]*'|[A-Za-z0-9_.-]+)\s*=""")
+
+
+def _header_of(line: str) -> tuple[tuple[str, ...], bool] | None:
+    """The table a ``[x]`` or ``[[x]]`` line opens, and if it is an array; or None."""
+    stripped = line.strip()
+    if not stripped.startswith("["):
+        return None
+    try:
+        node: object = tomllib.loads(stripped)
+    except tomllib.TOMLDecodeError:
+        return None
+    path: list[str] = []
+    # An array of tables is a list only at its last key, where the walk stops.
+    while isinstance(node, dict) and len(node) == 1:
+        (key, node), = node.items()
+        path.append(key)
+    return tuple(path), stripped.startswith("[[")
+
+
+def _uncommented(line: str) -> str:
+    """A comment line with its ``#`` deleted, and the one space after it."""
+    body = line.strip()[1:]
+    return body[1:] if body.startswith(" ") else body
+
+
+class _Block(NamedTuple):
+    """One table of an item or a file: which, if an array, and the values under it.
+
+    ``behind`` is a file's header line as it reads with its ``#`` deleted, where
+    the header is commented, and "" where it is live or the block is an item's.
+    ``line`` is that commented header's line in the file, counted from 1, and 0
+    where there is none.
+    """
+    path: tuple[str, ...]
+    array: bool
+    values: dict
+    behind: str = ""
+    line: int = 0
+
+
+def _fragment_blocks(lines: Iterable[str]) -> list[_Block]:
+    """A review item's TOML as blocks, one to each header, comments none."""
+    blocks: list[_Block] = []
+    for line in lines:
+        head = _header_of(line)
+        if head is not None:
+            blocks.append(_Block(*head, {}))
+        elif blocks:
+            try:
+                blocks[-1].values.update(tomllib.loads(line))
+            except tomllib.TOMLDecodeError:
+                continue
+    return blocks
+
+
+def _commented_blocks(text: str) -> list[_Block]:
+    """What a file holds behind a ``#``, as the table each statement sits in.
+
+    A statement is filed under the last header above it, live or commented, and
+    read over as many commented lines as it takes to parse: a list is written one
+    item per line once it is too wide for one. A line that never parses, prose with
+    an ``=`` in it, is left where it was, and the lines after it read on their own.
+    """
+    blocks: list[_Block] = [_Block((), False, {})]
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if not line.strip().startswith("#"):
+            head = _header_of(line)
+            if head is not None:
+                blocks.append(_Block(*head, {}))
+            continue
+        body = _uncommented(line)
+        head = _header_of(body)
+        if head is not None:
+            blocks.append(_Block(*head, {}, behind=body.strip(), line=index))
+            continue
+        if not _KEY_START.match(body):
+            continue
+        statement, end = body, index
+        while True:
+            try:
+                blocks[-1].values.update(tomllib.loads(statement))
+            except tomllib.TOMLDecodeError:
+                if (end < len(lines) and lines[end].strip().startswith("#")
+                        and _header_of(_uncommented(lines[end])) is None):
+                    statement += "\n" + _uncommented(lines[end])
+                    end += 1
+                    continue
+                break
+            index = end
+            break
+    return blocks
+
+
+def _table_at(document: dict, path: tuple[str, ...]) -> object:
+    node: object = document
+    for key in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
+def opens(header: str, text: str) -> bool:
+    """Whether a ``[x]`` or ``[[x]]`` *header* can be added to the config *text*.
+
+    False where the file declares that table already, by a header of its own or
+    by a key that made it, so that a second one stops the next run at exit 2,
+    "Cannot declare ... twice". The review offered ``[player_names]`` and its
+    lines "to add" to a file that had that table, and ``held_in`` counted values
+    under a ``# [x]`` whose ``#`` could not be deleted for the same reason.
+
+    Asked of the loader, by parsing the file with the header added, and not of a
+    copy of TOML's rules: a table may follow its own subtable, and may not follow
+    a dotted key that made it, and ``[competitions."x"]`` is ``[competitions.x]``.
+    """
+    try:
+        tomllib.loads(f"{text}\n{header.strip()}\n")
+    except tomllib.TOMLDecodeError:
+        return False
+    return True
+
+
+def _holds(block: _Block, wanted: _Block) -> bool:
+    """Whether one block of a file has every value of one block of an item."""
+    return (block.path == wanted.path and block.array == wanted.array
+            and bool(wanted.values)
+            and all(key in block.values and block.values[key] == value
+                    for key, value in wanted.values.items()))
+
+
+class Held(NamedTuple):
+    """Where a config file holds one review item, as :func:`holding` answers it.
+
+    ``status`` is :func:`held_in`'s answer, and ``at`` the line of each ``# [x]``
+    header whose block holds a part of it, in file order, where that is
+    ``"split"``, and () otherwise.
+    """
+    status: str
+    at: tuple[int, ...] = ()
+
+
+def _split_over(one: _Block, held: list[_Block]) -> list[_Block]:
+    """The blocks of *held* that hold *one* between them, or [] where they do not.
+
+    Only a plain ``[x]`` table: two ``[[x]]`` blocks are two entries of an array,
+    and one entry's values over the two are not an entry the file holds. Only a
+    block under a ``# [x]``, since each part is named by its header's line.
+    """
+    each = [one._replace(values={key: value}) for key, value in one.values.items()]
+    held = [block for block in held if block.line]
+    if one.array or not all(any(_holds(block, value) for block in held)
+                            for value in each):
+        return []
+    return [block for block in held if any(_holds(block, value) for value in each)]
+
+
+def held_in(lines: Iterable[str], text: str) -> str:
+    """Where the config *text* holds one review item's TOML *lines*: the status of
+    :func:`holding`, which says where as well."""
+    return holding(lines, text).status
+
+
+def holding(lines: Iterable[str], text: str) -> Held:
+    """Where the config *text* holds one review item's TOML *lines*.
+
+    ``"live"`` when a key of it is declared there, whatever its value, so the next
+    run reads it; ``"commented"`` when every block of it is in the file behind a
+    ``#``, whole, in one block of its own table and kind, so deleting the ``#``
+    adopts it; ``"split"`` when a plain table of it is not, but is over several
+    blocks of that table, each behind a ``# [x]``, whose lines have to be gathered
+    under one of those headers first, as a file declares a table once; and
+    ``"absent"`` otherwise, a file that holds none of it or other values
+    under the same keys. One answer for every run: the review said where each
+    value landed only on the run that had just written the file, and on every run
+    after asked for all of them again, though the file held each one behind a ``#``.
+
+    A block under a commented header counts only where :func:`opens` says that
+    header can be added, since its ``#`` is one of those a club deletes. Read from
+    the file rather than from what :func:`render` would write, because a club edits
+    it: a line changed behind its ``#`` is not the value offered.
+    """
+    wanted = _fragment_blocks(lines)
+    try:
+        declared = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        declared = {}
+    for block in wanted:
+        node = _table_at(declared, block.path)
+        if (isinstance(node, list) and bool(node) if block.array
+                else isinstance(node, dict)
+                and any(key in node for key in block.values)):
+            return Held("live")
+    held = [block for block in _commented_blocks(text)
+            if not block.behind or opens(block.behind, text)]
+    whole = [any(_holds(block, one) for block in held) for one in wanted]
+    if wanted and all(whole):
+        return Held("commented")
+    # Split, measured on the demo's file with its six team names moved under two
+    # "# [team_names]": "not in it", of a file that held all six, and deleting the
+    # # of both headers stopped the next run at exit 2, "Cannot declare twice".
+    parts = [[] if kept else _split_over(one, held)
+             for one, kept in zip(wanted, whole)]
+    if wanted and all(kept or part for kept, part in zip(whole, parts)):
+        return Held("split", tuple(sorted({block.line for part in parts
+                                           for block in part})))
+    return Held("absent")
+
+
 HEADER = """\
 # matchcentre-dashboard
 #
-# Written for you from the scorecards in data/. Everything here is optional: the
-# dashboard already works. Filling it in makes the dashboard say what you know
-# instead of what this program could work out on its own.
+# Written for you from the scorecards in data/. Everything here is optional:
+# the dashboard already works. Filling it in makes the dashboard say what you
+# know instead of what this program could work out on its own.
 #
 # Nothing in this file can change a score. Results only ever come from the
 # scorecards. This file supplies names, captains, season labels, the list of
@@ -642,9 +2036,30 @@ HEADER = """\
 # Edit it, then run `python3 build.py` again.
 """
 
+# The same file, written by a run that read nothing. It used to carry the header
+# above, which says where every value in it came from -- and none of them came
+# from anywhere, because there were no cards to read. A club meeting this file
+# has an empty `data/` and has not exported anything yet, so what it needs from
+# the first sentence is that the dashboard is not waiting on this file.
+EMPTY_HEADER = """\
+# matchcentre-dashboard
+#
+# Written for you before any scorecard was read: data/ held none, so nothing
+# here came from one. Everything in it is optional anyway -- the dashboard is
+# built from the cards, and reads this file only for the things a card cannot
+# say.
+#
+# Nothing in this file can change a score. Results only ever come from the
+# scorecards. This file supplies names, captains, season labels, the list of
+# teams, the draw, and which scoring scheme your competition uses.
+#
+# Export a match from matchcentre.tennis.com.au as a PDF, put it in data/, and
+# run `python3 build.py`.
+"""
+
 
 def render(config: Config, *, competitions: object = (),
-           club_name: str = "", cards: int = 0) -> str:
+           club_name: str = "", cards: int = 0, matches: object = None) -> str:
     """The config file, filled in from a discovery pass.
 
     ``competitions`` is a sequence of :class:`~matchcentre.competition.Competition`.
@@ -653,12 +2068,32 @@ def render(config: Config, *, competitions: object = (),
     an uncommented ``teams`` list closes the team roster, which switches on bye
     handling and turns an unrecognised team on a card into an error. Both are
     right once a human has checked the list and wrong before.
+
+    ``cards`` is how many were read, and it decides the header: a file written by
+    a run that read none of them cannot say where its values came from, because
+    none of them came from anywhere.
+
+    ``matches`` is the same pass's matches, by competition id, and what a length
+    left commented says the dashboard will show is counted from them.
+
+    A line is live only when ``config`` declared it, and that includes the names:
+    the club's own, a title, a team's, a captain's and a season's label. Written
+    live, the file a first run wrote was read back by the second as the club's
+    declaration, so two runs over the same cards built two different dashboards.
+    Commented, the next run reads what this one read until the club removes a #.
     """
     comps = list(competitions)
-    lines: list[str] = [HEADER]
+    lines: list[str] = [HEADER if cards else EMPTY_HEADER]
 
     lines.append("[club]")
-    lines.append(f"name = {toml_value(config.club_name or club_name)}")
+    # Live when the letterhead gave nothing: the stub a run before the first card
+    # writes, whose empty name declares nothing and is the line a club types into.
+    if config.club_name or not club_name:
+        lines.append(f"name = {toml_value(config.club_name)}")
+    else:
+        lines.append("# As the cards' letterhead prints it. Remove the # to use it,")
+        lines.append("# written the way you would.")
+        lines.append(f"# name = {toml_value(club_name)}")
     lines.append("# Every team of yours printed with the same prefix? Put it here")
     lines.append("# and it stops cluttering the dashboard, e.g. \"Riverside\".")
     prefix_line = f"strip_team_prefix = {toml_value(config.strip_team_prefix)}"
@@ -670,7 +2105,23 @@ def render(config: Config, *, competitions: object = (),
     lines.append('# "single" if data/ holds one season, "multi" if you keep past')
     lines.append("# seasons in their own folders under data/ (data/2026-winter/...).")
     lines.append(f"seasons = {toml_value(config.seasons_mode)}")
-    lines.append(f"title = {toml_value(config.title or default_title(club_name))}")
+    # Made from the name the page's own heading is made from, the club's where it
+    # gave one: made from the letterhead, a rewrite over a declared name suggested
+    # a heading in capitals that the page did not show.
+    title = site_title(config, config.club_display(club_name))
+    title_line = f"title = {toml_value(title)}"
+    if config.title:
+        lines.append(title_line)
+    else:
+        lines.append("# The heading over every page, made from the club's name while")
+        lines.append("# this is commented out. Remove the # to fix it as written.")
+        lines.append(f"# {title_line}")
+    lines.append("# To keep players' names off the dashboards, see "
+                 "\"Publishing without")
+    lines.append("# names\" in README.md.")
+    players_line = f"players = {toml_value(config.players_mode)}"
+    lines.append(players_line if config.players_mode != "names"
+                 else '# players = "numbered"')
     lines.append("")
 
     lines.append("[rules]")
@@ -678,55 +2129,195 @@ def render(config: Config, *, competitions: object = (),
     lines.append("# wrong reorders the ladder, so it is printed on every run and")
     lines.append("# shown on the dashboard. Options:")
     for name in sorted(scoring.RULESETS):
-        lines.append(f"#   {name:<12} {scoring.RULESETS[name].describe()}")
-    lines.append(f"scoring = {toml_value(config.scoring)}")
+        lines.extend(_option_lines(name, scoring.RULESETS[name].describe(), pad=12))
+    lines.extend(_chosen_rule_lines(config, comps, "scoring",
+                                    scoring.DEFAULT_RULESET))
     lines.append("# When a set is finished. No scorecard can tell us this — 6-3 looks")
     lines.append("# the same whether the set was played to 6 or to 8. Options:")
     for name in sorted(fmt_mod.SET_RULES):
-        lines.append(f"#   {name:<18} {fmt_mod.SET_RULES[name].describe()}")
-    lines.append(f"sets = {toml_value(config.sets)}")
+        lines.extend(_option_lines(name, fmt_mod.SET_RULES[name].describe(), pad=18))
+    lines.extend(_chosen_rule_lines(config, comps, "sets", fmt_mod.DEFAULT_SET_RULE))
     lines.append("# What a round a team did not play is worth — a bye, a washout, a")
     lines.append("# week called off. This changes the points column of every team")
     lines.append("# that has had a week off, and never the ladder order. Options:")
     for mode in scoring.UNPLAYED_MODES:
-        lines.append(f"#   {mode:<9} "
-                     f"{scoring.unplayed_detail(mode == scoring.UNPLAYED_AVERAGE)}")
+        lines.extend(_option_lines(
+            mode, scoring.unplayed_detail(mode == scoring.UNPLAYED_AVERAGE), pad=9))
     if config.unplayed:
         lines.append(f"unplayed = {toml_value(config.unplayed)}")
     else:
         lines.append(f"# unplayed = {toml_value(scoring.UNPLAYED_ZERO)}"
                      f"   # left off: whatever the preset above says")
+    lines.append("# Can a night end level? Many associations decide every match — a")
+    lines.append("# tiebreak, a countback, a by-law. Say draws = false and a level")
+    lines.append("# card is reported as a result nobody recorded, and left out of")
+    lines.append("# the ladder, instead of being scored as a draw you do not have.")
+    if config.draws is None:
+        lines.append("# draws = false   # left off: whatever the preset above says")
+    else:
+        lines.append(f"draws = {toml_value(config.draws)}")
     lines.append("# The shape of a match is read from your scorecards, so you only")
-    lines.append("# need these to pin it down or to override what was read.")
-    lines.append(f"# format = {toml_value(config.format or fmt_mod.DEFAULT_FORMAT)}"
-                 f"   # {', '.join(sorted(fmt_mod.FORMATS))}")
-    lines.append('# slots = ["doubles", "singles", "singles", "doubles"]')
-    lines.append("# min_sets_for_result = 3   # sets that must finish before a "
-                 "result counts")
+    lines.append("# need these to pin it down or to override what was read. Named")
+    lines.append("# shapes:")
+    # Above the value, not in a trailing comment on it. Ten names after `# format =
+    # "doubles-singles-doubles"` made the longest line this program writes, at 165
+    # columns, and a name a club has to spell exactly is not a thing to hide off-screen.
+    lines.extend(_comment_flow(choices(sorted(fmt_mod.FORMATS)), indent="#   "))
+    # Live when the club declared them, commented when this file is suggesting
+    # them -- the rule the `unplayed` and `draws` lines above follow, and the one
+    # these three did not. Written commented whatever the config said, a rewrite
+    # put a club's declared format in a comment and so unset it: the shape went
+    # back to "read from each card", and with it the check that makes a card with
+    # a row missed an error rather than a card of a different shape.
+    #
+    # A suggestion is what the cards already have, since the review list says of
+    # it "delete the # to adopt it". A [rules] line reaches every competition that
+    # sets none of its own, so where those differ no [rules] line is right, and
+    # each of them is offered its own in its own section instead.
+    shape = config.rules_format(comps)
+    minimum = config.rules_minimum(comps)
+    split_shape = (not config.format and not config.slots and shape is None
+                   and bool(config._inheriting(comps, "format", "slots")))
+    split_minimum = (config.min_sets_for_result is None and minimum is None
+                     and bool(config._inheriting(comps, "min_sets_for_result")))
+    # Each shape is offered the line shape_line gives it, and slots as well where
+    # the shape has a name, as the cards have it: the one slots line this wrote
+    # for every shape was doubles-singles-doubles, and a club of any other that
+    # deleted its # had every card refused. A shape with no name has no format
+    # line, since the name it was offered was a pattern the loader refuses.
+    #
+    # With no card this line reaches, there is no shape to offer: the four-set
+    # default it offered, its # deleted, refused every card of any other shape.
+    offered = config.declared_format() or next(
+        (comp.fmt for comp in config._inheriting(comps, "format", "slots")
+         if comp.fmt.name == shape), None)
+    if config.format:
+        lines.append(f"format = {toml_value(config.format)}")
+    elif split_shape:
+        lines.extend(_comment_flow(
+            "format, or slots for a shape with no name, is set in each "
+            "[competitions] section below, because the cards of these "
+            "competitions describe different shapes."))
+    elif offered is None:
+        lines.extend(_comment_flow(
+            "format, or slots for a shape with no name, is set in each "
+            "[competitions] section below, because each of them sets its own."
+            if comps else
+            "No card has been scored yet, so no shape is written here: one your "
+            "cards do not have would refuse every one of them. format takes a "
+            "name above; slots, for a shape with no name, takes the kind of each "
+            "set, doubles or singles, in the order the cards print them."))
+    elif fmt_mod.shape_name(offered.slots):
+        lines.append(f"# {shape_line(offered)}")
+    if config.slots:
+        lines.append(f"slots = {toml_value(list(config.slots))}")
+    elif not split_shape and offered is not None:
+        lines.extend(toml_lines(slots_line(offered), width=WIDTH, indent="# "))
+    if config.min_sets_for_result is not None:
+        lines.append(f"min_sets_for_result = {toml_value(config.min_sets_for_result)}"
+                     f"   # sets that must finish before a result counts")
+    elif split_minimum:
+        lines.extend(_comment_flow(
+            "min_sets_for_result is set in each [competitions] section below, "
+            "because these competitions need different numbers."))
+    elif minimum is None:
+        lines.extend(_comment_flow(
+            "min_sets_for_result is set in each [competitions] section below, "
+            "because each of them sets its own." if comps else
+            "min_sets_for_result, the sets that must finish before a result "
+            "counts, is left to the shape. One is offered here when this file is "
+            "filled in from cards that were scored."))
+    else:
+        lines.append(f"# min_sets_for_result = {minimum}   # sets that must finish "
+                     "before a result counts")
     lines.append("")
+    own_shape = ({comp.id for comp in config._inheriting(comps, "format", "slots")}
+                 if split_shape else set())
+    own_minimum = ({comp.id for comp in
+                    config._inheriting(comps, "min_sets_for_result")}
+                   if split_minimum else set())
 
     if config.multi_season or config.season_labels:
         lines.append("[seasons]")
         lines.append("# Pretty names for the folders under data/.")
-        keys = dict(config.season_labels)
+        # The club's labels live, and each other season's name as its cards give it
+        # commented: written live, that name came back declared, and a rewrite then
+        # made it live in the season's own section too.
+        worked_out: dict[str, str] = {}
         for comp in comps:
-            if comp.season_key:
-                keys.setdefault(comp.season_key, comp.season or comp.season_key)
-        for key in sorted(keys):
-            lines.append(f"{toml_key(key)} = {toml_value(keys[key])}")
-        if not keys:
+            if comp.season_key and not config.season_label_keys(comp.season_key):
+                worked_out.setdefault(comp.season_key, comp.season or comp.season_key)
+        if worked_out:
+            lines.extend(_comment_flow(
+                "A line with a # in front is the season's name as this run has it, "
+                "from its cards, its own section or its folder. Remove the # to use "
+                "it."))
+        for key in sorted({**config.season_labels, **worked_out}):
+            if key in config.season_labels:
+                label = config.season_labels[key]
+                lines.append(f"{toml_key(key)} = {toml_value(label)}")
+            else:
+                lines.append(f"# {toml_key(key)} = {toml_value(worked_out[key])}")
+        if not config.season_labels and not worked_out:
             lines.append('# "2026-winter" = "2026 Winter Season"')
         lines.append("")
 
     lines.extend(_names_section(config, comps))
     lines.extend(_aliases_section(config))
+    lines.extend(_namesakes_section(config, comps))
 
     for comp in comps:
-        lines.extend(_competition_section(config, comp))
+        own = []
+        if comp.id in own_shape:
+            own.extend(toml_lines(shape_line(comp.fmt), width=WIDTH, indent="# "))
+        if comp.id in own_minimum:
+            own.append(f"# min_sets_for_result = {comp.fmt.min_sets_for_result}   "
+                       "# sets that must finish before a result counts")
+        lines.extend(_competition_section(config, comp,
+                                          (matches or {}).get(comp.id, ()), own=own))
+    # A section the club declared and no card was filed under this run is still the
+    # club's. Walking only the competitions the cards built dropped it from the
+    # file, and with it a night whose first round had not been played yet.
+    built = {comp.id for comp in comps}
+    carried = [section for comp_id, section in config.competitions.items()
+               if comp_id not in built]
+    for section in carried:
+        lines.extend(_declared_section(section))
 
-    if not comps:
-        lines.append("# No scorecards were found under data/, so there is nothing")
-        lines.append("# to describe yet. Add your PDFs and run build.py again.")
+    if not comps and not carried:
+        # The advice here used to be "Add your PDFs and run build.py again", which
+        # is the one thing that cannot fill this file in: a plain run leaves a
+        # config that exists exactly as it is, which is what `--discover` is for.
+        # So the file told a club to wait for something no run does, while the
+        # dashboard was built beside it from cards this file said nothing about.
+        # The dashboard comes first all the same, because it needs nothing here.
+        if cards:
+            lines.extend(_comment_flow(
+                f"No competition could be built from the {cards} scorecard"
+                f"{'' if cards == 1 else 's'} under data/, so there is nothing to "
+                f"describe yet. The report above says what each card was refused "
+                f"for."))
+        else:
+            lines.extend(_comment_flow(
+                "No scorecards were found under data/, so there is nothing to "
+                "describe yet."))
+        lines.extend(_comment_flow(
+            "Put the PDFs there and run this, which builds the dashboard and "
+            "needs nothing from this file:"))
+        lines.append("#")
+        # On a line of its own, and not inside the paragraph: flowed to the width,
+        # the command broke between --discover and --force, and a club copies what
+        # it reads. The same reason the report prints a command this way.
+        lines.append("#   python3 build.py")
+        lines.append("#")
+        lines.extend(_comment_flow(
+            "Then this, to fill this file in from those cards:"))
+        lines.append("#")
+        lines.append("#   python3 build.py --discover --force")
+        lines.append("#")
+        lines.extend(_comment_flow(
+            "A plain run never writes over a config file that already exists, "
+            "so without --force this one stays exactly as it is."))
         lines.append("#")
         lines.append('# [competitions."thursday-division-b"]')
         lines.append('# label = "Thursday Division B"')
@@ -743,22 +2334,37 @@ def render(config: Config, *, competitions: object = (),
 def default_title(club_name: str) -> str:
     """The site heading to use when nobody has declared one.
 
-    Public, and public for a reason: :mod:`matchcentre.site` needs the same
-    answer. When each module had its own version of this line, the first build
-    headed the page "<club> dashboards" and the config it wrote said "<club>
-    season dashboards", so the second build silently retitled the site -- a diff
-    with no cause a club could point at.
+    Asked only by :func:`site_title`. When each module had its own version of
+    this line, the first build headed the page "<club> dashboards" and the config
+    it wrote said "<club> season dashboards", so the second build silently
+    retitled the site -- a diff with no cause a club could point at.
     """
     return f"{club_name} season dashboards" if club_name else "Season dashboards"
 
 
+def site_title(config: Config, club_name: str) -> str:
+    """The heading over every page: the declared ``[build] title``, else the default.
+
+    *club_name* is the name the page prints, :meth:`Config.club_display` of the
+    letterhead. The page, the ``title =`` line :func:`render` writes and the guard
+    that searches the front page for a withheld name all ask this one function,
+    so the guard searches exactly the title the site prints.
+    """
+    return config.title or default_title(club_name)
+
+
 def _names_section(config: Config, comps: list) -> list[str]:
-    """Display-name overrides, pre-filled with every team we had to guess at."""
+    """Display-name overrides: the club's live, and each team guessed at commented."""
     from .competition import Provenance
 
-    lines = ["[team_names]",
-             "# Scorecards shout team names, so these are this program's best",
-             "# guess at how you write them. Fix any that read wrongly."]
+    # The club's names live and this program's guesses commented, every guess and
+    # a mixed-case print among them: written live, the next run read each one back
+    # as declared and moved the teams' provenance from "derived" to "mixed".
+    lines = ["[team_names]"]
+    lines.extend(_comment_flow(
+        "Scorecards shout team names, so a line below with a # in front is this "
+        "program's best guess at how you write one. Correct it if it reads wrongly "
+        "and remove the # to use it."))
     written: dict[str, str] = dict(config.team_names)
     for comp in comps:
         for slug, team in sorted(comp.teams.items()):
@@ -766,7 +2372,8 @@ def _names_section(config: Config, comps: list) -> list[str]:
                 continue
             written.setdefault(slug, team.name)
     for slug in sorted(written):
-        lines.append(f"{toml_key(slug)} = {toml_value(written[slug])}")
+        line = f"{toml_key(slug)} = {toml_value(written[slug])}"
+        lines.append(line if slug in config.team_names else f"# {line}")
     if not written:
         lines.append('# "riverside-rockets" = "Riverside Rockets"')
     lines.append("")
@@ -795,8 +2402,76 @@ def _aliases_section(config: Config) -> list[str]:
     return lines
 
 
-def _competition_section(config: Config, comp) -> list[str]:
-    from .competition import Provenance
+def _namesakes_section(config: Config, comps: list) -> list[str]:
+    """The exact inverse of the aliases above, pre-filled with anything found.
+
+    A name printed in two teams' roster blocks arrives already written out and
+    commented. The club's job is to decide which of the two things it is, and
+    typing the line is not part of that job -- the same reason the ``teams`` array
+    is written out rather than described.
+    """
+    lines = ["[namesakes]",
+             "# Two people, one printed name, told apart by the team each plays",
+             "# for: every team named here gets a player of its own. The inverse",
+             "# of [aliases] above, which folds two spellings into one person.",
+             "# Leave an entry off for one person who changed teams mid-season —",
+             "# then both halves belong to one record, which is what you already",
+             "# have. To use an entry below, delete every # in front of it."]
+    for slug in sorted(config.namesakes):
+        lines.extend(toml_lines(
+            f"{toml_key(slug)} = {toml_value(list(config.namesakes[slug]))}",
+            width=WIDTH))
+    shared = _shared_rosters(comps)
+    printed = {team: comp.team_name(team) for comp in comps for team in comp.teams}
+    for slug in sorted(shared):
+        found = shared[slug]
+        if set(config.namesakes.get(slug, ())) >= set(found):
+            # Already decided. Offering the same name back commented reads as
+            # though the decision had not been made, and the next club to look
+            # would have no way to tell which of the two lines was in force.
+            continue
+        lines.extend(toml_lines(
+            f"{toml_key(slug)} = "
+            f"{toml_value([printed.get(team, team) for team in found])}",
+            width=WIDTH, indent="# "))
+    if not config.namesakes and not shared:
+        lines.append('# "j-smith" = ["Riverside Rockets", "Hilltop Aces"]')
+    lines.append("")
+    return lines
+
+
+def _shared_rosters(comps: list) -> dict[str, list[str]]:
+    """Player slugs more than one team in a competition has on its roster.
+
+    Which is the whole of what this file can offer: whether they are two people or
+    one who moved is not in the cards, and :mod:`matchcentre.validate` reports the
+    same finding in prose for whoever is reading the run rather than the file.
+
+    Held twice *inside* one competition, because that is the only place a merge
+    happens — each competition gets a dashboard of its own. But the entry is keyed
+    on the name, so one key must carry every team any competition found it in:
+    written a competition at a time, the second grade overwrote the first and
+    offered a club a line that fixed one grade and left the other merged. Teams are
+    added rather than replaced, and only once, since two seasons of one grade are
+    two competitions that quite properly share a team list.
+    """
+    out: dict[str, list[str]] = {}
+    for comp in comps:
+        holders: dict[str, list[str]] = {}
+        for slug, team in sorted(comp.teams.items()):
+            for player in team.players:
+                holders.setdefault(player.slug, []).append(slug)
+        for slug, teams in sorted(holders.items()):
+            if len(teams) > 1:
+                found = out.setdefault(slug, [])
+                found.extend(team for team in teams if team not in found)
+    return out
+
+
+def _competition_section(config: Config, comp, matches=(), *,
+                         own: list[str] | tuple = ()) -> list[str]:
+    from .competition import Provenance, rounds_played_words
+    from .sheet import rounds_listed
 
     declared = config.competition(comp.id)
     header = f"[competitions.{toml_key(comp.id)}]"
@@ -806,56 +2481,137 @@ def _competition_section(config: Config, comp) -> list[str]:
         lines.append(f"day = {toml_value(comp.day)}")
     if comp.division:
         lines.append(f"division = {toml_value(comp.division)}")
+    if comp.season_key:
+        # The third thing a card is filed on in multi-season mode, and the only one
+        # of the three that is not on the card. Live, because it is not a guess: it
+        # is the folder the club put the cards in. Without it the two seasons of one
+        # division below were two sections claiming the same cards, which the loader
+        # refuses, and a section on its own claimed its cards only while it kept the
+        # name it was given here. Single-season mode files cards with no key at all,
+        # so there it is never written: a section given one there claims nothing.
+        lines.extend(_season_key_lines(comp.season_key))
 
     season_line = f"season = {toml_value(comp.season)}"
-    if comp.provenance_of("season") is Provenance.DECLARED and comp.season:
+    if declared and declared.season:
         lines.append(season_line)
+    elif comp.provenance_of("season") is Provenance.DECLARED and comp.season:
+        # Declared by the season's [seasons] line, not by this section: written
+        # live, the copy outranked the line, and an edit to the line renamed nothing.
+        lines.extend(_comment_flow(
+            "This season's name comes from its line under [seasons], which names "
+            "every competition of the season. Remove the # to give this "
+            "competition a name of its own, which that line then no longer "
+            "changes."))
+        lines.append(f"# {season_line}")
     else:
         lines.append("# What your association calls this season. Scorecards do not")
         lines.append("# reliably print it, so the dashboard leaves it out until you")
         lines.append("# say. Remove the # to use it.")
         lines.append(f"# season = {toml_value(comp.season or '2026 Season 2')}")
 
-    played = len(comp.rounds)
-    if comp.rounds_total is not None and declared and declared.rounds_total:
-        lines.append(f"rounds_total = {comp.rounds_total}")
+    # The regular rounds with cards, counted by the function the page's number is.
+    # Counted off the draw, a round it lists that nobody has played was a round
+    # played, and so was a week the byes table rests the whole grade in; counted
+    # with the finals, a final was a round of the season's length. Counted as the
+    # run after it counts them, which has no draw to read a typed ``finals`` in.
+    after = replace(comp, rounds={})
+    played = len(after.rounds_played(matches))
+    # Live whenever the club gave the length, in rounds_total or through its draw:
+    # the draw is not written back, and the length it gave would go with it. Not a
+    # length the draw gave that its cards have played past, which F3 stopped this
+    # run for: written live, it would stop every run after, with the draw gone.
+    length = declared.season_length if declared else None
+    # Counted as the run after it counts rounds, since a typed ``finals`` goes too.
+    # Nor a length that run finds played past, by rounds with cards the draw does
+    # not list: it would stop on it as this run stops on the one above.
+    kept = declared.length_by_labels if declared else None
+    past = kept is not None and declared.rounds_total is None and bool(
+        replace(after, rounds_total=kept).rounds_past_length(matches))
+    if kept is not None and not comp.draw_outgrown_by and not past:
+        lines.append(f"rounds_total = {kept}")
     else:
+        if comp.draw_outgrown_by:
+            lines.extend(_comment_flow(
+                f"The draw you declared gave the season {length} "
+                f"round{'' if length == 1 else 's'}, and cards were found for "
+                f"{rounds_listed(comp.draw_outgrown_by)}, "
+                f"which it does not list, so that length is not written here."))
+        elif past:
+            # Said as the draw's is. Without it, a length the draw had given went
+            # from the file with nothing there to say why.
+            lines.extend(_comment_flow(
+                f"The draw you declared gave the season {kept} "
+                f"round{'' if kept == 1 else 's'}, with a round counted a final "
+                f"only if its label names one, and cards were found for {played} "
+                f"regular rounds, so that length is not written here."))
+        said = rounds_played_words(played)
         lines.append("# Rounds in the full season. Without it the dashboard says")
-        lines.append(f"# \"{played} rounds played\" and shows no percentage, rather")
+        lines.append(f"# \"{said}\" and shows no percentage, rather")
         lines.append("# than implying the season is over. Remove the # to use it.")
         lines.append(f"# rounds_total = {max(played, 1)}")
 
-    names = [comp.teams[slug].name for slug in sorted(comp.teams)]
     if declared and declared.teams_declared:
-        lines.append(f"teams = {toml_value(names)}")
+        # As the club spelt and ordered it. Written from the names the page shows, it
+        # took in [team_names] too, and "The Rockets" declared a team no card names.
+        names = list(declared.teams)
+        lines.extend(toml_lines(f"teams = {toml_value(names)}", width=WIDTH))
     else:
-        lines.append("# The full list of teams in this competition, as read from")
-        lines.append("# the cards. Check it, then remove the # — that tells the")
-        lines.append("# program the list is complete, which lets it handle byes and")
-        lines.append("# flag a misspelt team instead of inventing a new one.")
-        lines.append(f"# teams = {toml_value(names)}")
+        names = [comp.teams[slug].name for slug in sorted(comp.teams)]
+        block, uncomment = commented_teams(names)
+        lines.extend(_comment_flow(
+            "The full list of teams in this competition, as read from the cards. "
+            "Declaring it tells the program the list is complete, which lets it "
+            "handle byes and flag a misspelt team instead of inventing a new one."))
+        lines.extend(_comment_flow(f"Check it, then {uncomment} it to use it."))
+        lines.extend(block)
+    lines.extend(_rule_lines(declared))
+    if own:
+        lines.extend(_comment_flow(
+            "What this competition's cards say. Another competition here differs, "
+            "so it goes in this section and not under [rules]: delete the # to pin "
+            "it."))
+        lines.extend(own)
 
+    # What the club declared, as it keyed and spelt it, live, and then the (C) marks
+    # for the teams it named nobody for, commented. Built from the teams alone, a
+    # declared captain on no card came back as its slug, and one for a team with no
+    # card yet did not come back at all. Written live, a mark came back declared.
     captains = {}
     for slug in sorted(comp.teams):
         team = comp.teams[slug]
-        if not team.captain:
+        if not team.captain or team.captain_declared:
             continue
         player = team.player(team.captain)
         captains[team.name] = player.name if player else team.captain
+    stated = declared.captains if declared else {}
+    captains.update(stated)
     lines.append("")
     lines.append(f"[competitions.{toml_key(comp.id)}.captains]")
     if captains:
-        lines.append("# Read from the (C) marks on the scorecards. Correct as needed.")
+        if stated:
+            # This file's, and not "yours": a file an earlier version wrote holds the
+            # (C) marks live, and they are read back as named whoever typed them.
+            lines.extend(_comment_flow(
+                "As this file had them, with any others read from the (C) marks on "
+                "the scorecards written with a # in front. Remove the # to use one."))
+        else:
+            lines.extend(_comment_flow(
+                "Read from the (C) marks on the scorecards. Correct a line if it "
+                "reads wrongly and remove the # to use it."))
         for team_name in sorted(captains):
-            lines.append(f"{toml_key(team_name)} = {toml_value(captains[team_name])}")
+            line = f"{toml_key(team_name)} = {toml_value(captains[team_name])}"
+            lines.append(line if team_name in stated else f"# {line}")
     else:
-        lines.append("# No (C) marks were found on the cards. Add captains here if")
-        lines.append("# you want them shown.")
+        # "On the cards that count": a washout's (C), or a (C) on a night not yet
+        # played, names nobody, so a folder of those alone prints marks and has none.
+        lines.append("# No (C) mark on a card that counts names a captain. Add")
+        lines.append("# captains here if you want them shown.")
         for team_name in sorted(names):
             lines.append(f"# {toml_key(team_name)} = \"\"")
 
-    courts = {comp.teams[s].name: comp.teams[s].home_court
-              for s in sorted(comp.teams) if comp.teams[s].home_court}
+    # Courts and codes are printed on no card, so all there is of either is what
+    # was declared: written from the declaration, and not from the teams it reached.
+    courts = dict(declared.courts) if declared else {}
     lines.append("")
     lines.append(f"[competitions.{toml_key(comp.id)}.courts]")
     lines.append("# Each team's home court, if your club plays on numbered courts.")
@@ -864,25 +2620,48 @@ def _competition_section(config: Config, comp) -> list[str]:
     if not courts:
         for team_name in sorted(names)[:1]:
             lines.append(f"# {toml_key(team_name)} = 1")
+    lines.extend(_table_lines(
+        comp.id, "codes", declared.codes if declared else {},
+        "# The number your published draw gives each team."))
 
-    lines.extend(_byes_lines(config, comp, names))
+    lines.extend(_byes_lines(config, comp))
+    lines.extend(_expected_lines(config, comp, names))
 
     lines.append("")
-    lines.append("# Your published draw, if you have one. Declaring it lets the")
-    lines.append("# dashboard show fixtures that have not been played yet, and")
-    lines.append("# pins the season's length.")
-    lines.append(f"# [[competitions.{toml_key(comp.id)}.rounds]]")
-    lines.append('# number = "1"')
-    lines.append('# date = "2026-08-18"')
-    example = names[:2] if len(names) >= 2 else ["Home Team", "Away Team"]
-    lines.append(f"# fixtures = [{toml_value(example)}]")
-    lines.append('# bye = ""       # or a list, for a week the whole grade rests')
-    lines.append('# finals = false')
+    # Taught in words and not written out behind a #, because no round this file
+    # could write is the club's to adopt. The example round it wrote, dated
+    # 2026-08-18 and pairing the first two teams, gave three draw-mismatch errors
+    # once its # was deleted, and the cards' own rounds are a history: declared,
+    # the week a postponed match's card arrives stops the run.
+    lines.extend(_comment_flow(
+        f"Your published draw, if you have one. Declaring it lets the dashboard "
+        f"show fixtures that have not been played yet, and pins the season's "
+        f"length. Type it in from your association's sheet, a "
+        f"[[competitions.{toml_key(comp.id)}.rounds]] table for each round with "
+        f"its number, date and fixtures, and bye or finals where a round has one; "
+        f"config.example.toml has one worked through. None is written here: the "
+        f"cards show only the rounds played so far, and each run's review lists "
+        f"them, to check the sheet against."))
     lines.append("")
     return lines
 
 
-def _byes_lines(config: Config, comp, names: list[str]) -> list[str]:
+def _season_key_lines(key: str) -> list[str]:
+    """A section's ``season_key``, with what it is and why it has to stay.
+
+    Shared by a section the cards built and one carried over with none, since it is
+    the same key and a rename disconnects either. It is the folder's name as the run
+    slugs it, so the comment says capitals and spaces do not matter rather than
+    calling ``2026-winter`` the name of ``data/2026-Winter/``; and a card sitting in
+    ``data/`` itself is filed under its year, which is a key no folder has.
+    """
+    return ["# The season folder under data/ these cards are in, or their year",
+            "# if they sit in data/ itself; capitals and spaces do not matter.",
+            "# Keep it if you rename the section: it is how a card finds this one.",
+            f"season_key = {toml_value(key)}"]
+
+
+def _byes_lines(config: Config, comp) -> list[str]:
     """The ``[competitions.<id>.byes]`` block, pre-filled with what was worked out.
 
     Written by team and by round number, which is how an association's own sheet
@@ -890,6 +2669,10 @@ def _byes_lines(config: Config, comp, names: list[str]) -> list[str]:
     nobody played at all, or a round whose cards have not arrived. Everything
     already inferred is written *commented*, so it is visible and confirmable
     without changing what the next run does.
+
+    How a line is typed is said in words, and not by an example line: the one
+    written, ``"<first team>" = [1, 6]``, its # deleted, gave that team two byes no
+    card or sheet gave, and five F8 errors on the demo season.
     """
     declared = config.competition(comp.id)
     stated = dict(declared.byes) if declared else {}
@@ -903,10 +2686,173 @@ def _byes_lines(config: Config, comp, names: list[str]) -> list[str]:
              "# them. Only the ones this program cannot see for itself: a round",
              "# with cards and one team missing is already worked out, given the",
              "# teams list above. A week the whole grade rests is not.",
-             f"#   {toml_key(names[0] if names else 'Team name')} = [1, 6]"]
+             *_comment_flow("Each line is a team's name in double quotes, as the "
+                            "teams list above spells it, then = and the rounds it "
+                            "sits out in square brackets, as the sheet has them; "
+                            "config.example.toml has one worked through.")]
     for team in sorted(stated):
-        lines.append(f"{toml_key(team)} = {toml_value(list(stated[team]))}")
-    for team in sorted(set(worked_out) - set(stated)):
-        lines.append(f"# {toml_key(team)} = {toml_value(worked_out[team])}"
-                     f"   # already worked out from the cards")
+        lines.extend(_bye_lines(team, stated[team]))
+    inferred = sorted(set(worked_out) - set(stated))
+    if inferred:
+        # Said once, above the group, rather than in a trailing comment on each line. A
+        # club with long team names and a long season had the note pushed off the edge
+        # by the very thing it was explaining, and a note that only fits sometimes is
+        # worse than one that is always in the same place.
+        lines.append("# Already worked out from the cards. Here to confirm against"
+                     " your sheet,")
+        lines.append("# not to type out again:")
+    for team in inferred:
+        lines.extend(_bye_lines(team, worked_out[team], indent="# "))
+    return lines
+
+
+def _bye_lines(team: str, numbers, *, indent: str = "") -> list[str]:
+    """One team's line of the byes table, its rounds written as a club types them.
+
+    The loader keeps a round as text, as it has to -- a round can be ``"SF"`` -- and
+    the byes written back from it came out ``["4"]`` where the club had typed ``[4]``.
+    So a round that is a whole number is written as one, and anything else as the
+    string it was: ``"SF"`` stays a string, and so does ``"04"``, which no TOML
+    integer can spell and which is therefore what the club typed. Whether it is a
+    number is ``competition.round_number``'s to say, as it is for the round order
+    and F11, where it asked ``int`` on its own and raised on a round of more digits
+    than ``int`` reads (4.151).
+    """
+    from .competition import round_number
+    weeks = [round_number(n) for n in numbers]
+    rounds = [week if week is not None and str(week) == n else n
+              for n, week in zip(numbers, weeks)]
+    return toml_lines(f"{toml_key(team)} = {toml_value(rounds)}", width=WIDTH,
+                      indent=indent)
+
+
+def _expected_lines(config: Config, comp, names: list[str]) -> list[str]:
+    """``[competitions.<id>.expected]``: the club's sheet as typed, or one to fill in.
+
+    The template is the byes block's pattern, a live heading over commented lines,
+    and it carries no figure: the check is worth something only because the
+    figures in it are the association's, and one this program wrote in would be
+    its own ladder agreeing with itself. Uncommented as written, every figure is
+    blank, which the loader reads as no table.
+    """
+    declared = config.competition(comp.id)
+    typed = _sheet_lines(comp.id, declared.expected if declared else None)
+    if typed:
+        return typed
+    lines = ["", f"[competitions.{toml_key(comp.id)}.expected]"]
+    lines.extend(_comment_flow(
+        "Your association's published sheet, so each build can check this "
+        "dashboard against it. Copy each team's points and matches played off the "
+        "sheet, set after_round to the last regular round the sheet covers, and "
+        "remove the # from that line and from each team you fill in. A team left "
+        "out is not checked. Type the sheet's own figures: this dashboard's would "
+        "agree with it and check nothing."))
+    lines.append('# after_round = ""')
+    for name in names:
+        lines.extend(toml_lines(f'{toml_key(name)} = {{ points = "", played = "" }}',
+                                width=WIDTH, indent="# "))
+    return lines
+
+
+def _sheet_lines(comp_id: str, sheet: ExpectedSheet | None) -> list[str]:
+    """A typed sheet table, written back live, in the order and keys it was typed.
+
+    Each figure is written as TOML that loads back as the text it was read as, which
+    is what the check compares: ``after_round`` and ``played`` as whole numbers, and
+    points through :func:`_sheet_points`. Nothing for a sheet with no line, which
+    loads as no table whatever else it says.
+    """
+    if sheet is None or not sheet.lines:
+        return []
+    lines = ["", f"[competitions.{toml_key(comp_id)}.expected]",
+             f"after_round = {sheet.after_round}"]
+    for line in sheet.lines:
+        figures = ([f"points = {_sheet_points(line.points)}"] if line.points else [])
+        if line.played is not None:
+            figures.append(f"played = {line.played}")
+        lines.extend(toml_lines(f"{toml_key(line.key)} = {{ {', '.join(figures)} }}",
+                                width=WIDTH))
+    return lines
+
+
+def _sheet_points(text: str) -> str:
+    """Sheet points as TOML: bare if TOML reads the bare figure back as *text*.
+
+    ``12.0`` is written bare, since a float's ``repr`` gives it back, and ``"10.90"``
+    and ``"07"`` quoted: bare, one loads as 10.9 and TOML refuses the other. Not
+    :func:`toml_value`, whose ``:g`` writes 12.0 as 12, a claim to no places where
+    the club typed one.
+    """
+    try:
+        bare = repr(float(text)) if "." in text else str(int(text))
+    except ValueError:          # digits past int()'s 4300-digit limit
+        bare = ""
+    return text if bare == text else toml_string(text)
+
+
+def _rule_lines(declared: CompetitionConfig | None) -> list[str]:
+    """The ``[rules]`` settings a competition overrides, written back live.
+
+    Every one of RULES_SETTINGS a section set, and nothing for one it left to
+    ``[rules]``. They were not written at all, and a Tuesday night declared
+    ``scoring = "simple"`` went back to the preset on the next run: the same
+    cards, a different ladder, and exit 0.
+    """
+    if declared is None:
+        return []
+    set_here = [(name, getattr(declared, name)) for name in RULES_SETTINGS
+                if getattr(declared, name) not in (None, "", ())]
+    if not set_here:
+        return []
+    lines = ["# Where this competition's rules differ from those under [rules]."]
+    for name, value in set_here:
+        lines.extend(toml_lines(f"{name} = {toml_value(value)}", width=WIDTH))
+    return lines
+
+
+def _table_lines(comp_id: str, name: str, entries: dict, *comment: str) -> list[str]:
+    """``[competitions.<id>.<name>]`` with the club's entries, or nothing at all."""
+    if not entries:
+        return []
+    lines = ["", f"[competitions.{toml_key(comp_id)}.{name}]", *comment]
+    for key in sorted(entries):
+        lines.append(f"{toml_key(key)} = {toml_value(entries[key])}")
+    return lines
+
+
+def _declared_section(declared: CompetitionConfig) -> list[str]:
+    """A section no card was filed under this run, written back as the club had it.
+
+    Everything it declared but the draw, which ``--discover`` drops from every
+    section: keeping it here alone would make what the flag drops depend on whether
+    a card had arrived. Each value is written only if it was set, so the section
+    loads back as it was read.
+    """
+    key = toml_key(declared.id)
+    lines = [f"[competitions.{key}]"]
+    lines.extend(_comment_flow(
+        "No card was filed under this section this run, so it is written back as "
+        "you had it" + (", less the draw you declared in it." if declared.rounds
+                        else ".")))
+    for name in ("label", "day", "division"):
+        if getattr(declared, name):
+            lines.append(f"{name} = {toml_value(getattr(declared, name))}")
+    if declared.season_key:
+        lines.extend(_season_key_lines(declared.season_key))
+    if declared.season:
+        lines.append(f"season = {toml_value(declared.season)}")
+    if declared.length_by_labels is not None:
+        lines.append(f"rounds_total = {declared.length_by_labels}")
+    if declared.teams:
+        lines.extend(toml_lines(f"teams = {toml_value(declared.teams)}", width=WIDTH))
+    lines.extend(_rule_lines(declared))
+    lines.extend(_table_lines(declared.id, "captains", declared.captains))
+    lines.extend(_table_lines(declared.id, "courts", declared.courts))
+    lines.extend(_table_lines(declared.id, "codes", declared.codes))
+    if declared.byes:
+        lines.extend(("", f"[competitions.{key}.byes]"))
+        for team in sorted(declared.byes):
+            lines.extend(_bye_lines(team, declared.byes[team]))
+    lines.extend(_sheet_lines(declared.id, declared.expected))
+    lines.append("")
     return lines

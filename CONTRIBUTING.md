@@ -33,7 +33,9 @@ If you are reporting rather than fixing, the same rule applies to your issue:
 `python3 tools/doctor.py --redact your-card.pdf` gives a report you can paste in
 public. The README's [Reporting a
 problem](README.md#reporting-a-problem) section explains what it does and does not
-keep.
+keep. If you find that it kept something it should not have, that is the one bug
+here that must not be reported in public: [SECURITY.md](SECURITY.md) has a private
+route for it.
 
 ## Running the tests
 
@@ -41,8 +43,9 @@ keep.
 python3 -m unittest discover -s tests -t tests
 ```
 
-About fifteen seconds, no network, no installing, and none of your own cards are
-read. `-t tests` matters: the test files import each other as top-level modules, so
+About twenty minutes, no network beyond a web server on 127.0.0.1 that the fetcher's
+tests start and stop themselves, no installing, and none of your own cards are read.
+`-t tests` matters: the test files import each other as top-level modules, so
 `-t .` fails on the first import. A single file also runs on its own —
 `python3 tests/test_foundation.py` — which is quicker while you are working.
 
@@ -79,12 +82,21 @@ club publishes about real people, so these get read closely.
 
   ```bash
   python3 tools/demo.py --out /tmp/demo-data --seed 7 --teams 6 --rounds 3
-  python3 build.py --data /tmp/demo-data --out /tmp/before --config /tmp/demo.toml
-  # ... switch to your branch, build to /tmp/after, and diff the two season.json
+  python3 build.py --data /tmp/demo-data --config /tmp/demo.toml \
+                   --out /tmp/before --generated 2026-09-10T12:00:00
+  # ... switch to your branch, then:
+  python3 build.py --data /tmp/demo-data --config /tmp/demo.toml \
+                   --out /tmp/after --generated 2026-09-10T12:00:00
+  diff -r /tmp/before /tmp/after
   ```
 
-  `--seed` makes that reproducible, and `--generated` pins the timestamp so the
-  only difference between two builds is the one you made.
+  The first build writes `/tmp/demo.toml` with everything it worked out behind a
+  `#`, so `after` reads the same settings `before` was built from. `--seed` makes
+  the cards reproducible, and `--generated` on every build pins the date, so the
+  only difference `diff -r` shows is the one you made. Make both builds with
+  the same Python: the suite checks that one release on one Python writes the same
+  bytes in every folder, time-zone setting and hash seed it tries, and it has never
+  compared two Pythons with each other.
 - New behaviour that changes existing dashboards belongs behind a config setting
   with a documented default, not in place of the old behaviour. A club that rebuilt
   and got different points from the same cards has no way to tell a fix from a bug.
@@ -113,6 +125,26 @@ That one command needs a browser, which is why it is a maintainer tool and not p
 of the project's promises — nothing a club runs needs one. It pins the demo seed and
 the timestamp, so re-running it on unchanged code produces byte-identical PNGs and
 an empty diff.
+
+## Making a release
+
+What each of the three numbers promises a club is in the README's [versions and
+upgrading](README.md#versions-and-upgrading) section; that decides which one moves.
+Then, in this order:
+
+1. Bump `__version__` in `matchcentre/__init__.py`. Nothing else holds the number —
+   the report, `season.json`, both footers and `--version` all read it from there.
+2. Write the entry in `CHANGELOG.md`, newest first, under `Added`, `Changed` or
+   `Fixed`. A corrected reading goes under `Fixed` and says out loud that figures
+   will move, because that is the one patch a club has to look at rather than take.
+3. Run the whole suite. It fails on a half-done release: the version in the code has
+   to be the newest one the changelog describes, and every example of the report's
+   first line that is written out by hand — the issue forms — has to quote it.
+4. Regenerate the screenshots if anything visible changed, with the command in the
+   section above. They are pinned to a seed and a date, so an unrelated release
+   leaves them byte-identical and the diff stays empty.
+5. `git tag` it, last. A tag is the one step other people may already have fetched
+   by the time you notice it was premature.
 
 ## What is not in the repository
 

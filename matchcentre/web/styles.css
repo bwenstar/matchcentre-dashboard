@@ -30,13 +30,12 @@
   --surface-2:       #f4f3f0;   /* table headers, zebra, inert cells */
   --text-primary:    #0b0b0b;
   --text-secondary:  #52514e;
-  --text-muted:      #898781;
+  --text-muted:      #6a6864;   /* 5.0:1 on the darkest surface; see below */
   --grid:            #e1e0d9;   /* hairline gridline, one step off surface */
   --axis:            #c3c2b7;
   --border:          rgba(11, 11, 11, 0.10);
   --deemph:          #cac9c2;   /* "the rest are context" mark grey */
   --focus:           #2a78d6;
-  --success-text:    #006300;
 
   /* --- categorical slots, fixed order, light steps ----------------------- */
   --series-1: #2a78d6;  /* blue */
@@ -60,17 +59,37 @@
   --div-mid: #f0efec;
 
   /* --- status (reserved; never a series) --------------------------------- */
+  /* Marks only: a dot, a rule, a border. A mark has to be *found*, which WCAG
+   * settles at 3:1 against what is around it, and these are chosen for that. */
   --good:     #0ca30c;
   --warning:  #fab219;
   --serious:  #ec835a;
   --critical: #d03b3b;
-  /* The one tinted background in the file, for the one state that has to stop a
+  /* The same four states as words, which is a different job with a different
+   * threshold: 4.5:1, because a word has to be *read*. Amber at 1.65:1 against a
+   * table header is a perfectly good dot and an unreadable sentence, and every
+   * one of these started out as the mark beside it being used for both. Only
+   * three, because `--serious` has never labelled anything. */
+  --success-text:  #006300;
+  --warning-text:  #89610e;
+  --critical-text: #a72f2f;
+  /* The one tinted block in the file, for the one state that has to stop a
    * reader: a card that was seen and not scored. Its own token because the tint
    * that reads as a wash on paper-white disappears entirely on near-black. */
   --critical-wash: rgba(208, 59, 59, 0.10);
+  /* The result badges' tints: each state's mark colour, thinned, and one value
+   * in every theme. The letter is what a badge means and the tint only agrees
+   * with it, and on near-black every step of tint is contrast taken off the
+   * letter: at 0.14 a win's clears 5.01:1 on a hovered row in dark, and at the
+   * 0.22 the wash above takes there, 4.46:1. And print is laid over dark and
+   * restates neither tint, so a tint stepped for dark is the one a page printed
+   * from dark comes out in. */
+  --win-wash:  rgba(12, 163, 12, 0.14);
+  --loss-wash: rgba(208, 59, 59, 0.14);
 
   --radius: 10px;
   --shadow: 0 1px 2px rgba(11, 11, 11, 0.04);
+  --shadow-float: 0 4px 14px rgba(11, 11, 11, 0.18);   /* the tooltip, over the page */
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -85,13 +104,19 @@
     --surface-2:       #232322;
     --text-primary:    #ffffff;
     --text-secondary:  #c3c2b7;
-    --text-muted:      #898781;
+    --text-muted:      #94928b;
     --grid:            #2c2c2a;
     --axis:            #383835;
     --border:          rgba(255, 255, 255, 0.10);
     --deemph:          #4c4c48;
     --focus:           #3987e5;
-    --success-text:    #0ca30c;
+    /* Lifted off the light values rather than reused: the marks are the same four
+     * colours in both themes, but a word has to clear 4.5:1 against near-black as
+     * well, and the dark red also has to clear the tint the lost-match badge
+     * paints behind it. */
+    --success-text:  #0eb90e;
+    --warning-text:  #fab219;
+    --critical-text: #ff6969;
 
     --series-1: #3987e5;
     --series-2: #d95926;
@@ -124,13 +149,15 @@
   --surface-2:       #232322;
   --text-primary:    #ffffff;
   --text-secondary:  #c3c2b7;
-  --text-muted:      #898781;
+  --text-muted:      #94928b;
   --grid:            #2c2c2a;
   --axis:            #383835;
   --border:          rgba(255, 255, 255, 0.10);
   --deemph:          #4c4c48;
   --focus:           #3987e5;
-  --success-text:    #0ca30c;
+  --success-text:  #0eb90e;
+  --warning-text:  #fab219;
+  --critical-text: #ff6969;
 
   --series-1: #3987e5;
   --series-2: #d95926;
@@ -229,7 +256,9 @@ button {
   text-decoration: none;
   margin-bottom: 2px;
 }
-.home-link:hover { color: var(--focus); }
+/* Darkens rather than turning blue: --focus is the ring colour, chosen to be
+ * *found* against a surface at 3:1, and this is a 12px word to be read. */
+.home-link:hover { color: var(--text-primary); }
 
 .tabs { display: flex; gap: 4px; }
 .tabs a {
@@ -261,6 +290,13 @@ button {
 .controls select { max-width: 210px; }
 .btn:hover { background: var(--surface-2); color: var(--text-primary); }
 .btn[aria-pressed="true"] { background: var(--surface-2); color: var(--text-primary); }
+/* A button with nothing to act on yet -- Go, before a team or player is chosen.
+   Muted rather than faint: this is still a word to be read, and the grey it is
+   painted in is the one every footnote on the page uses, which clears AA on every
+   surface it can sit on. The hover lift is undone in the same breath, or a
+   disabled control answers the pointer as though it could be pressed. */
+.btn:disabled,
+.btn:disabled:hover { background: var(--surface-1); color: var(--text-muted); cursor: default; }
 
 /* ------------------------------------------------------------ data health -- */
 .health {
@@ -314,8 +350,8 @@ button {
   color: var(--text-secondary);
   border: 1px solid var(--border);
 }
-.res.W { background: rgba(12, 163, 12, 0.14); color: var(--success-text); }
-.res.L { background: rgba(208, 59, 59, 0.14); color: var(--critical); }
+.res.W { background: var(--win-wash); color: var(--success-text); }
+.res.L { background: var(--loss-wash); color: var(--critical-text); }
 .res.D { background: var(--surface-2); }
 
 /* ---------------------------------------------------- honesty markers ------ */
@@ -324,12 +360,21 @@ button {
  * state is allowed to be. Three of these carry a caveat and one carries a
  * failure, and if they all shouted, the failure would be invisible.
  *
- * The empty-state rules come first. Each of these three elements ships in the
+ * The empty-state rules come first. Each of these four elements ships in the
  * page with no content, so app.js needs no `hidden` attribute to remember to
  * remove: an element with something in it shows, an element with nothing in it
  * is not there. Which also means a page that never received data shows no bare
- * strip where a banner would have been. */
+ * strip where a banner would have been.
+ *
+ * `.health` joined the group when the strip became a named <section>. As a <div>
+ * an empty one was a harmless 21px band (measured at 360px with scripting off);
+ * as a named section it is an empty landmark, which is a signpost with no writing
+ * on it -- a reader chooses it from the list and arrives nowhere. `display: none`
+ * rather than `visibility: hidden` for the same reason the group uses it: only
+ * removing the box takes the node out of the accessibility tree, and hidden would
+ * have left the entry in the list with the height it had. */
 .rules-banner:empty,
+.health:empty,
 #rejected:empty,
 #season-picker:empty { display: none; }
 
@@ -348,10 +393,90 @@ button {
   color: var(--text-secondary);
   font-size: 12.5px;
 }
-.rules-banner > * { white-space: nowrap; }
+/* Each line breaks rather than pushing the page out from under itself: the longest
+ * of them is 933px of advisory, and holding it on one line made the document 945px
+ * wide against a 360px phone -- 585px of pannable nothing, and content off-centre
+ * whenever the reader had panned. `anywhere` and not `break-word` because only
+ * `anywhere` shrinks the min-content width a flex line is measured against, which is
+ * what an unbroken 53-character set label from somebody's scorecard needs. */
+.rules-banner > * { overflow-wrap: anywhere; }
 .rules-banner strong,
 .rules-banner b { color: var(--text-primary); font-weight: 600; }
 .rules-banner code { color: var(--text-primary); font-size: 12px; }
+
+/* What each of those rules means, and which config keys set them: a reader needs it
+ * once, and it was four wrapped lines and a three-line advisory of a banner taking
+ * 39% of a 640px phone. Behind a disclosure it is one 19px line, and the banner is
+ * 115px at 360 instead of 250.
+ *
+ * Its own row rather than left as one more item on the flex line: measured without the
+ * basis, at 700 and 1280 the summary sits at the end of the last name's row (tops
+ * 151px and 89px) and moves to a row of its own the moment it is opened (172 and 109),
+ * so the label travels 21px out from under the pointer that pressed it and the
+ * explanations appear where it used to be. It costs 20px of banner at those two widths
+ * and nothing at all on a phone -- 115px at 360 and 136 at 320 either way, because
+ * there the names already fill their lines. The summary keeps the banner's own size and
+ * colour -- it is chrome, not a button on a caveat -- and the marker is the browser's,
+ * so it looks like every other disclosure a reader has met.
+ *
+ * The paragraphs inside it get a measure and a margin of their own. Uncapped, the
+ * 161-character advisory is one line running 933px at 1280 and at 1920 alike, and
+ * under `draws = false` the 143-character draws explanation is another of 825px; at
+ * 60ch they are three lines of at most 57 characters and two of at most 72. 60 and
+ * not 78 because a ch is a zero, wider than a letter: a line of a format's `Singles
+ * 1, Singles 2, ...` is as little as 0.71ch a character, so at 78ch a format ran to
+ * 104 and the advisory to 82, where 80 is the most a line should hold. 60ch is the
+ * widest whole number at which every paragraph laid out, each preset and each format
+ * of up to nine slots, keeps to 80 in each of the four faces measured; at 61ch four
+ * singles under a tiebreak rule are 82 in DejaVu Sans, and at 65ch eleven are over
+ * 80, up to 85. Not in Ubuntu or Ubuntu Sans, the faces of Ubuntu's own desktop,
+ * measured since: at 60ch those four singles are 82 in each, and so are three
+ * singles and a doubles in any order, under either tiebreak rule; 58ch keeps them to
+ * 80. It stays 60ch until Segoe UI, San Francisco and Roboto, system-ui on Windows,
+ * Apple's systems and Android, are measured too, and none of them has been. Nothing
+ * else on the paragraphs may undo it: a wider min-width, a display that runs them on
+ * or sets them side by side, nowrap, or a negative letter- or word-spacing each put
+ * a line past 80 with the cap in place. Nor may they, or what holds them, take a
+ * fixed width or floor at all, because whether one fits a phone turns on the face,
+ * the reader's type and the screen: `min-width: 60ch` made the page 441px wide at
+ * 375, and 40ch, under the cap, 378 under a 16px minimum font. In ch and not px so
+ * that a line keeps its characters when a reader's minimum font size makes them
+ * bigger: at 16px a 429px cap, the same width today, re-wraps two of the lines for
+ * 48px more banner. And the margin because a paragraph the sheet says nothing about
+ * takes 1em above and below, which is 50px more opened banner at every width.
+ *
+ * Balanced, because the cap leaves the last line as short as the words left over:
+ * under `draws = false` the scoring explanation ended on `sets` alone, and 24 of the
+ * 100 paragraphs the banner can show on a line of 15 characters or fewer, as did 435
+ * of the 8400 formats. Balanced, none does, in any of the four faces at 1280, 700 or
+ * 375, in the same number of lines and so the same banner, and the longest line no
+ * longer. `pretty` only lengthens the shortest of them, `sets` to `then sets`, and
+ * leaves as many under 16. */
+.rules-more { flex: 1 0 100%; }
+.rules-more > summary { cursor: pointer; color: var(--text-secondary); }
+.rules-detail { margin: 5px 0 0; max-width: 60ch; text-wrap: balance; }
+/* And the kinds of block outside the disclosure that ended on a word or two, each
+ * measured on its own: in the demo's six views at 1280, 700 and 375, 32 blocks ended
+ * on a line of 15 characters or fewer, the health summary on `club's word` in every
+ * view and a tile's foot on `2`, and with these wraps 10 do, each block in as many
+ * lines as it had and no view taller. A tile's foot is pretty, because balanced it
+ * broke a team's name, `v Brindle` / `Magpies, round 2`. Not the table key, which
+ * balanced broke inside `D W-` / `L`, nor a card's Source, which is a path. The view
+ * heads through #view alone: the careers page's leads were read on one site only.
+ * The banner's lines as they were measured, `> span`: `> *` reached the disclosure
+ * too, and gave its paragraphs a second balance that hid their own rule's. On a
+ * nine-team site the match page's heading ended on `Galahs` and a bye's line on
+ * `match played`, and these clear both. Nothing wider than each kind: from `body`,
+ * 66 elements rewrapped unmeasured. */
+.rules-banner > span,
+.health summary,
+.ladder-note,
+#view .view-head h1,
+#view .view-head p,
+.chart-card .sub,
+.match .meta,
+caption .caption-text { text-wrap: balance; }
+.tile .foot { text-wrap: pretty; }
 
 /* "We worked this out." A dashed outline and the maths sign for "approximately",
  * in text colours, not status colours: a derived name is the tool being honest
@@ -434,18 +559,17 @@ a .provenance-flag, th .provenance-flag { text-decoration: none; }
  * to stay on the id above. Both shapes are covered. */
 .rejected-list { list-style: none; }
 ul.rejected-list, ol.rejected-list { margin: 7px 0 0; padding: 0; }
+/* Running text, not a flex row: as a flex item the path was a column of its own,
+   and broke over two lines at 1280 and nine at 375 though it fit on one. */
 .rejected-item {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
   margin: 4px 0 0;
   padding: 0;
 }
 .rejected-item::before {
   content: "\2715";              /* a cross: this file produced no result */
-  color: var(--critical);
+  color: var(--critical-text);
   font-weight: 700;
-  flex: none;
+  margin-right: 8px;
 }
 /* The path first, because it is what the reader has to go and look at, and
    wrapping is allowed: a deep data/ path must not be clipped away. */
@@ -529,7 +653,10 @@ h2.section { font-size: 15px; font-weight: 600; margin: 26px 0 10px; }
 .tile .value { font-size: 26px; font-weight: 600; line-height: 1.15; }
 .tile .foot { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
 
-.progress { min-width: 260px; flex: 1 1 260px; }
+/* 260px is what it asks for, not the least it will accept: a basis yields when the
+ * row is narrower and a floor does not, and the only width where they differ is the
+ * one where the floor is wrong. At 280px it was laid out 260 wide in a 256px card. */
+.progress { flex: 1 1 260px; }
 .progress .label { display: flex; justify-content: space-between; }
 .meter {
   height: 10px;
@@ -628,6 +755,41 @@ caption {
   font-size: 12px;
   padding-bottom: 6px;
 }
+/* The caption's sentence and the key to its abbreviated headings, each on a line of
+ * its own: run together they read as a sentence that turns into a list of letters
+ * halfway through. Both print, which is the point of the key -- a title attribute is
+ * a hover, and the ladder on the clubhouse wall has no pointer. */
+caption .caption-text,
+caption .table-key {
+  display: block;
+}
+caption .table-key { margin-top: 3px; }
+/* Copy and CSV float into the caption rather than sitting above the table, so the
+ * pair costs no row of its own: measured across every table on every page, adding
+ * them changed no caption's height at 320px, 700px or 1280px, and added 18px to
+ * exactly one at 360px and 390px, where the team page's split table has one more
+ * line of key to wrap beside them.
+ *
+ * Left, not right, and that was measured the other way first. A caption is as wide
+ * as the table it belongs to, and a table that overflows is as wide as its contents
+ * inside a box that scrolls sideways -- so `float: right` pins the buttons to the
+ * far edge of the table, which at 320px is off the screen on 18 of the 20 tables
+ * here, 16 at 360px and 390px, and still 3 at 700px. Floated left they were off
+ * screen on none at any of those widths, and the two cost the same height.
+ *
+ * No clearfix: `display: table-caption` makes the caption its own block formatting
+ * context, so it already contains the float. A caption holding nothing but the two
+ * buttons measured 32px -- the 26px button and the 6px padding-bottom -- with and
+ * without one, so the rule that would have added it was deleted. */
+.table-tools {
+  float: left;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 0 0;
+}
+.table-tools .btn { font-size: 12px; padding: 3px 8px; }
+.tools-said { color: var(--text-secondary); }
 th, td {
   text-align: right;
   padding: 7px 9px;
@@ -716,10 +878,30 @@ details.match > summary:hover { background: var(--surface-2); }
 .match .side { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
 .match .side .chip { width: 9px; height: 9px; border-radius: 2px; flex: none; }
 .match .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+/* A bye, a washout or a week called off: the games stay legible and stop being the
+ * loudest thing on the row. 400 rather than a smaller size, because the digits are
+ * column-aligned with every other row's (tabular-nums above) and shrinking them
+ * would break the column they are in. `--text-muted` because it is the one quiet
+ * colour the suite contrast-checks against every palette; the weight and the colour
+ * are never the only signal, since the row also says so in words. */
+.match .score.score--unscored { font-weight: 400; color: var(--text-muted); }
 .match .vs { color: var(--text-muted); font-size: 12px; }
 .match .meta { margin-left: auto; color: var(--text-muted); font-size: 12px; }
+/* A fixture the season went past with no scorecard. Out of the muted ink the rest of
+ * this column sits in, because it is a thing to act on rather than a date: the same
+ * token the notes and pills use for a fault, so a retuned palette retunes this with
+ * them. The words differ too — "no card yet" against "scheduled" — so the colour is
+ * never the only signal. */
+.match .meta.missing { color: var(--warning-text); }
 .match-body { padding: 4px 4px 14px 16px; }
 .win { font-weight: 600; }
+/* The winner's games in a rubber played on a night that counts for nothing. Weight
+ * only, and no colour: the winner and the loser of that rubber still have to be told
+ * apart, and once the weight is level `.lose` below is the only thing left doing it.
+ * Quietening the colour too would leave 6 and 0 in the same ink, which is a claim
+ * about the rubber this does not make — the rubber was won, the night earned nothing,
+ * and only the second of those is what this rule says. */
+.match .win--unscored { font-weight: 400; }
 .lose { color: var(--text-secondary); }
 
 .note {
@@ -734,8 +916,8 @@ details.match > summary:hover { background: var(--surface-2); }
   font-size: 12.5px;
 }
 .note .ico { flex: none; font-weight: 700; }
-.note.warning .ico  { color: var(--warning); }
-.note.critical .ico { color: var(--critical); }
+.note.warning .ico  { color: var(--warning-text); }
+.note.critical .ico { color: var(--critical-text); }
 
 /* ------------------------------------------------------------- tooltip ----- */
 #tooltip {
@@ -747,7 +929,7 @@ details.match > summary:hover { background: var(--surface-2); }
   border-radius: 8px;
   background: var(--surface-1);
   border: 1px solid var(--border);
-  box-shadow: 0 4px 14px rgba(11, 11, 11, 0.18);
+  box-shadow: var(--shadow-float);
   font-size: 12.5px;
   pointer-events: none;
 }
@@ -865,7 +1047,9 @@ a.pick:active { transform: none; }
 .bar > span { display: block; height: 100%; background: var(--seq-4); }
 .pick-lead { font-size: 14px; color: var(--text-secondary); }
 .pick-lead strong { color: var(--text-primary); }
-.pick-facts { font-size: 13px; color: var(--text-muted); }
+/* Anywhere, and at every width: a card with no results can name its section, and
+   a name typed with underscores has nowhere else to break. */
+.pick-facts { font-size: 13px; color: var(--text-muted); overflow-wrap: anywhere; }
 .flag {
   padding-top: 7px;
   border-top: 1px solid var(--border);
@@ -875,7 +1059,7 @@ a.pick:active { transform: none; }
 /* Reserved for the two states that cost the reader something: a validation error
    and a card that could not be read. Both mean a number here is wrong or
    missing, so both get the one colour this stylesheet keeps for that. */
-.flag-bad { color: var(--critical); font-weight: 600; }
+.flag-bad { color: var(--critical-text); font-weight: 600; }
 
 .picker .empty {
   margin: 26px 0 0;
@@ -938,9 +1122,73 @@ a.pick:active { transform: none; }
  * one. */
 body.picker:not(:has(.pick)) .first-run[hidden] { display: block; }
 
+/* The front page's one sentence about the last build, shown only when there is
+   one to show. Words in the text colours and nothing else: #rejected stays the
+   only block with a tinted background and a heavy rule, and the sentence says in
+   words what it is, so the colour is never the only signal. The ok level paints
+   nothing today, because a build that worked writes no text. */
+.build-status { margin: 0 0 16px; font-size: 14px; }
+.build-status-ok { color: var(--text-muted); }
+.build-status-fail { color: var(--critical-text); font-weight: 600; }
+
+/* The link under the competition list, in multi-season mode. */
+body.picker .careers-link { margin: 28px 0 0; font-size: 14px; }
+
+/* ------------------------------------------------------- the careers page --- */
+/* Static HTML at the site root, one section per player. The topbar scrolls away
+ * here rather than sticking: this page runs no app.js to measure it, and every
+ * season page links a player's anchor, so a sticky bar would sit over the heading
+ * each of those links lands on. */
+body.careers .topbar { position: static; }
+body.careers main { max-width: 1040px; }
+body.careers footer.meta { max-width: 1040px; }
+body.careers .view-head p + p { margin-top: 8px; }
+body.careers .career:target { outline: 2px solid var(--axis); outline-offset: 6px; }
+body.careers tfoot th,
+body.careers tfoot td { border-top: 1px solid var(--axis); font-weight: 600; }
+
+/* Past the size the page is split at, careers.html is an index and each initial
+ * has a page: the list of those pages, wrapping at any width, each a 24px target
+ * at least; and the index's row a season page's link lands on when scripts are
+ * off, marked as a career is. */
+body.careers .initials ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+}
+body.careers .initials a,
+body.careers .initials span {
+  display: inline-block;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 3px 6px;
+  text-align: center;
+}
+body.careers .initials a[aria-current="page"] {
+  background: var(--surface-2);
+  color: var(--text-primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+body.careers tr:target > * { background: var(--surface-2); }
+
+/* A season player page's link to their careers entry, under the team line. */
+.view-head .career-link { margin-top: 6px; }
+
 /* --------------------------------------------------------------- narrow ---- */
 @media (max-width: 700px) {
-  .topbar { padding: 8px 12px; }
+  /* The bar scrolls away at this width instead of sticking. Its three rows -- the
+     brand, the views, the controls -- laid out in a third of the width come to 187px
+     of a 640px screen, so 29% of every screenful goes on words the reader has already
+     read, and the content gets the rest. It is still the first thing in the document,
+     which makes it one flick of a thumb, one press of Home or one Shift+Tab away.
+     Rejected: dropping the club and season line to make a shorter bar that still
+     sticks. That line is the answer to "which dashboard am I looking at", and two rows
+     of a 640px screen is still a fifth of it. */
+  .topbar { position: static; padding: 8px 12px; }
   main { padding: 14px 12px 48px; }
   .hero-figure .value { font-size: 40px; }
   .controls select { max-width: 140px; }
@@ -974,7 +1222,12 @@ body.picker:not(:has(.pick)) .first-run[hidden] { display: block; }
     --axis:            #999999;
     --border:          #bbbbbb;
     --deemph:          #cccccc;
-    --success-text:    #006300;
+    /* All three, not only the one that differs from light: these are the tokens
+     * the dark scopes lift for near-black, and paper is not near-black. Left out,
+     * a page printed while the toggle was on gets the dark pale red on white. */
+    --success-text:  #006300;
+    --warning-text:  #89610e;
+    --critical-text: #a72f2f;
     --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
     --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300;
     --seq-1: #cde2fb; --seq-2: #9ec5f4; --seq-3: #6da7ec;
@@ -983,16 +1236,82 @@ body.picker:not(:has(.pick)) .first-run[hidden] { display: block; }
     --critical-wash: #ffffff;
     --shadow: none;
   }
-  .topbar, .controls, .table-toggle, .skip-link, #tooltip { display: none !important; }
+  /* The bar prints, because it is the only place a sheet is told whose season it is:
+   * boot() writes the competition into #brand-title and the club, the season and the
+   * build stamp into #brand-sub, and index.html ships neutral wording precisely
+   * because site.py copies it into every competition's directory. Hidden, four of the
+   * five routes printed nothing naming the competition, the club or the season, and
+   * the fifth named them only through its own heading -- a sheet on the clubhouse
+   * wall that cannot say which ladder it is. What goes instead is what a sheet cannot
+   * use: the views, the jump-to lists, the theme button (picker.html keeps its own
+   * outside .controls), the skip link, the charts' Values buttons, each table's Copy
+   * and CSV pair and whatever they last said, the tooltip, and each card's link to its
+   * own page -- on paper a fragment is an underlined sentence nobody can follow, and the
+   * card it would lead to is the card it is printed under.
+   * Sticky is left as it is: measured, Chrome prints a sticky bar at its static place,
+   * and adding `position: static` here changed no sheet. Rejected: `position: fixed`,
+   * to repeat the name on every sheet. Chrome does repeat it -- and prints it through
+   * the content, the brand and the rules banner interleaved in one band, until @page
+   * margins reserve the space for it. That is a change of its own. */
+  .tabs, .controls, .table-toggle, .table-tools, .skip-link, .home-link,
+  .match-link, #theme-toggle, #tooltip { display: none !important; }
   .picker .season-picker { display: none !important; }
-  body { background: #fff; }
   .card { break-inside: avoid; box-shadow: none; }
+  /* Paper has no sideways scrollbar. The wrapper scrolls and cells stay on one line so
+   * that a fifteen-column table can be read on a phone; on a sheet the same pair is a
+   * clip with nothing to say it clipped. Measured on A4 (720 CSS px of content) from a
+   * twelve-team season: the head-to-head grid printed nine columns short, the players
+   * table six, a player's match history three, the ladder without its Form column --
+   * twenty columns gone from five sheets, with no rule, no ellipsis and no note.
+   * `anywhere` as well as `normal`: the grid's width is set by 'Kookaburras', and
+   * wrapping at spaces alone still lost five of its columns and two of the players
+   * table's. It is paid for in broken words -- the grid's twelve team names and the
+   * ladder's 'Points' print as 'Kookabu / rras' and 'Point / s' -- which is what the
+   * key in each caption is for: the letters are spelled out in prose directly above
+   * the table. What already fits is not touched, because a table that fits is laid out
+   * at max-content and never wraps: the team page's split and head-to-head tables and
+   * four of the five tables on a player page print with no word broken. */
+  .table-wrap { overflow: visible; }
+  th, td { white-space: normal; overflow-wrap: anywhere; }
+  /* What prints of a match is what the reader opened. There used to be a
+   * `.match-body { display: block !important; }` here promising every card's sets on
+   * paper regardless, and it never did anything: a `<details>` without `open` hides its
+   * content through `::details-content`, whose `content-visibility: hidden` no `display`
+   * inside it overrides. Measured with Chrome's --print-to-pdf, read back by this
+   * project's own PDF reader: over a 56-card season not one set table reached any sheet
+   * of any route, and deleting the line left every word of all 28 sheets at the same
+   * coordinates. `details.match::details-content { content-visibility: visible }` is the
+   * repair that works, in one declaration -- and it takes the matches page from 5 sheets
+   * to 30, a team's page from 5 to 11 and the overview from 5 to 6. Thirty sheets is not
+   * a printout anybody asked for, and a reader who wants one night's sets opens that
+   * night and prints six. Rejected with it: the same declaration on the overview alone,
+   * which costs one sheet for the latest round's four cards, because a card that prints
+   * differently depending on which page it sits on is not a rule a reader can predict.
+   *
+   * Which makes `break-inside` load-bearing rather than tidy: the card the reader chose
+   * is the whole reason for the sheet. Measured with all 56 forced open, each card read
+   * from its table caption to its `Source:` line -- with the rule none of the 56 spans a
+   * page break, without it 14 do, and the document is one sheet shorter. A triangle is
+   * blanked because paper takes no clicks, and the summary keeps its own row either way:
+   * teams, games, sets, points and the night's status are the card's result in full, so
+   * a closed card on a sheet is short, not cut off. */
   details.match { break-inside: avoid; }
   details.match > summary::before { content: ""; }
-  .match-body { display: block !important; }
   /* The caveats print. They are the difference between a ladder and a ladder
    * that admits it is provisional, and paper outlives the page it came from. */
   .rules-banner, .ladder-note, .provenance-flag { break-inside: avoid; }
+  /* Including the half of the banner a reader opens, which paper has no way to open:
+   * what each rule means, and which config keys set it. `content-visibility` and not
+   * `display`, for the reason the matches note above gives -- a closed `<details>`
+   * hides its content through `::details-content`, and nothing inside it overrides
+   * that. Measured on real paper, printing the demo overview and reading the sheets
+   * back: with these two lines the five explanations and the advisory are on sheet one
+   * and "What these mean" is on none of the five sheets; with them deleted, not one of
+   * those sentences is printed anywhere and the instruction to open them is. Scoped to
+   * this one disclosure, never to `details`: the same declaration across the match
+   * cards prints all 56 of them and takes #/matches from 5 sheets to 30. */
+  .rules-more::details-content { content-visibility: visible; }
+  .rules-more > summary { display: none; }
   #rejected {
     border: 2px solid var(--critical);
     border-radius: 6px;

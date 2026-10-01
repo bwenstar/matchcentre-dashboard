@@ -26,6 +26,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .scope import choices, in_words
+from .slugs import did_you_mean, nearest
+
 __all__ = ["Slot", "SetRule", "MatchFormat", "SET_RULES", "FORMATS",
            "set_rule", "match_format", "from_rows", "completed", "set_winner",
            "FormatError"]
@@ -52,6 +55,19 @@ class Slot:
     def discipline(self) -> str:
         return "doubles" if self.doubles else "singles"
 
+    @property
+    def players(self) -> int:
+        """How many names a rubber in this slot is played by, per side.
+
+        Asked by the validator, which complains when a card carries some other
+        number, and by the Share column, which is a partition of a team's games and
+        so divides a rubber's games by the people who won them together. Those two
+        were separately spelt ``2 if doubles else 1`` and the column's divisor is the
+        thing they have to agree on: a doubles rubber read as singles credits one
+        player twice what they won.
+        """
+        return 2 if self.doubles else 1
+
 
 @dataclass(frozen=True, slots=True)
 class SetRule:
@@ -67,11 +83,6 @@ class SetRule:
     games_to_win: int
     win_by: int
     max_games: int | None
-
-    @property
-    def max_games_per_set(self) -> int:
-        """The most games one side can win in a set, for forfeit pricing."""
-        return self.max_games if self.max_games is not None else self.games_to_win
 
     def describe(self) -> str:
         if self.max_games == self.games_to_win:
@@ -117,16 +128,33 @@ class MatchFormat:
         raise FormatError(f"no slot {key!r} in format {self.name}")
 
     @property
-    def max_games_per_match(self) -> int:
-        """Every game one side could possibly win. Prices a forfeit."""
-        return len(self.slots) * self.set_rule.max_games_per_set
+    def forfeit_worth(self) -> tuple[int, int]:
+        """``(sets, games)`` a whole-match forfeit gives the side that came.
+
+        Every rubber of the format, each a love set: 4 sets and 24 games over four
+        rubbers first to 6, with or without a tiebreak, which is only played at
+        6-all. The sets are what a sets-won scheme, ``rubbers``, pays such a
+        forfeit, and the games what ``forfeit_award = "full-games"`` would, which
+        no config key sets: the ladder takes a forfeit's games from its rows. The
+        reader and validate hold a TOTAL row that totals the award to these, so
+        what a card may print for a forfeit and what the ladder pays where it
+        pays the award are one reckoning.
+        """
+        return len(self.slots), len(self.slots) * self.set_rule.games_to_win
 
     def with_set_rule(self, rule: SetRule) -> MatchFormat:
         return MatchFormat(name=self.name, slots=self.slots, set_rule=rule,
                            min_sets_for_result=self.min_sets_for_result)
 
-    def describe(self) -> str:
-        shape = ", ".join(slot.label for slot in self.slots)
+    def describe(self, sentence: bool = False) -> str:
+        """``Doubles 1, Singles 1, Doubles 2 (first to 6)``, the card's rows in order.
+
+        That is a field's value, the report's ``format`` line and the page's, as
+        scoring's ``win 4, draw 3, loss 2`` is. A note that puts the shape in a
+        sentence asks for *sentence*, and the rows are listed as ``a, b and c``.
+        """
+        labels = [slot.label for slot in self.slots]
+        shape = in_words(labels) if sentence else ", ".join(labels)
         return f"{shape} ({self.set_rule.describe()})"
 
 
@@ -200,8 +228,8 @@ def set_rule(name: str) -> SetRule:
         return SET_RULES[name]
     except KeyError:
         raise FormatError(
-            f"unknown set rule {name!r}; known: {', '.join(sorted(SET_RULES))}"
-        ) from None
+            f"set rule \"{name}\" is not {choices(sorted(SET_RULES))}."
+            f"{did_you_mean(nearest(name, SET_RULES))}") from None
 
 
 def match_format(name: str, *, rule: SetRule | None = None,
@@ -210,8 +238,8 @@ def match_format(name: str, *, rule: SetRule | None = None,
         base = FORMATS[name]
     except KeyError:
         raise FormatError(
-            f"unknown match format {name!r}; known: {', '.join(sorted(FORMATS))}"
-        ) from None
+            f"match format \"{name}\" is not {choices(sorted(FORMATS))}."
+            f"{did_you_mean(nearest(name, FORMATS))}") from None
     return MatchFormat(
         name=base.name,
         slots=base.slots,
@@ -235,8 +263,10 @@ def from_slot_spec(spec: object, *, name: str | None = None,
             raise FormatError(
                 f"slot {entry!r} is neither 'singles' nor 'doubles'")
     slots = _slots("".join(letters))
+    # Named as from_rows names a card of the same shape, so a club that pins the
+    # slots its cards already print is not told of a second name for the shape.
     return MatchFormat(
-        name=name or "-".join(slot.key for slot in slots),
+        name=name or shape_name(slots) or "-".join(slot.key for slot in slots),
         slots=slots,
         set_rule=rule or SET_RULES[DEFAULT_SET_RULE],
         min_sets_for_result=min_sets_for_result or _default_minimum(len(slots)),
@@ -255,16 +285,27 @@ def from_rows(doubles_flags: object, *, rule: SetRule | None = None,
     flags = list(doubles_flags)
     if not flags:
         raise FormatError("no set rows: cannot tell what format this card is")
-    spec = "".join("d" if flag else "s" for flag in flags)
-    slots = _slots(spec)
-    name = next((known for known, known_spec in _FORMAT_SPECS.items()
-                 if known_spec == spec), "-".join(s.key for s in slots))
+    slots = _slots("".join("d" if flag else "s" for flag in flags))
+    name = shape_name(slots) or "-".join(s.key for s in slots)
     return MatchFormat(
         name=name,
         slots=slots,
         set_rule=rule or SET_RULES[DEFAULT_SET_RULE],
-        min_sets_for_result=min_sets_for_result or _default_minimum(len(spec)),
+        min_sets_for_result=min_sets_for_result or _default_minimum(len(slots)),
     )
+
+
+def shape_name(slots: object) -> str | None:
+    """The name this module has for a shape, or ``None`` for one it has none for.
+
+    One rule for :func:`from_rows`, which names a card's shape, for
+    :func:`from_slot_spec`, which names a declared one, and for the config
+    writer, which offers ``format = <name>`` only where there is a name: a pattern
+    such as ``d1-d2-s1`` is not one, and :func:`match_format` refuses it.
+    """
+    spec = "".join("d" if slot.doubles else "s" for slot in slots)
+    return next((known for known, known_spec in _FORMAT_SPECS.items()
+                 if known_spec == spec), None)
 
 
 # --- set arithmetic ---------------------------------------------------------

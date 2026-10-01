@@ -33,7 +33,6 @@ ladder off and one that is too large pads the picture with empty background.
 
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 import subprocess
@@ -42,6 +41,18 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    # The only things this tool imports from the project, and the reason it imports
+    # anything at all: `--version` has to answer with the same line the other three
+    # commands answer with, the browsers it looked for are listed as the other
+    # tools list, and its arguments are refused as theirs are. Everything else here
+    # is deliberately run as a subprocess, so that what is photographed is what a
+    # club runs.
+    sys.path.insert(0, str(ROOT))
+
+from matchcentre import version_line                          # noqa: E402
+from matchcentre.cli import Parser                            # noqa: E402
+from matchcentre.scope import in_words                        # noqa: E402
 
 # Fixed so the season, and therefore every number in every image, is the same
 # season next time. The date is pinned for the same reason: it is printed in the
@@ -77,10 +88,7 @@ VIEWS: tuple[tuple[str, str, int, str], ...] = (
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
-        prog="tools/screenshots.py",
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = Parser(prog="tools/screenshots.py", description=__doc__)
     ap.add_argument("--out", type=Path, default=ROOT / "docs" / "screenshots",
                     help="where to write the images (default docs/screenshots)")
     ap.add_argument("--browser", default=None, metavar="PATH",
@@ -90,12 +98,14 @@ def main(argv: list[str] | None = None) -> int:
                     help=f"window width in pixels (default {WIDTH})")
     ap.add_argument("--keep", action="store_true",
                     help="leave the built demo site in place and say where")
+    ap.add_argument("--version", action="version", version=version_line(),
+                    help="print this build and the Python running it, then stop")
     args = ap.parse_args(argv)
 
     browser = args.browser or _find_browser()
     if not browser:
         print("No browser found to photograph the dashboard with.", file=sys.stderr)
-        print(f"  Looked for: {', '.join(BROWSERS)}", file=sys.stderr)
+        print(f"  Looked for: {in_words(BROWSERS)}", file=sys.stderr)
         print("  Install one, or pass --browser /path/to/it. Nothing else in "
               "this project needs a browser;", file=sys.stderr)
         print("  this tool only writes the README's pictures.", file=sys.stderr)

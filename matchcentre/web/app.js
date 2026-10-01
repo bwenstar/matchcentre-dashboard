@@ -44,10 +44,15 @@
 
 /* ============================================================== utilities == */
 
-/* Bumped by export.py when a key changes meaning. Checked rather than assumed, so
- * a dashboard opened beside an older or newer season.json says so instead of
- * rendering blanks. */
-var SEASON_FORMAT = 1;
+/* Bumped by export.py when a key changes meaning, or when this page comes to need a
+ * key an older document lacks. Checked rather than assumed, so a dashboard opened
+ * beside an older or newer season.json says so instead of rendering blanks. 2 is the
+ * first format whose matches carry counts_as_played, 3 the first whose cards, fixtures
+ * and rounds carry the key this page finds a card by, 4 the first whose rounds say
+ * whether the build read their label as a number. A key this page of format 4 reads
+ * and an older build of it did not write, meta.regular_fixtures, it prints as
+ * unknown, a dash through num(), rather than bumping the format a second time. */
+var SEASON_FORMAT = 4;
 
 /* How many categorical hues styles.css names. Read, not chosen, here: the series
  * ramp is used for single-series charts and legend keys. Team hues are not taken
@@ -156,7 +161,20 @@ function signed(v, digits) {
  * one way — see halfUp() above. */
 function pct(v) { return v === null || v === undefined ? '—' : num(v, 1) + '%'; }
 
+/* A share of a team's games, which is a half whenever a doubles rubber is in it.
+ *
+ * One decimal place only when there is one to print: the column is mostly whole
+ * numbers, and "18.0 of 70" reads as a measurement of something where "18 of 70"
+ * reads as the count it is. Goes through num() like every other figure on the
+ * page, so it rounds the way the Python does. */
+function shareNum(v) {
+  if (v === null || v === undefined) return '—';
+  return num(v, Number(v) === Math.round(Number(v)) ? 0 : 1);
+}
+
 function plural(n, one, many) { return n === 1 ? one : (many || one + 's'); }
+
+function upperFirst(text) { return text.charAt(0).toUpperCase() + text.slice(1); }
 
 function longDate(iso) {
   if (!iso) return '';
@@ -168,6 +186,17 @@ function longDate(iso) {
                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   var days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   return days[d.getDay()] + ' ' + d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear();
+}
+
+/* One line of parts, joined the way the page joins them, with an absent part dropped
+ * rather than joined. A card whose date did not read is filed undated by the weekday
+ * it prints, and gluing its empty date to a separator printed "Round 1 ·  · match
+ * #2000001", which reads as something that failed to load. Every line that can be
+ * short a part comes through here, so that there is one rule for it and not a copy
+ * per line.
+ */
+function dotted(parts) {
+  return parts.filter(function (part) { return !!part; }).join(' · ');
 }
 
 function niceMax(v) {
@@ -286,7 +315,28 @@ function luminance(hex) {
   return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 }
 
-function inkOn(hex) { return luminance(hex) > 0.42 ? '#0b0b0b' : '#ffffff'; }
+/* Ink for a number set inside a filled bar or a heat cell. The fill can be any
+ * colour — a diverging pole, a step of the ramp, or a hue generated at runtime
+ * from a team's slug — so the choice has to hold for every luminance, not for the
+ * palette as it stands today.
+ *
+ * Both constants are forced, and the arithmetic is short enough to state. Ink
+ * this dark gives (L + 0.05) / 0.05 against a fill of luminance L, so it needs
+ * L >= 0.175 to reach 4.5:1; white gives 1.05 / (L + 0.05), so it needs
+ * L <= 0.1833. INK_CUT has to sit in that window, which is why it is not the 0.42
+ * it used to be: at 0.42, every fill between 0.1833 and 0.42 got white text, and
+ * the third step of the ramp came out at 2.50:1 under a 600-weight number.
+ *
+ * INK_DARK has to be pure black for the window to exist at all. At #0b0b0b the
+ * dark branch does not reach 4.5:1 until L >= 0.190, past where the white branch
+ * has already fallen below it — no threshold works, so the near-black used
+ * everywhere else in the page cannot be used here. The two branches meet at
+ * 4.58:1, which is the best any black-or-white rule can do. */
+var INK_CUT = 0.179;
+var INK_DARK = '#000000';
+var INK_LIGHT = '#ffffff';
+
+function inkOn(hex) { return luminance(hex) > INK_CUT ? INK_DARK : INK_LIGHT; }
 
 /* --- generated team hues ---------------------------------------------------
  *
@@ -475,7 +525,7 @@ var PLAYER_SORT = { key: 'name', dir: 1 };
 
 function indexSeason(season) {
   var idx = {
-    teamBySlug: {}, playerBySlug: {}, matchById: {},
+    teamBySlug: {}, playerBySlug: {}, matchByKey: {},
     teamsOrdered: [], ladder: [], slots: []
   };
   var teams = (season.teams || []).slice();
@@ -490,7 +540,10 @@ function indexSeason(season) {
     return String(a.slug) < String(b.slug) ? -1 : String(a.slug) > String(b.slug) ? 1 : 0;
   });
   (season.players || []).forEach(function (p) { idx.playerBySlug[p.slug] = p; });
-  (season.matches || []).forEach(function (m) { idx.matchById[m.id] = m; });
+  // By the key the exporter gives each card, which no other card has. Not by the
+  // printed match id: a card may print none and two may print one, and an index by
+  // it held one card per id, so the page showed one card twice and another nowhere.
+  (season.matches || []).forEach(function (m) { idx.matchByKey[m.key] = m; });
   idx.ladder = teams.slice().sort(function (a, b) {
     if (a.position !== b.position) return (a.position || 99) - (b.position || 99);
     return String(a.name).localeCompare(String(b.name));
@@ -598,9 +651,79 @@ function h2hFor(a, b) {
     won: low ? rec.wins_low : rec.wins_high,
     lost: low ? rec.wins_high : rec.wins_low,
     drawn: rec.draws,
+    /* Meetings that were played and decided nothing: in `played` and in the games,
+     * in neither win column. Defaulted here rather than at each reader, so a
+     * document exported before the field existed reads as none of them. */
+    undecided: rec.undecided || 0,
+    /* Meetings that were finals: in every count above, and in none of the ladder's
+     * figures. Carried through here for the same reason as `undecided` -- this is
+     * the one shape a renderer sees, so a field left out of it is a field no
+     * caption can explain. */
+    finals: rec.finals || 0,
     gamesFor: low ? rec.games_low : rec.games_high,
     gamesAgainst: low ? rec.games_high : rec.games_low
   };
+}
+
+/* Whether any of these pairings has a meeting that reached no result, and so
+ * whether the table drawn from them owes its reader a sentence: the games of such a
+ * night are in the cells and cannot be in a W–L beside them.
+ *
+ * Given the records rather than reading the season, so the grid can ask about every
+ * pairing and a team's page about its own -- one table, one answer, no column of
+ * dashes on the page of a team whose every night reached a result. `> 0` rather
+ * than truthiness, so an older document leaves the sentence out. */
+function anyUndecidedMeetings(records) {
+  return records.some(function (rec) { return rec && rec.undecided > 0; });
+}
+
+/* How many of these pairings' meetings were finals rounds.
+ *
+ * Summed rather than answered yes-or-no, because the number is what makes the
+ * sentence checkable: "one meeting below was a final" sends a club to one row of the
+ * Matches list, "some were finals" sends them through the whole season. `|| 0` for
+ * the same reason as `undecided` above -- a document exported before the field
+ * existed reads as none of them rather than as NaN.
+ *
+ * Each record must appear once. The grid holds two cells per pairing and would
+ * otherwise count every final twice. */
+function finalsMeetings(records) {
+  return records.reduce(function (n, rec) {
+    return n + (rec ? rec.finals || 0 : 0);
+  }, 0);
+}
+
+/* Whether the ruleset in force separates two level teams on their meetings. Every
+ * preset here does; a hand-written `ladder_by` need not, and where it does not, the
+ * difference below is a curiosity rather than something that moved a position. */
+function laddersTiebreakIsHeadToHead() {
+  return (rules().ladder_by || []).indexOf('head_to_head') >= 0;
+}
+
+/* The other half of what a pairwise record owes its reader, in one sentence shared
+ * by the grid and by a team's own page -- for the reason the run report and the
+ * rules banner share theirs: they are the same fact about the same pairings, and
+ * worded twice is how they come to disagree.
+ *
+ * The fact is that finals are counted here and not in the ladder (F11). Both are
+ * right about their own question -- a semi-final is a night two teams met, and is
+ * not a round of the season being ranked -- but it is not a difference a reader can
+ * be expected to guess, and it is sharp: two teams can be level on this table and
+ * first and last on the ladder above it.
+ *
+ * Louder where the ruleset actually breaks ties on head-to-head, because there it
+ * is not a curiosity. It decided a ladder position, and a club checking that
+ * position against this table is checking it against the wrong matches. */
+function finalsMeetingsNote(count) {
+  if (!count) return '';
+  var text = ' ' + (count === 1 ? 'One meeting below was a final'
+                                : count + ' meetings below were finals') +
+    ', counted here and not in the ladder, which ranks the regular season only.';
+  if (laddersTiebreakIsHeadToHead()) {
+    text += ' So where the ladder separates two level teams on head-to-head, it ' +
+      'does so on their regular-season meetings, not on the record shown here.';
+  }
+  return text;
 }
 
 function matchesOfTeam(slug) {
@@ -615,23 +738,35 @@ function byRound(a, b) {
   return String(a.id).localeCompare(String(b.id));
 }
 
-/* Rounds sort 1, 2, 10, then anything non-numeric — the same three-part key
- * competition.round_sort_key uses, because a finals label ("F", "SF", "GF") is
- * not a number and must not sort as one (F11). */
-function roundSortKey(label) {
-  var s = String(label === null || label === undefined ? '' : label).replace(/^\s+|\s+$/g, '');
-  if (/^[0-9]+$/.test(s)) return [0, parseInt(s, 10), ''];
-  return [1, 0, s.toLowerCase()];
+/* A round's place in the season: its index in S.rounds, which the exporter writes
+ * in competition.round_sort_key's order -- 1, 2, 10, then any other name, then the
+ * finals as a series runs, SF before GF (4.37), and one the draw types under a name
+ * of its own where the draw puts it (4.71). The page keeps no copy of that
+ * rule. Every round a document holds is in the list; a label that is not goes
+ * after all of them. */
+function roundPosition(label) {
+  var rounds = (S && S.rounds) || [];
+  for (var i = 0; i < rounds.length; i++) {
+    if (rounds[i].number === String(label)) return i;
+  }
+  return rounds.length;
 }
 
 function compareRounds(a, b) {
-  var ka = roundSortKey(a), kb = roundSortKey(b);
-  if (ka[0] !== kb[0]) return ka[0] - kb[0];
-  if (ka[1] !== kb[1]) return ka[1] - kb[1];
-  return ka[2] < kb[2] ? -1 : ka[2] > kb[2] ? 1 : 0;
+  return roundPosition(a) - roundPosition(b);
 }
 
-function isNumericRound(label) { return roundSortKey(label)[0] === 0; }
+/* Whether the build read a round's label as a number, so that it is titled
+ * "Round 3" and "R3". Asked of the document: export.py writes the answer of
+ * competition.round_number, the rule the build orders and warns by, as the round's
+ * `numbered` (4.215). The page keeps no test of its own, which took a round printed
+ * in fullwidth digits, a number to the build, for a name. Strictly `true`, as
+ * countsAsPlayed is, so a label no round has, and every round of a document older
+ * than the field, is titled as printed. */
+function isNumericRound(label) {
+  var round = ((S && S.rounds) || [])[roundPosition(label)];
+  return !!round && round.numbered === true;
+}
 
 /* "R3" for a numbered round, "SF" for a finals one — never "RSF". */
 function roundTick(label) {
@@ -642,26 +777,40 @@ function roundTitle(label) {
   return isNumericRound(label) ? 'Round ' + label : String(label);
 }
 
-/* Whether a match happened, and so has numbers worth counting. Mirrors
- * Match.counts_as_played in model.py, and must keep mirroring it: the aggregates
- * in season.json are computed there, so anything this page counts for itself has
- * to skip the same matches or the tiles disagree with the ladder beside them.
+/* Whether a match happened, and so has numbers worth counting. Asked of the
+ * document: Match.counts_as_played in model.py answers it, export.py writes the
+ * answer on every match, and this reads it rather than keeping a list of statuses.
+ * The aggregates in season.json are computed from that answer, so anything this
+ * page counts for itself has to skip the same matches or the tiles disagree with
+ * the ladder beside them.
  *
  * Part of a cancelled night's card is often filled in before play stops — a
  * washout can leave two and a half rubbers scored — and those games belong
- * nowhere. */
+ * nowhere.
+ *
+ * Strictly `true`. Only a document older than the field lacks it, and the data
+ * health section already tells that one to rebuild. Counting nothing there would
+ * still be a claim with nothing behind it, every card saying it counts for
+ * nothing when all the page knows is that the document does not say, so render()
+ * draws no view of such a document at all (4.68). */
 function countsAsPlayed(match) {
-  var status = match && match.status;
-  return status !== 'bye' && status !== 'cancelled' && status !== 'unplayed';
+  return !!match && match.counts_as_played === true;
 }
 
 /* Every set a player appeared in, derived from the match list — the document
  * keeps per-player aggregates but not their per-set trail, and the player view
- * needs the trail to show results rather than only totals. */
+ * needs the trail to show results rather than only totals.
+ *
+ * Which means it has to skip what the aggregates skipped, and `not_credited` is the
+ * document's word for that: a card exported twice names the same people as its
+ * twin, so reading both lists their night twice under a Matches tile that counts it
+ * once. Asked as one field rather than reason by reason — a copy, a clash and a
+ * night named two ways all credit nobody — because a list of reasons here silently
+ * keeps whichever reason is added next. */
 function setsOfPlayer(slug) {
   var out = [];
   (S.matches || []).slice().sort(byRound).forEach(function (m) {
-    if (!countsAsPlayed(m)) return;
+    if (!countsAsPlayed(m) || m.not_credited) return;
     (m.sets || []).forEach(function (st) {
       var side = null;
       if ((st.home_players || []).indexOf(slug) >= 0) side = 'home';
@@ -843,19 +992,7 @@ function chartCard(opts) {
   var plot = el('div', { class: 'plot' });
   var tableWrap = el('div', { class: 'table-wrap', hidden: true });
 
-  if (opts.table) {
-    var toggle = el('button', {
-      class: 'btn table-toggle', type: 'button', 'aria-expanded': 'false',
-      text: 'Values'
-    });
-    toggle.addEventListener('click', function () {
-      var open = tableWrap.hidden;
-      tableWrap.hidden = !open;
-      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-      toggle.textContent = open ? 'Hide values' : 'Values';
-    });
-    cap.appendChild(toggle);
-  }
+  if (opts.table) cap.appendChild(tableToggle(tableWrap, tableWrap, 'Values', 'Hide values'));
   fig.appendChild(cap);
   if (opts.legend) fig.appendChild(opts.legend);
   fig.appendChild(plot);
@@ -865,6 +1002,26 @@ function chartCard(opts) {
 
   if (opts.draw) CHARTS.push({ figure: fig, plot: plot, draw: opts.draw });
   return fig;
+}
+
+/* The button that puts on the screen a table kept off it until it is asked for: a
+ * chart's values, and the matches page's table of every rubber. `box` is what is
+ * hidden and `wrap` the scrolling wrapper inside it, which are one element for a
+ * chart and two for a table that sits in a card of its own. */
+function tableToggle(box, wrap, shut, open) {
+  var toggle = el('button', {
+    class: 'btn table-toggle', type: 'button', 'aria-expanded': 'false', text: shut
+  });
+  toggle.addEventListener('click', function () {
+    var show = box.hidden;
+    box.hidden = !show;
+    toggle.setAttribute('aria-expanded', show ? 'true' : 'false');
+    toggle.textContent = show ? open : shut;
+    // A hidden box has no width, so it measured as fitting and lost its tab
+    // stop. Now that it is on the screen, ask again.
+    markScrollRegion(wrap);
+  });
+  return toggle;
 }
 
 function legendBar(items, onToggle) {
@@ -895,32 +1052,107 @@ function emptyPlot(plot, message) {
   plot.appendChild(el('p', { class: 'empty', text: message }));
 }
 
+/* The words behind the abbreviated headings, for the columns more than one table
+ * prints. Diff is a column on seven of them, GF and GA on four, Sets on three;
+ * worded at each site they drift, and then a reader comparing a team's page with the
+ * ladder is comparing two sentences instead of one column.
+ *
+ * Only where it really is the same column. A dictionary keyed by the letters would
+ * have to pick one meaning each for `D`, which is a drawn match on the ladder and a
+ * doubles rating on a team page, and for `W–L`, which is sets on a player's row and
+ * meetings on a team's -- so those two are worded where they are used. The sortable
+ * players table keeps its own list (PLAYER_COLS) for the same reason it has one at
+ * all: its columns carry a sort key and a type as well. What is asked of it is that
+ * it says the same thing, not that it says it in the same literal. */
+var COL = {
+  matchesPlayed: { label: 'P', title: 'Matches played' },
+  matchesWon: { label: 'W', title: 'Matches won' },
+  matchesLost: { label: 'L', title: 'Matches lost' },
+  matchesDrawn: { label: 'D', title: 'Matches drawn' },
+  gamesFor: { label: 'GF', title: 'Games for' },
+  gamesAgainst: { label: 'GA', title: 'Games against' },
+  gamesDiff: { label: 'Diff', title: 'Games differential' },
+  setsPlayed: { label: 'Sets', title: 'Sets played' },
+  setsWonLost: { label: 'W–L', title: 'Sets won–lost' },
+  meetingsWonLost: { label: 'W–L', title: 'Meetings won–lost' }
+};
+
+/* A heading cell, and the key that prints what its letters stand for.
+ *
+ * `title` puts the words in a hover, and a hover is nothing on a phone, nothing on
+ * the printout pinned to the clubhouse wall, and nothing to a reader arriving by
+ * keyboard, whose tab stop in a sortable table is the button inside the cell. So
+ * every table's caption carries the same words in its own line of text, built from
+ * the same strings the hover uses -- one wording, two places it can be read.
+ *
+ * The rejected alternative was sr-only text in each heading cell, which is read out
+ * by a screen reader and still invisible in print, and would say "Games
+ * differential" once per table for a sighted reader who wanted it too. */
+function headCell(h) {
+  var cell = el('th', { scope: 'col' });
+  if (typeof h === 'object' && h !== null) {
+    if (h.sortable) {
+      cell.className = 'sortable';
+      var btn = el('button', { type: 'button' }, [
+        el('span', { text: h.label }),
+        el('span', { class: 'arrow', text: h.arrow || '' })
+      ]);
+      btn.addEventListener('click', h.onSort);
+      cell.appendChild(btn);
+      if (h.ariaSort) cell.setAttribute('aria-sort', h.ariaSort);
+    } else {
+      cell.textContent = h.label;
+    }
+    if (h.title) cell.setAttribute('title', h.title);
+  } else {
+    cell.textContent = h;
+  }
+  return cell;
+}
+
+function columnKey(head) {
+  var seen = {};
+  var parts = [];
+  head.forEach(function (h) {
+    // A heading that is already its own explanation is left alone: "Team — Team" is
+    // noise, and the match card heads two columns `G` for the two sides' games, which
+    // the key should explain once rather than twice.
+    if (!h || typeof h !== 'object' || !h.title || h.title === h.label) return;
+    var part = h.label + ' — ' + h.title;
+    if (seen[part]) return;
+    seen[part] = true;
+    parts.push(part);
+  });
+  return parts.join(' · ');
+}
+
+/* The sentence and the key are separate elements so the sentence can still be the
+ * table's name where markScrollRegion needs one -- a caption of sentence-then-key
+ * read whole makes a long and strange announcement.
+ *
+ * The export buttons come first in the caption so the float takes its top right
+ * corner, and so a reader arriving by keyboard meets them before the table rather
+ * than after the last of 24 rows. A table that exports gets a caption even with
+ * nothing to say, which is why the emptiness test asks about all three. */
+function tableCaption(sentence, head, tools) {
+  var key = columnKey(head);
+  if (!sentence && !key && !tools) return null;
+  var cap = el('caption');
+  if (tools) cap.appendChild(tools);
+  if (sentence) cap.appendChild(el('span', { class: 'caption-text', text: sentence }));
+  if (key) cap.appendChild(el('span', { class: 'table-key', text: key }));
+  return cap;
+}
+
 function table(head, rows, opts) {
   var o = opts || {};
   var t = el('table');
-  if (o.caption) t.appendChild(el('caption', { text: o.caption }));
+  var cap = tableCaption(o.caption, head, o.csv ? tableTools(t, o.csv) : null);
+  if (cap) t.appendChild(cap);
   var thead = el('thead');
   var tr = el('tr');
   head.forEach(function (h) {
-    var cell = el('th', { scope: 'col' });
-    if (typeof h === 'object' && h !== null) {
-      if (h.sortable) {
-        cell.className = 'sortable';
-        var btn = el('button', { type: 'button' }, [
-          el('span', { text: h.label }),
-          el('span', { class: 'arrow', text: h.arrow || '' })
-        ]);
-        btn.addEventListener('click', h.onSort);
-        cell.appendChild(btn);
-        if (h.ariaSort) cell.setAttribute('aria-sort', h.ariaSort);
-      } else {
-        cell.textContent = h.label;
-      }
-      if (h.title) cell.setAttribute('title', h.title);
-    } else {
-      cell.textContent = h;
-    }
-    tr.appendChild(cell);
+    tr.appendChild(headCell(h));
   });
   thead.appendChild(tr);
   t.appendChild(thead);
@@ -954,6 +1186,274 @@ function table(head, rows, opts) {
   return t;
 }
 
+/* ======================================================= a table off the page == */
+
+/* A club that wants the ladder in a spreadsheet, or the players table in an email,
+ * had no way to get either: no CSV, no clipboard, nothing but selecting 24 rows with
+ * a mouse and hoping the columns survive. Two buttons in each table's caption now,
+ * Copy and CSV, and they read the table out of the document rather than rebuilding it
+ * from the season -- so what leaves the page is what is on it, in the order the reader
+ * sorted it into, and there is no second copy of the arithmetic to drift.
+ *
+ * What a spreadsheet makes of this page's own characters, measured rather than
+ * assumed: the file was written, opened with LibreOffice, saved, and the saved
+ * document read back for `office:value-type`, which is the spreadsheet's own answer to
+ * "is this a number".
+ *
+ *   as printed      what the spreadsheet made of it       so
+ *   −66  U+2212     text                                  translated to -66
+ *   -66             the number -66
+ *   —    U+2014     text                                  an empty cell instead
+ *   (empty)         an empty cell
+ *   57.1%           text, or 0.571 shown as 57.1% if the  left as printed
+ *                   importer is detecting special numbers
+ *   6–7  U+2013     text either way                        left as printed
+ *   =SUM(1+1)       the number 2, with the formula still   a space in front
+ *                   attached: the spreadsheet ran it
+ *
+ * That last row is why exportCell puts a space in front of a cell that opens with
+ * `=`, `+`, `-` or `@` and is not a number. Player names come off somebody's
+ * scorecard and team names out of a config file, so a cell that reads as a formula is
+ * a cell somebody else wrote. Measured, a leading space leaves `=SUM(1+1)` as text
+ * and leaves `+80` and `5.47` numbers; the apostrophe the same advice usually
+ * recommends ends up inside the cell, visible, part of the name.
+ *
+ * Copy sends tab-separated text, CSV sends commas: tabs are what a spreadsheet splits
+ * pasted text on, and quoting `"Cordwainer, Bartholomew"` for a paste would put the
+ * quotes on the screen. The CSV leads with a byte-order mark, which LibreOffice was
+ * measured to ignore and which is what Excel reads UTF-8 by.
+ *
+ * The headings go out as the reader sees them -- `GF`, not `Games for`. Spelling them
+ * out was rejected: it makes the file disagree with the screen, and the abbreviations
+ * are already spelled out in the caption directly above these buttons. */
+var NO_VALUE = '—';
+var SAID_MS = 4000;
+// A blob URL held for ever is a copy of the table held for ever, so it is released.
+// The delay is insurance, not a fix: Chrome here was measured downloading the file
+// whether the URL was revoked in the same turn as the click or ten seconds later, so
+// the honest reason for the timer is the browsers that cannot be measured on this
+// machine, where the click is said to only start the read. Ten seconds is long after
+// any such read and long before a reader closes the tab.
+var REVOKE_MS = 10000;
+
+/* The cell as a reader reads it. The sort arrow is a span of its own inside the
+ * heading's button, so it comes out here the way it is already kept out of the
+ * accessible name -- a column called `Player▲` is a column nothing can look up.
+ *
+ * A part of a cell built from the season can say what it leaves as, in
+ * `data-export`, where its text alone would say it wrongly. The ladder's Form run is
+ * five badges with nothing between them, so its text is `LLLDW`: measured, one
+ * column when LibreOffice splits it on spaces, where `L L L D W` is five. The value
+ * replaces the part on the copy and before the text is read, so it meets the dash
+ * rule and the formula guard below exactly as a value on the screen does.
+ * `innerText` was the alternative and is an answer that depends on layout: `L W W W
+ * W` on the live cell, and `LWWWW` both on this copy and with the table hidden. */
+function cellText(cell) {
+  var copy = cell.cloneNode(true);
+  Array.prototype.forEach.call(copy.querySelectorAll('.arrow'), function (n) {
+    n.parentNode.removeChild(n);
+  });
+  Array.prototype.forEach.call(copy.querySelectorAll('[data-export]'), function (n) {
+    n.parentNode.replaceChild(document.createTextNode(n.getAttribute('data-export')), n);
+  });
+  return (copy.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function exportCell(text) {
+  if (text === NO_VALUE) return '';
+  var out = text.replace(/−/g, '-');
+  if (/^[=+\-@]/.test(out) && !/^[+\-]?[0-9]/.test(out)) out = ' ' + out;
+  return out;
+}
+
+function exportRows(t) {
+  var rows = [];
+  var head = [];
+  Array.prototype.forEach.call(t.querySelectorAll('thead th'), function (th) {
+    head.push(cellText(th));
+  });
+  if (head.length) rows.push(head);
+  Array.prototype.forEach.call(t.querySelectorAll('tbody tr'), function (tr) {
+    var row = [];
+    Array.prototype.forEach.call(tr.children, function (cell) {
+      row.push(cellText(cell));
+    });
+    rows.push(row);
+  });
+  return rows;
+}
+
+function tableText(t, sep) {
+  var csv = sep === ',';
+  var eol = csv ? '\r\n' : '\n';
+  return exportRows(t).map(function (row) {
+    return row.map(function (cell) {
+      var out = exportCell(cell);
+      if (!csv) return out;
+      return /[",\r\n]/.test(out) ? '"' + out.replace(/"/g, '""') + '"' : out;
+    }).join(sep);
+  }).join(eol) + eol;
+}
+
+function tableCsv(t) { return '\ufeff' + tableText(t, ','); }
+
+function tableTsv(t) { return tableText(t, '\t'); }
+
+/* The competition in front of the table's own name, because a folder of downloads is
+ * where these land and `ladder.csv` there is a file about nothing in particular. And
+ * the season between them in an archive of several, because measured on five seasons
+ * of one division every one of them downloaded its ladder as
+ * `wednesday-division-3-ladder.csv`: the competition's label and the season's label
+ * were the same in all five, so five files meant for one folder had one name between
+ * them. The key rather than the season's label for that reason -- the key is the
+ * season's folder, and two seasons cannot share one. */
+function exportFileName(name) {
+  var stem = slugifyName([meta().label, seasonKey(), name].filter(function (s) {
+    return !!s;
+  }).join(' '));
+  return (stem || 'table') + '.csv';
+}
+
+function downloadText(name, text, type) {
+  var url = URL.createObjectURL(new Blob([text], { type: type }));
+  // In the document rather than detached: a detached link is enough for Chrome,
+  // measured, and was not always enough for Firefox.
+  var a = el('a', { href: url, download: name });
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, REVOKE_MS);
+}
+
+/* Three routes to the clipboard, in the order of how much they are allowed to do.
+ * navigator.clipboard is defined on a file:// page -- measured, because a page with no
+ * origin is exactly where a permission-gated API would be expected to be missing --
+ * and execCommand is behind it for the browsers that do not have it and for the ones
+ * that refuse. A refusal that says nothing is a button that looks broken, so the last
+ * word is the reader's: the CSV button does not need the clipboard at all. */
+function copyText(text, say) {
+  function fallback() {
+    var box = el('textarea', { 'aria-hidden': 'true', style: {
+      position: 'fixed', top: '0', left: '-2000px'
+    } });
+    box.value = text;
+    document.body.appendChild(box);
+    box.select();
+    var done = false;
+    try { done = document.execCommand('copy'); } catch (e) { done = false; }
+    document.body.removeChild(box);
+    say(done ? 'Copied' : 'Nothing was copied — the CSV button still works');
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () { say('Copied'); }, fallback);
+  } else {
+    fallback();
+  }
+}
+
+/* The visible words are `Copy` and `CSV` for the room they take in a caption; the
+ * accessible name carries the table's own name, because a page with 21 tables on it is
+ * a page with 21 buttons called Copy, and a list of them is no use to anybody. */
+function tableTools(t, name) {
+  var said = el('span', { class: 'tools-said', role: 'status', 'aria-live': 'polite' });
+  var timer = null;
+  function say(words) {
+    said.textContent = words;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(function () { said.textContent = ''; }, SAID_MS);
+  }
+  var copy = el('button', {
+    class: 'btn', type: 'button', text: 'Copy',
+    'aria-label': 'Copy ' + name + ' to the clipboard'
+  });
+  copy.addEventListener('click', function () { copyText(tableTsv(t), say); });
+  var csv = el('button', {
+    class: 'btn', type: 'button', text: 'CSV',
+    'aria-label': 'Download ' + name + ' as CSV'
+  });
+  csv.addEventListener('click', function () {
+    downloadText(exportFileName(name), tableCsv(t), 'text/csv;charset=utf-8');
+  });
+  return el('div', { class: 'table-tools' }, [copy, csv, said]);
+}
+
+/* Thirteen tables on this page are built inside a `.table-wrap`, which styles.css
+ * makes `overflow-x: auto` so a table wider than the screen scrolls sideways
+ * instead of pushing the page out. On a phone that is most of them.
+ *
+ * A div that scrolls cannot be scrolled from a keyboard. There is nothing to focus,
+ * so the arrow keys have nothing to act on, and the columns past the right edge are
+ * not awkward to reach but unreachable -- with nothing on the page saying they are
+ * there. A tab stop on the wrapper fixes that, and creates the second half of the
+ * problem: a focusable div with no name, which a screen reader can only announce as
+ * a div. So it is named in the same breath, and the name is not copy written for the
+ * occasion -- it is the heading of the chart it sits in, or the table's own caption,
+ * both already on the screen. Nothing to keep in step, and what is announced is what
+ * a sighted reader beside them is looking at.
+ *
+ * Only while the table really is too wide. A tab stop in front of a table that fits
+ * is a keystroke that does nothing, and there would be thirteen of them on a wide
+ * screen -- paid for by exactly the reader this is for. Which means measuring, which
+ * means after the view is in the document, since scrollWidth is 0 before that.
+ *
+ * `role="region"` rather than `role="group"`: a region is a landmark, so the table
+ * is in the list a screen reader can jump between, which is the point of the
+ * exercise. It is claimed only with a name, because an unnamed region announces
+ * itself as "region" and nothing else -- a signpost with no writing on it, worse
+ * than no role at all.
+ */
+var REGION_SEQ = 0;
+
+function markScrollRegions() {
+  Array.prototype.forEach.call(document.querySelectorAll('.table-wrap'),
+    markScrollRegion);
+}
+
+function markScrollRegion(wrap) {
+  // One pixel of tolerance: a fractional layout width can round scrollWidth up by
+  // one at some zoom levels, and a tab stop that scrolls nothing is the thing this
+  // is measuring to avoid. A hidden wrapper measures 0 against 0 and falls here,
+  // which is why tableToggle re-marks the one it shows.
+  if (wrap.scrollWidth - wrap.clientWidth < 2) {
+    wrap.removeAttribute('tabindex');
+    wrap.removeAttribute('role');
+    wrap.removeAttribute('aria-labelledby');
+    return;
+  }
+  var name = scrollRegionName(wrap);
+  if (name) {
+    if (!name.id) name.id = 'region-name-' + (++REGION_SEQ);
+    wrap.setAttribute('role', 'region');
+    wrap.setAttribute('aria-labelledby', name.id);
+  }
+  wrap.setAttribute('tabindex', '0');
+}
+
+/* The chart's heading before the table's caption, where a table has both: the
+ * heading is what names this table among the others ("Points average by round"),
+ * while the caption there is a note about the arithmetic, which makes a poor name
+ * and a good sentence.
+ *
+ * The caption's sentence rather than the whole caption, because the caption also
+ * carries the key to the abbreviated headings, and a name ending in "GF — Games for ·
+ * GA — Games against · Diff — Games differential" is a name nobody can listen to.
+ *
+ * There was a third fallback here, naming a caption with no sentence in it after the
+ * whole caption. The export buttons are now the first thing in every caption, and
+ * aria-labelledby reads an element whole, so what that fallback produced was measured
+ * as "CopyCSVM — Matches played · Sets — Sets played · ...". Deleted rather than
+ * guarded: over the five routes not one wrapper ever reached it -- every one is named
+ * by a chart's heading or by a caption sentence -- and the only caption shape that can
+ * reach it is the buttons and a key, whose words the paragraph above already refuses
+ * as a name. A wrapper with neither keeps its tab stop and is left with no role, which
+ * is what markScrollRegion does with an unnamed region anyway. */
+function scrollRegionName(wrap) {
+  var figure = wrap.closest('figure');
+  var heading = figure ? figure.querySelector('figcaption h3') : null;
+  if (heading) return heading;
+  return wrap.querySelector('caption .caption-text');
+}
+
 /* =========================================================== chart: hbars == */
 
 /* Horizontal bars in two modes:
@@ -969,7 +1469,8 @@ function hbarCard(opts) {
     title: opts.title,
     sub: opts.sub,
     legend: opts.legend,
-    table: rows.length ? table(opts.tableHead, tableRows, { caption: opts.tableCaption }) : null,
+    table: rows.length ? table(opts.tableHead, tableRows,
+      { caption: opts.tableCaption, csv: opts.tableCsv || opts.title }) : null,
     footer: opts.footer,
     draw: function (plot, width) {
       if (!rows.length) { emptyPlot(plot, opts.empty || 'Nothing to plot yet.'); return; }
@@ -1097,18 +1598,30 @@ function hbarCard(opts) {
             d: barPath(zeroX, barY, w, thick, 4, 'right'), fill: posColor
           }));
         }
-        // Label outside the tip when there is room; never clipped inside a short bar.
+        /* Label outside the tip when there is room; never clipped inside a short bar.
+         *
+         * A dimmed row's number is dimmed with it. Measured on eight rows of `Points
+         * average by team`, where seven are dimmed as context for the one being read:
+         * every value was drawn in `--text-primary` at 600, so the rows held back
+         * still had the loudest numbers on the chart. The gutter is still measured at
+         * FONT_VALUE's 600 — it is a maximum over every row, so measuring the heavier
+         * weight leaves a hair of slack rather than a clipped word.
+         *
+         * Inside a bar the ink stays `inkOn`, which is chosen for contrast against
+         * whatever the bar is filled with; only the weight gives way there. */
         var tw = textWidth(r.valueText, FONT_VALUE);
         var outside = zeroX + w + 6 + tw <= width - 2;
         if (outside) {
           group.appendChild(svg('text', {
-            x: zeroX + w + 6, y: barY + thick / 2 + 4, fill: PAL.text,
-            'font-size': 12, 'font-weight': 600, text: r.valueText
+            x: zeroX + w + 6, y: barY + thick / 2 + 4,
+            fill: r.dim ? PAL.muted : PAL.text,
+            'font-size': 12, 'font-weight': r.dim ? 400 : 600, text: r.valueText
           }));
         } else if (w > tw + 16) {
           group.appendChild(svg('text', {
             x: zeroX + w - 6, y: barY + thick / 2 + 4, fill: inkOn(posColor),
-            'font-size': 12, 'font-weight': 600, 'text-anchor': 'end', text: r.valueText
+            'font-size': 12, 'font-weight': r.dim ? 400 : 600,
+            'text-anchor': 'end', text: r.valueText
           }));
         }
       }
@@ -1158,7 +1671,8 @@ function ladderLineCard(opts) {
   var plotRef = null, widthRef = 0;
   var card = chartCard({
     title: opts.title, sub: opts.sub, legend: legend,
-    table: series.length ? table(tableHead, tableRows, { caption: opts.tableCaption }) : null,
+    table: series.length ? table(tableHead, tableRows,
+      { caption: opts.tableCaption, csv: opts.tableCsv || opts.title }) : null,
     draw: function (plot, width) {
       plotRef = plot; widthRef = width;
       if (!series.length || !xs.length) {
@@ -1331,26 +1845,48 @@ function ladderLineCard(opts) {
 function h2hGridCard() {
   var teams = IDX.teamsOrdered;
   var maxGames = 1;
+  var records = [];
+  /* One entry per pairing, not per cell: the grid draws each pairing twice, once
+   * from each team's side, and a count of finals summed over the cells would be
+   * double. Keyed by the same `h2hKey` the document is. */
+  var pairings = {};
   teams.forEach(function (row) {
     teams.forEach(function (col) {
       if (row.slug === col.slug) return;
       var rec = h2hFor(row.slug, col.slug);
-      if (rec) maxGames = Math.max(maxGames, rec.gamesFor);
+      if (!rec) return;
+      records.push(rec);
+      pairings[h2hKey(row.slug, col.slug)] = rec;
+      maxGames = Math.max(maxGames, rec.gamesFor);
     });
   });
+  var showUndecided = anyUndecidedMeetings(records);
+  var finals = finalsMeetings(Object.keys(pairings).map(function (k) {
+    return pairings[k];
+  }));
 
   var wrap = el('div', { class: 'table-wrap' });
   var t = el('table');
-  t.appendChild(el('caption', {
-    text: 'Games won by the row team against the column team. Blank where the fixture has not been played.'
-  }));
+  /* The column headings are the short names, which is all a grid this wide has room
+   * for, so the key under it is where the full names are written out. */
+  var head = [{ label: 'Team' }].concat(teams.map(function (col) {
+    return { label: col.short || col.name, title: col.name };
+  })).concat([COL.meetingsWonLost]);
+  var caption = 'Games won by the row team against the column team. Blank where the fixture has not been played.';
+  if (showUndecided) {
+    // In the caption rather than only in the cell's hover: a hover is nothing on a
+    // phone and nothing on the printout pinned to the clubhouse wall, and without
+    // this sentence the row does not add up -- the cell counts the night and the
+    // W–L at the end of the row has nowhere to put it.
+    caption += ' A meeting that reached no result shows its games here; the W–L column counts the decided meetings only.';
+  }
+  caption += finalsMeetingsNote(finals);
+  t.appendChild(tableCaption(caption, head));
   var thead = el('thead');
   var hrow = el('tr');
-  hrow.appendChild(el('th', { scope: 'col', text: 'Team' }));
-  teams.forEach(function (col) {
-    hrow.appendChild(el('th', { scope: 'col', title: col.name, text: col.short || col.name }));
+  head.forEach(function (h) {
+    hrow.appendChild(headCell(h));
   });
-  hrow.appendChild(el('th', { scope: 'col', text: 'W–L' }));
   thead.appendChild(hrow);
   t.appendChild(thead);
 
@@ -1384,8 +1920,17 @@ function h2hGridCard() {
       td.style.setProperty('background', fill);
       td.style.setProperty('color', inkOn(fill));
       td.style.setProperty('font-weight', '600');
-      td.setAttribute('title', row.name + ' won ' + rec.gamesFor + ' games, ' +
-        col.name + ' won ' + rec.gamesAgainst);
+      var title = row.name + ' won ' + rec.gamesFor + ' games, ' +
+        col.name + ' won ' + rec.gamesAgainst;
+      if (rec.undecided) {
+        // Of this pairing, not of the table: the games in this cell are the ones
+        // the reader is asking about.
+        title += rec.undecided === rec.played
+          ? ' · no result on the card'
+          : ' · ' + rec.undecided + ' of the ' + rec.played +
+            ' meetings reached no result on the card';
+      }
+      td.setAttribute('title', title);
       tr.appendChild(td);
     });
     tr.appendChild(el('td', { text: w + '–' + l + (d ? '–' + d : '') }));
@@ -1403,7 +1948,9 @@ function h2hGridCard() {
   var fig = el('figure', { class: 'card chart-card' });
   var cap = el('figcaption');
   cap.appendChild(el('h3', { text: 'Head to head' }));
-  cap.appendChild(el('p', { class: 'sub', text: 'Every completed meeting, games for and against.' }));
+  // "Every completed meeting" was true of these figures and false of the fixture
+  // list beside them, which is what made a blank cell read as deliberate.
+  cap.appendChild(el('p', { class: 'sub', text: 'Every meeting played, games for and against.' }));
   fig.appendChild(cap);
   fig.appendChild(wrap);
   fig.appendChild(scale);
@@ -1451,8 +1998,11 @@ function streakWords(streak) {
 }
 
 function formRun(form) {
-  var run = el('span', { class: 'form-run' });
   if (!form || !form.length) return el('span', { class: 'muted', text: '—' });
+  // The results as the season lists them, a space between each: the badges carry no
+  // text between them, so without this the ladder's Form column leaves the page as
+  // one word (see cellText).
+  var run = el('span', { class: 'form-run', 'data-export': form.join(' ') });
   form.forEach(function (r) {
     run.appendChild(el('span', {
       class: 'res ' + r, text: r,
@@ -1512,8 +2062,22 @@ function setRow(m, st) {
     if (!list || !list.length) wrap.appendChild(el('span', { class: 'muted', text: 'not recorded' }));
     return wrap;
   }
-  var homeCls = st.winner === 'home' ? 'win' : 'lose';
-  var awayCls = st.winner === 'away' ? 'win' : 'lose';
+  /* Whether the night these rubbers were played on is in no figure anywhere: the
+   * same question the card around them asks, asked through the same `countsAsPlayed`,
+   * so the table and the sentence above it cannot come to disagree about one match.
+   *
+   * Somebody did win these rubbers, so the mark stays — the cell is about the rubber
+   * and the card's sentence is about the night. What stops is its weight. Measured at
+   * 900px, once the summary row above was quietened these two cells were the only
+   * figures in a washed-out card still set at 600 — which left a rubber that earned
+   * nothing printed in the weight of one that earned something, inside a card that
+   * twice says the night is counted nowhere. Demoted
+   * and not dropped: the winner and loser are still told apart by `.lose`'s colour
+   * and by 6 against 0. */
+  var unscored = !countsAsPlayed(m);
+  var win = unscored ? 'win win--unscored' : 'win';
+  var homeCls = st.winner === 'home' ? win : 'lose';
+  var awayCls = st.winner === 'away' ? win : 'lose';
   var status = st.status && st.status !== 'played' ? st.status : (st.completed ? '' : 'unfinished');
   return [
     { text: slotLabel(st.slot), cls: '' },
@@ -1521,13 +2085,23 @@ function setRow(m, st) {
     { text: num(st.home_games), cls: homeCls },
     { text: num(st.away_games), cls: awayCls },
     names(st.away_players),
-    { text: status ? status.charAt(0).toUpperCase() + status.slice(1) : '—',
+    { text: status ? upperFirst(status) : '—',
       cls: status ? '' : 'muted' }
   ];
 }
 
 function matchCard(m, opts) {
   var o = opts || {};
+  /* Whether every number on this card is in no figure anywhere on the page: a bye,
+   * a washout, a week called off. Asked through `countsAsPlayed`, which reads the
+   * answer the aggregates were computed with, rather than compared against
+   * 'cancelled' here — a hand comparison would miss 'unplayed' and start
+   * contradicting the ladder.
+   *
+   * Not `m.not_credited` or `m.counts_for_ladder`: those are about a card the data
+   * cannot trust, and export.py leaves both clean on a washout, because there is
+   * nothing wrong with the card. The night just did not happen. */
+  var unscored = !countsAsPlayed(m);
   var d = el('details', { class: 'match' });
   if (o.open) d.setAttribute('open', '');
   var summary = el('summary');
@@ -1535,7 +2109,12 @@ function matchCard(m, opts) {
     el('span', { class: 'chip', style: keyStyle(teamColor(m.home), teamDash(m.home)), 'aria-hidden': 'true' }),
     el('span', { class: m.result === 'home' ? 'win' : '', text: teamShort(m.home) })
   ]));
-  summary.appendChild(el('span', { class: 'score' }, [
+  /* Demoted rather than hidden. The games are on the PDF and a captain looking for
+   * them should find them; what has to stop is their being the heaviest thing on a
+   * row whose numbers are counted nowhere. The row's other bold element is the
+   * winner's name, and an unscored night has no winner, so leaving this at 600 made
+   * the uncountable figure the only loud thing on the line. */
+  summary.appendChild(el('span', { class: unscored ? 'score score--unscored' : 'score' }, [
     document.createTextNode(num(m.home_games) + ' – ' + num(m.away_games))
   ]));
   summary.appendChild(el('span', { class: 'side' }, [
@@ -1543,12 +2122,43 @@ function matchCard(m, opts) {
     el('span', { class: m.result === 'away' ? 'win' : '', text: teamShort(m.away) })
   ]));
   var bits = [];
+  /* First, because it qualifies the sets and the points behind it and a qualifier
+   * read after the figures is read after they have been believed. The words are
+   * needed as well as the position: the document's own token, lowercase and alone,
+   * says what happened to the night and not what became of the numbers printed
+   * beside it — and a weight and a colour are not a statement (WCAG 2.2 1.4.1
+   * bounds the fix, whatever it did about the original).
+   *
+   * Asked of the words rather than of `unscored`, which is the status's answer and
+   * false on both cards of a night they disagree about: each of them was played. */
+  var uncounted = uncountedWords(m);
+  if (uncounted) bits.push(uncounted);
   bits.push('sets ' + num(m.home_sets) + '–' + num(m.away_sets));
   bits.push('points ' + num(m.home_points, 1) + ' / ' + num(m.away_points, 1));
-  if (m.status !== 'played') bits.push(m.status);
+  // Why the points beside it are blank, where they are: the card is level and the
+  // competition has no draws. Its rubbers count, so this is not the words above.
+  if (m.not_counted === 'level') bits.push('level, and this competition has no draws — not in the ladder');
+  // The bare token is now the other statuses' business only: 'forfeit' is a result,
+  // and a card that reached this page by any other unusual route still needs saying.
+  // Without the guard an unscored row reads "cancelled — counts for nothing ·
+  // ... · cancelled".
+  if (!unscored && m.status !== 'played') bits.push(m.status);
   if (m.forfeited_by) bits.push('forfeited by ' + teamShort(m.forfeited_by));
   if (m.disputed) bits.push('disputed');
-  if (m.tied_on_games) bits.push('tied on games, decided on sets');
+  // A different thing from the chip above it, which is the "Match Disputed" box
+  // ticked on the card — the club disputing the result. This is the dashboard
+  // saying that the names on this card are one of two readings of the night, so
+  // none of them were credited with it. Worded apart from "disputed" for that
+  // reason: two meanings for one word, two chips apart, is a reader's problem.
+  if (m.not_credited === 'names') bits.push('players not credited');
+  // Only when a basis actually broke the tie. `tied_on_games` alone is true of a
+  // genuine draw, where nothing broke it, and the exporter keeps it false on a
+  // match nobody played -- 0-0 is not a tie, it is a night that did not happen.
+  // A draw gets nothing extra here: it is level on every basis the ruleset has,
+  // which is what the result already says.
+  if (m.tied_on_games && m.decided_by === 'sets') {
+    bits.push('level on games, decided on sets');
+  }
   if ((m.warnings || []).length) bits.push((m.warnings || []).length + ' note' +
     ((m.warnings || []).length === 1 ? '' : 's'));
   summary.appendChild(el('span', { class: 'meta', text: bits.join(' · ') }));
@@ -1556,11 +2166,83 @@ function matchCard(m, opts) {
 
   var body = el('div', { class: 'match-body' });
   body.appendChild(el('div', { class: 'table-wrap' }, [
-    table(['Set', teamShort(m.home), 'G', 'G', teamShort(m.away), 'Status'],
+    // Both sides' games column is headed `G` and worded the same, so the key under
+    // the table explains it once.
+    table(['Set', teamShort(m.home), { label: 'G', title: 'Games won in the set' },
+           { label: 'G', title: 'Games won in the set' }, teamShort(m.away), 'Status'],
       (m.sets || []).map(function (st) { return setRow(m, st); }),
-      { caption: longDate(m.date) + ' · court ' + (m.court || '—') +
-                 ' · match #' + m.id })
+      { caption: dotted([longDate(m.date), 'court ' + (m.court || '—'),
+                         matchIdWords(m)]) })
   ]));
+  /* Said under the table rather than over it, for the same reason as the note below:
+   * the table is a list of real names with real games beside them, and it is what the
+   * PDF prints. This is a note on it, not a heading over it.
+   *
+   * Three nouns because they are counted in three different places, and a reader
+   * arrives looking for one of them: a captain for the games, anyone reading the
+   * ladder for the sets, a player for their own appearance. And then what the round
+   * *is* worth, which is not nothing in every competition — under
+   * `unplayed = "average"` it is credited, so "nothing here is counted" on its own
+   * would mislead exactly the clubs that pay for a night off. The clause comes from
+   * the exporter because scoring.py owns that sentence.
+   *
+   * In the register of the `Source:` line below rather than note('warning'): a
+   * warning says somebody has something to do, and rain is not a data fault.
+   *
+   * Not on a card of a night the cards disagree about, washed out or not: that round
+   * is credited nothing under either preset, and the warning below says what it is
+   * worth. Measured under `unplayed = "average"`, a washout card of a clash was told
+   * its round was credited, over a team row that was the same under "zero". */
+  if (unscored && m.not_counted !== 'conflict') {
+    body.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px' },
+      text: 'Nothing on this card is counted anywhere: not a game, not a set, ' +
+            'not an appearance. The round itself is ' + rules().unplayed_worth +
+            '.' }));
+  }
+  /* A night the cards disagree about, said as a warning because somebody has a file
+   * to take out, and naming the others because that is the whole of what they need.
+   * `otherCards` finds each by its place in the season, and it is named by its
+   * `source`, as the exporter writes it on every row. A document without the field
+   * names nobody rather than being told the list is empty. Under the table, as the
+   * washout's sentence is: it is about these rubbers, and every figure in them is
+   * what the PDF prints. What brings the night back is every wrong card gone and not
+   * the one: three cards can give three readings, and taking one out leaves two that
+   * still disagree. */
+  /* Every note about another card of the night names it in this one sentence: the
+   * clash's, the copy's and the one for a night named two ways. Built before them,
+   * so none of them finds it undefined. */
+  var others = otherCards(m).map(function (x) { return x.source; });
+  var othersSaid = others.length ?
+    plural(others.length, 'The other card is ', 'The other cards are ') +
+    others.join('; ') + '. ' : '';
+  if (m.not_counted === 'conflict') {
+    body.appendChild(note('warning', 'Not counted',
+      'The cards for this fixture do not agree about it, so ' +
+      plural(others.length, 'neither', 'none of them') + ' is counted: not in the ' +
+      'ladder, not in either team’s row, not in anybody’s playing record. Which one ' +
+      'is right is not something this page can work out. ' + othersSaid +
+      'The night is counted once every card that is wrong has left the data folder.'));
+  }
+  /* A copy: the night is counted from another card, so taking this file out
+   * changes nothing on the page. The card it is counted from says nothing, as
+   * there is nothing wrong with it. */
+  if (m.not_totalled === 'duplicate') {
+    body.appendChild(note('warning', 'Copy',
+      'Another card for this fixture says the same, so the night is counted once, ' +
+      'from one card, and nothing on this one is counted again. ' + othersSaid +
+      'Every figure on the page stays as it is when this file leaves the data folder.'));
+  }
+  /* Said under the table it is about, because that table is a list of names and
+   * every one of them is right — it is what the PDF under `Source:` prints. What is
+   * not right is reading it as who was credited for the night. */
+  if (m.not_credited === 'names') {
+    body.appendChild(note('warning', 'Players not credited',
+      'Another card for this fixture shows the same result with a different ' +
+      'player in it, so the night counts for the teams and nobody’s playing ' +
+      'record includes it. The names above are this card’s reading. ' + othersSaid +
+      'Everybody gets the night back when the card that is wrong leaves the ' +
+      'data folder.'));
+  }
   (m.fill_ins || []).forEach(function (slug) {
     body.appendChild(note('warning', 'Fill-in', playerName(slug) +
       ' played outside their registered roster.'));
@@ -1572,8 +2254,68 @@ function matchCard(m, opts) {
     body.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px' },
       text: 'Source: ' + m.source }));
   }
+  /* This night's own address, in the body and not in the summary above it. Measured:
+   * a link beside the score is folded into the accessible name of the control that
+   * opens the card -- `Quolls 12 - 5 Gnats · sets 4-0 match #4200003` -- and takes a
+   * focus stop on every one of the 56 rows. In the body it is out of the tab order
+   * until the reader opens the night they are reading, because a closed card hides
+   * its content through `::details-content`. (A link inside a `<summary>` does not
+   * toggle the card in Chrome, measured; the announcement and the tab stops are the
+   * reason, not a swallowed click.)
+   *
+   * `o.own` is the card on that page, where this would be a link to the page the
+   * reader is standing on, and a card with no printed id is addressed by nothing. */
+  if (m.id && !o.own) {
+    body.appendChild(el('p', { class: 'foot match-link', style: { 'font-size': '12px' } }, [
+      el('a', { href: '#/match/' + encodeURIComponent(m.id),
+                text: 'This match on its own page' })
+    ]));
+  }
   d.appendChild(body);
   return d;
+}
+
+/* What a night that is in no figure anywhere is called: by the card's summary, and by
+ * every row of it in the season's table of rubbers, where the card's sentence is not
+ * there to say it. One spelling, because two on one page is how two parts of it came
+ * to word the same rule differently.
+ *
+ * And `''` for a night that is in them, so both callers ask this one function whether
+ * there is anything to say: two kinds of night count for nothing, and only one of them
+ * is a status. A night two cards disagree about was played, on each card, and
+ * `countsAsPlayed` says so; the exporter's `not_totalled` is what says it is counted
+ * nowhere. Measured before, on the demo with a second round 2 card: its summary read
+ * `sets 3–1 · points 6.3 / 3.5`, and its rubbers `Played` with their winners, on a
+ * night no figure on the page includes.
+ *
+ * The same field says which card of a night exported twice is the copy, and which
+ * of two naming it differently is the reading not used: counted once, from the
+ * other card, and measured, both copies read `sets 4–0 · points 6.4 / 3.4` and all
+ * eight rows `Played`. Not `not_counted` or `not_credited`, which also hold a level
+ * night, a final and the kept card of a night named two ways, all in the totals.
+ * Words that claim no order: the card kept is the one read first, and a browser's
+ * second download, `name (1).pdf`, reads before `name.pdf`, so `second copy` was
+ * said of the file the club exported first.
+ *
+ * Both reasons when both hold, the card's own status first, as a washout's words
+ * have always begun: one card of a clash can be the washout, and measured, the
+ * clash's words in place of its status left `cancelled` nowhere on that card or on
+ * its rows, so nothing said which card of the night was the washout. */
+function uncountedWords(m) {
+  var why = countsAsPlayed(m) ? [] : [m.status];
+  if (m.not_totalled === 'conflict') why.push('cards disagree');
+  if (m.not_totalled === 'duplicate') why.push('copy of another card');
+  if (m.not_totalled === 'names') why.push('reading not used');
+  return why.length ? why.join(', ') + ' — counts for nothing' : '';
+}
+
+/* The id Match Centre printed on the scorecard, in words. A card that printed none
+ * keeps `""` -- `export.py` invents nothing -- and the caption used to read `match #`
+ * with nothing after it, which reads as a page that lost the number rather than as a
+ * card that never had one. Said in one place because the card's caption and a match's
+ * own page both say it. */
+function matchIdWords(m) {
+  return m.id ? 'match #' + m.id : 'no match id printed';
 }
 
 /* A round's bye. Shown rather than left as a gap: the team is not missing a card,
@@ -1588,14 +2330,27 @@ function byeRow(slug) {
   var line = el('div', { class: 'summary', style: { display: 'flex', 'flex-wrap': 'wrap',
     'align-items': 'center', gap: '6px 12px', padding: '10px 4px 10px 20px' } });
   line.appendChild(el('span', { class: 'side' }, [teamLinkBySlug(slug)]));
+  /* The clause is the exporter's, from scoring.unplayed_worth(), and this line does
+   * not branch on `[rules] unplayed` itself: branching here is how it came to have
+   * two sentences of its own to keep in step with Python's, which it had already
+   * stopped doing. One of the pair never said what a credited round counts *in* —
+   * the whole point of the rule — and the other never said the round is not a match
+   * played, so the dashboard's account of one rule differed from the run report's
+   * and which a club believed depended on where they read it. Both are quoted in
+   * that function's docstring, which is the one place this rule is worded. */
   line.appendChild(el('span', { class: 'meta',
-    text: rules().average_unplayed
-      ? 'bye · scored at the team’s own average'
-      : 'bye · no points, by this competition’s rules' }));
+    text: 'bye · ' + rules().unplayed_worth }));
   row.appendChild(line);
   return row;
 }
 
+/* A fixture with no card is one of two unlike things, and this row said "scheduled"
+ * about both: a round in November nobody has reached, and last Tuesday's card that
+ * nobody exported. Which it is, `card_missing` on the fixture already answers —
+ * worked out in Python, where the draw and the rule that decides it live. Doing it
+ * here would need the whole draw in a second language, and the two copies would
+ * differ. The data health section names the card; this is the row a reader is
+ * looking at when they wonder where it went. */
 function scheduledRow(fx) {
   var row = el('div', { class: 'match' });
   var line = el('div', { class: 'summary', style: { display: 'flex', 'flex-wrap': 'wrap',
@@ -1603,7 +2358,18 @@ function scheduledRow(fx) {
   line.appendChild(el('span', { class: 'side' }, [teamLinkBySlug(fx.home)]));
   line.appendChild(el('span', { class: 'vs', text: 'v' }));
   line.appendChild(el('span', { class: 'side' }, [teamLinkBySlug(fx.away)]));
-  line.appendChild(el('span', { class: 'meta', text: 'scheduled · ' + longDate(fx.date) }));
+  // Through dotted() rather than concatenated, because a round declared without a
+  // date and with no card to take one from printed "scheduled · " and stopped -- a
+  // separator with nothing after it, which reads as something that failed to load.
+  var said = dotted([fx.card_missing ? 'no card yet' : 'scheduled', longDate(fx.date)]);
+  // One span either way, so the wording, the colour and the hover cannot drift apart
+  // into three answers about one fixture. `applyAttrs` drops a null, so a fixture
+  // nobody is waiting on carries no tooltip rather than an empty one.
+  line.appendChild(el('span', {
+    class: fx.card_missing ? 'meta missing' : 'meta',
+    title: fx.card_missing
+      ? 'The draw lists this fixture and no scorecard was read for it.' : null,
+    text: said }));
   row.appendChild(line);
   return row;
 }
@@ -1613,7 +2379,21 @@ function scheduledRow(fx) {
 function renderOverview(main) {
   var m = meta();
   var ladder = IDX.ladder;
-  var played = (S.matches || []).filter(countsAsPlayed);
+  // Two filters, because a match row is a card and these tiles count nights. The
+  // first drops the nights nobody played; `not_totalled` drops the cards the
+  // document's own aggregates were not built from — a night exported twice, and both
+  // readings of a night two cards disagree about. Without it a duplicated card was a
+  // second night in every figure in this view: one more match played than there are
+  // fixtures in the draw, and that night's sets and games counted twice in tiles
+  // sitting directly above a ladder that counted them once.
+  //
+  // Not `counts_for_ladder`, which is false on a final and on a level night in a
+  // grade that cannot draw: both were played, so both belong in tennis played. Not
+  // `not_credited` either, which is set on the kept card of a night named two ways —
+  // nobody's record, and still the night both teams played.
+  var played = (S.matches || []).filter(function (x) {
+    return countsAsPlayed(x) && !x.not_totalled;
+  });
   var scheduled = (S.fixtures || []).length;
   var drawDeclared = m.draw_source === 'declared';
 
@@ -1659,7 +2439,7 @@ function renderOverview(main) {
         leader.played + ' ' + plural(leader.played, 'match', 'matches')
       : 'No results yet' })
   ]));
-  hero.appendChild(seasonProgress(played.length, scheduled, drawDeclared));
+  hero.appendChild(seasonProgress(drawDeclared));
   main.appendChild(hero);
 
   var slotKeys = IDX.slots.map(function (s) { return s.key; });
@@ -1701,10 +2481,9 @@ function renderOverview(main) {
     box.appendChild(el('p', { class: 'empty-note', text: 'No round has been played yet.' }));
   } else {
     box.appendChild(el('p', { class: 'sub muted', style: { margin: '0 0 4px' },
-      text: roundTitle(lastRound.number) + ' · ' + longDate(lastRound.date) }));
-    (lastRound.matches || []).forEach(function (id) {
-      var match = IDX.matchById[id];
-      if (match) box.appendChild(matchCard(match));
+      text: dotted([roundTitle(lastRound.number), longDate(lastRound.date)]) }));
+    cardsOf(lastRound.keys).forEach(function (match) {
+      box.appendChild(matchCard(match));
     });
   }
   main.appendChild(box);
@@ -1716,12 +2495,20 @@ function renderOverview(main) {
  * a percentage. With it null there is neither, anywhere on the page: the
  * predecessor filled the denominator with the number of rounds played and its
  * meter read 100% complete at round three of ten. "Three rounds played" is the
- * whole of what is known, and it is said as a count. */
-function seasonProgress(matchesPlayed, scheduled, drawDeclared) {
+ * whole of what is known, and it is said as a count.
+ *
+ * The rounds counted are the regular ones, as the season's length is (4.69), so
+ * the finals played are named on a line of their own beneath either shape. The
+ * foot's fixtures are those rounds' too, played of listed, as Python counted them
+ * (4.194); the Matches played tile below it counts the whole season's. */
+function seasonProgress(drawDeclared) {
   var m = meta();
   var playedRounds = m.rounds_played || 0;
   var total = m.rounds_total;
+  // num() prints a dash for a count a document built before the key does not have.
+  var regular = m.regular_fixtures || {};
   var box = el('div', { class: 'progress' });
+  var finals = finalsFoot();
 
   if (total === null || total === undefined) {
     var label = el('div', { class: 'label' }, [
@@ -1732,8 +2519,9 @@ function seasonProgress(matchesPlayed, scheduled, drawDeclared) {
     if (flag) label.appendChild(flag);
     box.appendChild(label);
     box.appendChild(el('div', { class: 'foot',
-      text: matchesPlayed + ' ' + plural(matchesPlayed, 'match', 'matches') + ' scored. ' +
-        'How long this season runs has not been declared, so no percentage is shown.' }));
+      text: num(regular.played) + ' ' + plural(regular.played, 'match', 'matches') +
+        ' scored. ' + noLengthReason() }));
+    if (finals) box.appendChild(finals);
     return box;
   }
 
@@ -1747,10 +2535,57 @@ function seasonProgress(matchesPlayed, scheduled, drawDeclared) {
     el('span', { style: { width: percent + '%' } })
   ]));
   box.appendChild(el('div', { class: 'foot',
-    text: (drawDeclared ? matchesPlayed + ' of ' + scheduled + ' fixtures played · '
-                        : matchesPlayed + ' matches scored · ') +
+    text: (drawDeclared
+      ? num(regular.played) + ' of ' + num(regular.total) + ' fixtures played · '
+      : num(regular.played) + ' ' + plural(regular.played, 'match', 'matches') +
+        ' scored · ') +
       percent + '% of the declared rounds' }));
+  if (finals) box.appendChild(finals);
   return box;
+}
+
+/* Why a season has no percentage. meta.rounds_total is null where nobody declared
+ * a length, and where F3 refused the one declared as shorter than the regular
+ * rounds already played (4.72); provenance still says "declared" then, and the two
+ * read together are how Python says which. Told it had not been declared, the club
+ * that typed it would look for a typo. */
+function noLengthReason() {
+  if (provenanceOf('rounds_total') === 'declared') return 'More regular rounds have ' +
+    'been played than this season was declared to run, so no percentage is shown.';
+  return 'How long this season runs has not been declared, so no percentage is shown.';
+}
+
+/* The finals with cards, by the flags season.json's rounds carry: is_finals as the
+ * club or the round's own label declared it, played where a card has that round.
+ * Named, never counted, and never a final the draw lists that nobody has played. */
+function finalsPlayed() {
+  return (S.rounds || []).filter(function (r) { return r.is_finals && r.played; })
+    .map(function (r) { return roundTitle(r.number); });
+}
+
+/* The progress box's line naming them, or null on a season with none. */
+function finalsFoot() {
+  var finals = finalsPlayed();
+  if (!finals.length) return null;
+  return el('div', { class: 'foot', text: 'Finals played: ' + finals.join(', ') + '.' });
+}
+
+/* Where the ladder breaks ties on head-to-head and two teams have met in the finals,
+ * the ladder and the head-to-head grid are worked out over different matches. Said
+ * here because this is the line that lists "head to head" as a basis, and that is
+ * the phrase a club takes to the grid to check a position with -- where the record
+ * they find includes a night the ladder could not use.
+ *
+ * Both conditions, and asked of the finals actually played rather than of the
+ * season having a finals round: a note about a difference that has not arisen yet
+ * is a line every club pays for so that one of them is told something true. */
+function ladderHeadToHeadNote() {
+  if (!laddersTiebreakIsHeadToHead()) return '';
+  var byKey = S.head_to_head || {};
+  var played = Object.keys(byKey).map(function (k) { return byKey[k]; });
+  if (!finalsMeetings(played)) return '';
+  return ' Head-to-head there means the regular-season meetings only; the ' +
+    'head-to-head grid on this page counts the finals as well.';
 }
 
 /* F10. The ladder always states its basis; when teams have played unequal numbers
@@ -1760,6 +2595,7 @@ function ladderNote() {
   var m = meta();
   var order = (rules().ladder_by || []).map(function (k) { return k.replace(/_/g, ' '); });
   var basis = order.length ? 'Ordered by ' + order.join(', then ') + '.' : '';
+  basis += ladderHeadToHeadNote();
   if (m.ladder_complete) {
     return el('p', { class: 'ladder-note', text: basis });
   }
@@ -1770,11 +2606,36 @@ function ladderNote() {
   ]);
 }
 
+/* Whether the average the ladder is ordered on divides by more matches than the P
+ * column counts, which happens only under a ruleset that credits an unplayed round
+ * the team's own average, and only once a round has actually gone unplayed. Where
+ * it does, Points ÷ P is not Avg and nothing on the page said why.
+ *
+ * Asked of the exported figures and not of `rules().average_unplayed`: the flag
+ * says what the club's rules do with a night off, not whether anybody has had one.
+ * Asked of the ladder as a whole and not of one row, because a column present for
+ * some teams and absent for others is not a column.
+ *
+ * Greater rather than merely different, deliberately. The divisor cannot be
+ * smaller than the played column -- it is those matches plus the credited ones --
+ * and a document written before this field existed answers `undefined > 3` with
+ * false, so an old file leaves the column out rather than filling it with dashes,
+ * under the format warning that is already shouting about it. */
+function averagedRoundsCounted() {
+  return IDX.ladder.some(function (t) { return t.counted > t.played; });
+}
+
 function ladderTable() {
-  var head = ['#', 'Team', 'P', 'W', 'L', 'D', 'Points',
-    { label: 'Avg', title: 'Points average: points divided by matches counted' },
-    { label: 'GF', title: 'Games for' }, { label: 'GA', title: 'Games against' },
-    { label: 'Diff', title: 'Games differential' }, 'Form'];
+  var showCounted = averagedRoundsCounted();
+  var head = [{ label: '#', title: 'Ladder position' }, 'Team',
+      COL.matchesPlayed, COL.matchesWon, COL.matchesLost, COL.matchesDrawn, 'Points']
+    .concat(showCounted ? [{ label: 'Counted',
+      title: 'Matches counted: what the points average divides by — matches ' +
+        'played plus the rounds credited the team’s own average' }] : [])
+    .concat([
+      { label: 'Avg', title: 'Points average: points divided by matches counted' },
+      COL.gamesFor, COL.gamesAgainst, COL.gamesDiff,
+      { label: 'Form', title: 'Last five results, oldest first' }]);
   var rows = IDX.ladder.map(function (t) {
     return {
       href: '#/team/' + t.slug,
@@ -1782,22 +2643,30 @@ function ladderTable() {
         { text: t.position === null || t.position === undefined ? '—' : t.position, cls: 'pos' },
         teamLink(t, { long: true }),
         t.played, t.won, t.lost, t.drawn,
-        num(t.points, 1),
+        num(t.points, 1)
+      ].concat(showCounted ? [t.counted] : []).concat([
         t.points_average === null || t.points_average === undefined
           ? { text: '—', cls: 'muted' } : num(t.points_average, 2),
         t.games_won, t.games_lost, signed(t.games_diff),
         formRun(t.form)
-      ]
+      ])
     };
   });
+  /* Counted used to be explained again by hand here, because a title attribute is a
+   * hover and a hover is nothing on a phone. Every table's caption now prints the key
+   * to its own headings, so the sentence is written once, in the column's spec. */
   return el('div', { class: 'table-wrap' }, [
-    table(head, rows, { caption: 'Select a row for the team page.' })
+    table(head, rows, { caption: 'Select a row for the team page.', csv: 'ladder' })
   ]);
 }
 
 /* ============================================================ team charts == */
 
 function pointsAverageChart(selectedSlug) {
+  // The caption below promises the reader an arithmetic they can check, and the
+  // divisor is the ladder's Counted column rather than its P wherever the two
+  // differ. Asked once, for the same reason the ladder asks once.
+  var showCounted = averagedRoundsCounted();
   var rows = IDX.ladder.filter(function (t) {
     return t.points_average !== null && t.points_average !== undefined;
   }).map(function (t) {
@@ -1816,9 +2685,9 @@ function pointsAverageChart(selectedSlug) {
           { name: 'Points average', value: num(t.points_average, 2), kind: 'rect',
             color: isSel ? teamColor(t.slug) : PAL.series[0] },
           { name: 'Points', value: num(t.points, 1) },
-          { name: 'Played', value: String(t.played) },
-          { name: 'Ladder position', value: String(t.position) }
-        ]
+          { name: 'Played', value: String(t.played) }
+        ].concat(showCounted ? [{ name: 'Counted', value: String(t.counted) }] : [])
+          .concat([{ name: 'Ladder position', value: String(t.position) }])
       }
     };
   });
@@ -1831,11 +2700,13 @@ function pointsAverageChart(selectedSlug) {
     mode: 'single',
     axisLabel: 'Points average',
     empty: 'No team has a points average yet.',
-    tableHead: ['Team', 'Points average', 'Points', 'Played'],
+    tableHead: ['Team', 'Points average', 'Points', 'Played']
+      .concat(showCounted ? ['Counted'] : []),
     tableCaption: 'Points average = points ÷ matches counted.',
     tableRow: function (r) {
       var t = IDX.teamBySlug[r.href.split('/').pop()];
-      return [r.label, num(t.points_average, 2), num(t.points, 1), String(t.played)];
+      return [r.label, num(t.points_average, 2), num(t.points, 1), String(t.played)]
+        .concat(showCounted ? [String(t.counted)] : []);
     }
   });
 }
@@ -1941,6 +2812,10 @@ function slotStrengthChart(t) {
   });
   return hbarCard({
     title: 'Strength by set slot',
+    // The team's name in the file name, because the heading does not carry it: every
+    // team's page has this chart, so without it two teams' tables download as the
+    // same file and the second arrives as a copy of the first.
+    tableCsv: t.name + ' strength by set slot',
     sub: 'Which of this format’s sets the team actually wins.',
     rows: rows,
     mode: 'diverging',
@@ -1961,31 +2836,65 @@ function slotStrengthChart(t) {
 }
 
 function pointsByRoundChart(t, matches) {
+  /* The rounds nobody played, kept in the chart and marked in it. The list handed in
+   * is the one the ladder counted, which is right and is an answer to a different
+   * question: `counts_for_ladder` is about a card no figure could use, and a washout
+   * is not a data fault, so the exporter leaves that flag true and the round arrives
+   * here. Nothing on its row used to say so — measured at 1100px, the row of the
+   * washed-out night carried no bar, the words `not scored` in `--text-primary` at
+   * weight 600, and an undimmed label, which made the one round that was never played
+   * the loudest row in a chart of thirteen that were.
+   *
+   * Dropping it instead would have the chart agree with the tiles beside it and
+   * misdescribe the season: the fifth round came round, and to nobody. */
+  var unplayed = matches.filter(function (m) { return !countsAsPlayed(m); });
   var rows = matches.map(function (m) {
     var isHome = m.home === t.slug;
     var pts = isHome ? m.home_points : m.away_points;
     var mine = isHome ? m.home_games : m.away_games;
     var theirs = isHome ? m.away_games : m.home_games;
     var oppSlug = isHome ? m.away : m.home;
+    var unscored = !countsAsPlayed(m);
+    /* Two states, two wordings, and not one word for both: a round that was played
+     * with no points recorded is something to go and chase, and a round nobody played
+     * is not. Said once and handed to the eye, the screen reader and the table below
+     * from here — the accessible name used to be built from `num(pts, 1)` of its own
+     * and read "— points" where the screen said "not scored".
+     *
+     * "not played" rather than "counts for nothing", because under
+     * `unplayed = "average"` it is credited, at this team's own average. What it
+     * earned is the exporter's clause, under the plot. */
+    var says = unscored ? 'not played'
+      : (pts === null || pts === undefined ? 'not scored' : num(pts, 1));
     return {
       label: roundTick(m.round),
       value: pts === null || pts === undefined ? 0 : pts,
-      valueText: pts === null || pts === undefined ? 'not scored' : num(pts, 1),
+      valueText: says,
+      dim: unscored,
       color: PAL.series[0],
-      aria: roundTitle(m.round) + ': ' + num(pts, 1) + ' points against ' + teamName(oppSlug),
+      aria: unscored
+        ? roundTitle(m.round) + ' v ' + teamName(oppSlug) + ': ' + says + ' — ' +
+          m.status + ', ' + rules().unplayed_worth
+        : roundTitle(m.round) + ': ' + says + ' points against ' + teamName(oppSlug),
       tip: {
         title: roundTitle(m.round) + ' v ' + teamShort(oppSlug),
         rows: [
-          { name: 'Points', value: num(pts, 1), kind: 'rect', color: PAL.series[0] },
+          // No swatch on a round with no bar: a key beside "not played" points at
+          // nothing drawn.
+          { name: 'Points', value: says, kind: 'rect',
+            color: unscored ? null : PAL.series[0] },
           { name: 'Games', value: num(mine) + '–' + num(theirs) },
           { name: 'Result', value: resultWord(m, t.slug) },
-          { name: isHome ? 'At home' : 'Away', value: longDate(m.date) }
-        ]
+          { name: isHome ? 'At home' : 'Away', value: longDate(m.date) || '—' }
+        ].concat(unscored
+          ? [{ name: 'The round', value: rules().unplayed_worth }]
+          : [])
       }
     };
   });
   return hbarCard({
     title: 'Points earned by round',
+    tableCsv: t.name + ' points earned by round',
     // The active scheme, spelled out by export.py from the Ruleset itself. The
     // predecessor printed one club's numbers here as a literal.
     sub: rules().scoring_detail || 'Points as this competition scores them.',
@@ -1993,21 +2902,49 @@ function pointsByRoundChart(t, matches) {
     mode: 'single',
     axisLabel: 'Competition points',
     empty: 'This team has not played yet.',
+    // One sentence for the rounds that were not played, because the five under the
+    // match list below cannot cover them: every one of those is keyed on
+    // `counts_for_ladder === false`, which a washout does not satisfy. The clause is
+    // the exporter's, from scoring.unplayed_worth(), for the reason that function's
+    // docstring gives — the page kept its own pair of sentences for this rule once and
+    // they had already drifted from Python's and from each other.
+    //
+    // Which is also why our half of it is about the card and not about the round. This
+    // said "so it has no points to plot" first, and the demo season built under
+    // `unplayed = "average"` answers that: the same team goes from 55.3 points over 13
+    // counted rounds to 59.553846 over 14, so the round it never played earned it 4.25.
+    // The card is empty under either preset; only the clause knows what the round was
+    // worth, and it is the only thing here that says.
+    footer: unplayed.length ? el('p', { class: 'foot muted',
+      style: { 'font-size': '12px', margin: '8px 0 0' },
+      text: unplayed.map(function (m) { return roundTick(m.round); }).join(', ') +
+        (unplayed.length === 1 ? ' was ' : ' were ') + 'not played, so there is nothing ' +
+        (unplayed.length === 1 ? 'on its card ' : 'on their cards ') + 'to plot. ' +
+        (unplayed.length === 1 ? 'The round itself is ' : 'Each round itself is ') +
+        rules().unplayed_worth + '.' }) : null,
     tableHead: ['Round', 'Opponent', 'Result', 'Games', 'Points'],
     tableRow: function (r) {
       var m = matches[rows.indexOf(r)];
       var isHome = m.home === t.slug;
+      // The points cell is the words the bar was labelled with, not a second reading
+      // of the same field: the plot said `not scored` and this said `—` for one round
+      // of the demo season, which is two accounts of one night in one card.
       return [roundTick(m.round), teamShort(isHome ? m.away : m.home),
         resultWord(m, t.slug),
         num(isHome ? m.home_games : m.away_games) + '–' +
         num(isHome ? m.away_games : m.home_games),
-        num(isHome ? m.home_points : m.away_points, 1)];
+        r.valueText];
     }
   });
 }
 
 function resultWord(m, slug) {
-  if (m.result === 'draw') return 'Draw';
+  /* "Level", not "Draw", where the ladder has no draw to record: the scoreline is
+   * level and the competition is set to decide every match, so this row is a result
+   * nobody wrote down. Read off the reason the exporter wrote beside the row rather
+   * than off the rules block, so this word and the sentence under the list below
+   * cannot describe the same card two ways. */
+  if (m.result === 'draw') return m.not_counted === 'level' ? 'Level' : 'Draw';
   if (m.result === 'none' || !m.result) return m.status || 'Not played';
   var won = (m.result === 'home' && m.home === slug) ||
             (m.result === 'away' && m.away === slug);
@@ -2020,7 +2957,7 @@ function renderTeam(main, slug) {
   var t = IDX.teamBySlug[slug];
   if (!t) { renderMissing(main, 'No team with the id "' + slug + '".'); return; }
   var matches = matchesOfTeam(t.slug);
-  document.title = t.name + ' — ' + (meta().label || '');
+  setPageName(t.name);
 
   main.appendChild(el('a', { class: 'crumb', href: '#/', text: '← Ladder' }));
   // Geometry inline as well as colour: this chip is bigger than a table chip and
@@ -2056,8 +2993,13 @@ function renderTeam(main, slug) {
 
   var pos = t.position === null || t.position === undefined ? '—' : String(t.position);
   main.appendChild(el('div', { class: 'grid tiles' }, [
+    // The divisor, where it is not the played count in the tile beside this one.
+    // Every other figure on this page can be checked against the row it came from;
+    // the average could not be checked against anything.
     tile('Ladder position', pos, t.played
-      ? num(t.points_average, 2) + ' points average' : 'no matches counted'),
+      ? num(t.points_average, 2) + ' points average' + (t.counted > t.played
+        ? ' over ' + t.counted + ' counted' : '')
+      : 'no matches counted'),
     tile('Record', t.won + '–' + t.lost + (t.drawn ? '–' + t.drawn : ''),
       t.played + ' ' + plural(t.played, 'match', 'matches') + ' played'),
     tile('Points', num(t.points, 1),
@@ -2068,8 +3010,7 @@ function renderTeam(main, slug) {
     tile('Games', num(t.games_won) + '–' + num(t.games_lost),
       signed(t.games_diff) + ' differential'),
     tile('Sets', num(t.sets_won) + '–' + num(t.sets_lost),
-      (t.sets_won + t.sets_lost) ? num(100 * t.sets_won / (t.sets_won + t.sets_lost), 0) +
-        '% of sets won' : 'no sets yet'),
+      (t.sets_won + t.sets_lost) ? pct(t.win_pct) + ' of sets won' : 'no sets yet'),
     tile('Streak', streakWords(t.streak),
       'best round ' + (t.best_round ? roundTick(t.best_round.round) + ' (' +
         num(t.best_round.points, 1) + ')' : '—'))
@@ -2077,22 +3018,41 @@ function renderTeam(main, slug) {
 
   var splitBox = el('div', { class: 'card' }, [
     el('div', { class: 'table-wrap' }, [
-      table(['Split', 'P', 'W', 'L', 'D', 'GF', 'GA', 'Diff'], [
+      table(['Split', COL.matchesPlayed, COL.matchesWon, COL.matchesLost,
+             COL.matchesDrawn, COL.gamesFor, COL.gamesAgainst, COL.gamesDiff], [
         ['Home', t.home.played, t.home.won, t.home.lost, t.home.drawn,
           t.home.games_won, t.home.games_lost, signed(t.home.games_won - t.home.games_lost)],
         ['Away', t.away.played, t.away.won, t.away.lost, t.away.drawn,
           t.away.games_won, t.away.games_lost, signed(t.away.games_won - t.away.games_lost)],
         ['Total', t.played, t.won, t.lost, t.drawn, t.games_won, t.games_lost, signed(t.games_diff)]
-      ], { caption: 'Home and away split' })
+      ], { caption: 'Home and away split', csv: t.name + ' home and away' })
     ]),
     el('p', { class: 'foot muted', style: { 'font-size': '12px', margin: '8px 0 0' } }, [
       document.createTextNode('Form (oldest first): '), formRun(t.form)
     ])
   ]);
 
+  // Every figure in the tiles and the split above is the regular season (F11) and
+  // one card per fixture (F9), so the chart beside them is too: a bar for a match
+  // no total includes would be a round the figure it sits under never counted. The
+  // document says which matches those are, and why; this re-derives neither.
+  var counted = matches.filter(function (m) { return m.counts_for_ladder !== false; });
+  var missed = matches.filter(function (m) { return m.counts_for_ladder === false; });
+  /* One equality per reason, never "none of the others". Counted by exclusion, the
+   * finals bucket adopted every reason added after it: a level card in a grade that
+   * cannot draw was counted here and explained to the club as a finals match, which
+   * earns nothing for the ladder either. A reason this page has no sentence for prints
+   * nothing, which is what the schema-version warning in the data health section is
+   * for -- the only way to get one is an app.js older than its season.json. */
+  var finals = missed.filter(function (m) { return m.not_counted === 'finals'; }).length;
+  var repeats = missed.filter(function (m) { return m.not_counted === 'duplicate'; }).length;
+  var clashes = missed.filter(function (m) { return m.not_counted === 'conflict'; }).length;
+  var levels = missed.filter(function (m) { return m.not_counted === 'level'; }).length;
+  var named = missed.filter(function (m) { return m.not_counted === 'names'; }).length;
+
   var charts = el('div', { class: 'grid charts', style: { 'margin-top': '12px' } });
   charts.appendChild(slotStrengthChart(t));
-  charts.appendChild(pointsByRoundChart(t, matches));
+  charts.appendChild(pointsByRoundChart(t, counted));
   charts.appendChild(ladderHistoryChart(t.slug));
   charts.appendChild(pointsAverageChart(t.slug));
 
@@ -2113,6 +3073,78 @@ function renderTeam(main, slug) {
       text: 'No matches played yet. Anything in the draw is on the Matches page.' }));
   } else {
     matches.forEach(function (m) { box.appendChild(matchCard(m)); });
+  }
+  // Said where the difference shows: the list below is every card this team has,
+  // and the record above counts three of four. One sentence per reason, because
+  // "not in the figures above" is the only thing the five have in common -- a
+  // final is the rules working, a repeated card is something to go and fix, and the
+  // spare reading of a night named two ways is a night that *was* counted, from the
+  // card beside it, with nobody credited for playing it.
+  if (finals) {
+    box.appendChild(el('p', { class: 'foot muted',
+      style: { 'font-size': '12px', 'margin-top': '10px' },
+      text: finals + ' finals ' + plural(finals, 'match', 'matches') + ' here ' +
+        (finals === 1 ? 'earns' : 'earn') + ' no ladder points, so ' +
+        (finals === 1 ? 'it is' : 'they are') + ' not in the record, points, ' +
+        'games or form above. The players in ' + (finals === 1 ? 'it' : 'them') +
+        ' are credited as usual.' }));
+  }
+  if (repeats) {
+    box.appendChild(el('p', { class: 'foot muted',
+      style: { 'font-size': '12px', 'margin-top': '10px' },
+      text: repeats + ' ' + plural(repeats, 'card') + ' listed here ' +
+        (repeats === 1 ? 'is a second copy' : 'are second copies') +
+        ' of a night already above: the same fixture, the same result, exported ' +
+        'twice. Each night is counted once, so the figures above are right and ' +
+        (repeats === 1 ? 'the spare card' : 'the spare cards') +
+        ' can be deleted from the data folder.' }));
+  }
+  if (clashes) {
+    box.appendChild(el('p', { class: 'foot muted',
+      style: { 'font-size': '12px', 'margin-top': '10px' },
+      text: clashes + ' ' + plural(clashes, 'card') + ' listed here ' +
+        (clashes === 1 ? 'shares its fixture' : 'share their fixture') +
+        ' with another card that says something different about it. Which one is ' +
+        'right is not something this page can work out, so the ' +
+        plural(clashes, 'fixture') + ' ' + (clashes === 1 ? 'is' : 'are') +
+        ' in none of the figures above until the wrong card is removed from the ' +
+        'data folder. The data health section names the files.' }));
+  }
+  /* The fourth reason, and the only one the club's own settings can create: this
+   * competition is marked as one that decides every match, so a card with no
+   * winner on it is a result somebody did not write down. Both halves are said --
+   * what the card shows and where the rule came from -- because either one of them
+   * can be the thing that is wrong. */
+  if (levels) {
+    box.appendChild(el('p', { class: 'foot muted',
+      style: { 'font-size': '12px', 'margin-top': '10px' },
+      text: levels + ' ' + plural(levels, 'night') + ' listed here ended level, ' +
+        'and this competition is set to have no draws (draws = false in ' +
+        'config.toml), so either a tiebreak went unrecorded or a row was misread. ' +
+        (levels === 1 ? 'It is' : 'They are') + ' in none of the figures above ' +
+        'until the card is fixed, though the players in ' +
+        (levels === 1 ? 'it' : 'them') + ' are credited as usual. The data health ' +
+        'section names the ' + plural(levels, 'card') + '.' }));
+  }
+  /* The fifth reason, and the only one whose fixture *is* in the figures above: two
+   * cards for one night agree about the result and disagree about who played, so the
+   * result is settled and the appearances are not. Counted from the reading that was
+   * not used — one such card per night, whichever of the two it turned out to be —
+   * and worded around what the club has to do, which is the same as for a copy
+   * except that until they do it somebody's season is short a match. */
+  if (named) {
+    box.appendChild(el('p', { class: 'foot muted',
+      style: { 'font-size': '12px', 'margin-top': '10px' },
+      text: named + ' ' + plural(named, 'card') + ' listed here ' +
+        (named === 1 ? 'agrees' : 'agree') + ' with another card about the result ' +
+        'and not about who played. The ' + plural(named, 'night') + ' ' +
+        (named === 1 ? 'is' : 'are') + ' counted once in the record, points and ' +
+        'games above — both cards say the same about the score — and ' +
+        (named === 1 ? 'is' : 'are') + ' in nobody’s playing record, because ' +
+        'crediting one card’s names would put a real person in a rubber the other ' +
+        'card gives to somebody else. Everybody gets the night back when the card ' +
+        'that is wrong leaves the data folder. The data health section names the ' +
+        plural(named, 'file') + '.' }));
   }
   var upcoming = (S.fixtures || []).filter(function (f) {
     return !f.played && (f.home === t.slug || f.away === t.slug);
@@ -2143,7 +3175,9 @@ function teamPlayersTable(t) {
         p.sets_won + '–' + p.sets_lost,
         p.win_pct === null || p.win_pct === undefined ? { text: '—', cls: 'muted' } : pct(p.win_pct),
         num(p.games_won), num(p.games_lost), signed(p.games_diff),
-        p.contribution ? pct(p.contribution.share_pct) : '—',
+        p.contribution && p.contribution.share_pct !== null &&
+          p.contribution.share_pct !== undefined
+          ? pct(p.contribution.share_pct) : { text: '—', cls: 'muted' },
         p.rating && p.rating.singles !== null && p.rating.singles !== undefined
           ? num(p.rating.singles, 2) : { text: '—', cls: 'muted' },
         p.rating && p.rating.doubles !== null && p.rating.doubles !== undefined
@@ -2151,19 +3185,122 @@ function teamPlayersTable(t) {
       ]
     };
   });
+  /* Where the Share column and the Games column disagree, and why: this team's own
+   * `contribution_gap`, which is the games between them, the percentage they come to,
+   * and a count of each thing that caused it.
+   *
+   * Read, not worked out here. This page used to walk the team's cards for all of it
+   * and re-decide, in JavaScript, which rubbers pay a share -- the night, the slot's
+   * shape, the roster, the finals, the pair of cards that name a night differently.
+   * That is a second implementation of the arithmetic the Share cells are the first,
+   * in a second language, and two of them is how the two come to disagree: the
+   * exporter's scope moves and only one of them follows it.
+   *
+   * Defaulted once, here, because a document can be older than any of this: one built
+   * before the record existed has no gap at all, and one built before the rubbers that
+   * pay twice were counted has no count of them. Every read below is of a local that
+   * is then zero, which is already the say-nothing case. Reading through a missing
+   * record instead would lose the whole table over a sentence about it. */
+  var gap = t.contribution_gap || {};
+  var caption = 'Contribution of each registered player.';
+  /* A night credited to nobody is absent from every row of this table, which is
+   * where a reader meets it first: the M column is short for the whole squad and the
+   * Share column no longer adds to a hundred. Said in this caption rather than left
+   * to the Matches box at the bottom of the page, because this is the table the
+   * figures are missing from. */
+  var uncredited = gap.nights_not_credited || 0;
+  if (uncredited) {
+    caption += ' ' + uncredited + ' ' + plural(uncredited, 'night') + ' ' +
+      (uncredited === 1 ? 'is' : 'are') + ' missing from every row: two cards for ' +
+      (uncredited === 1 ? 'it' : 'them') + ' agree about the result and not about ' +
+      'who played, so the ' + plural(uncredited, 'night') + ' ' +
+      (uncredited === 1 ? 'counts' : 'count') + ' for the team and for nobody in it.';
+  }
+  /* The Share column is a share of the team's games won, and item 1.2 decided it may
+   * come to less than the whole rather than credit a team's games to a person this
+   * table has no row for. Which is honest and, unsaid, indistinguishable from a
+   * broken sum: the demo prints 22.0%, 15.2%, 49.2% for one team and nothing on the
+   * page accounts for the rest. So the caption accounts for it, in games first,
+   * because games are what the shortfall is made of, and then in the document's own
+   * percentage -- which is taken there from the games, not here from the cells the
+   * page rounded to print them.
+   *
+   * Both directions, because a rubber with more names on it than the format has places
+   * pays each of them a whole place's share, and then the column a reader adds up comes
+   * to more than a hundred. One figure with a sign on it rather than two fields: it is
+   * one subtraction, and what the reader's own addition shows is its net.
+   *
+   * Guarded on the games and not on that percentage, which rounds both ways: a team
+   * four hundredths of a game short would be told it falls 0.0% short of a hundred,
+   * and one demo team's complete column sums to 99.9%. */
+  var off = gap.games || 0;
+  if (off > 0) {
+    caption += ' The Share column falls ' + pct(gap.share_pct) +
+      ' short of 100%: ' + shareNum(off) + ' of the ' +
+      shareNum(gap.team_games_won) + ' games the team won belong to no row above.';
+  } else if (off < 0) {
+    caption += ' The Share column runs ' + pct(-gap.share_pct) +
+      ' past 100%: the rows above are credited with ' + shareNum(-off) +
+      ' games more than the ' + shareNum(gap.team_games_won) + ' the team won.';
+  }
+  /* And then why, in the counts the same walk made while it was deciding what to
+   * credit: a rubber with somebody in it this table has no row for, a rubber the card
+   * is a name short of, and a rubber the card has a name too many on. Counted there per
+   * rubber rather than per name, because a rubber is what a reader would go and look
+   * at.
+   *
+   * Beside the sentence above rather than inside it, because the two are about different
+   * things and one can be silent while the others are not. A season with a rubber short
+   * a name and a rubber paying twice nets to zero -- measured: 94 of 94 games, a column
+   * adding to exactly 100.0% -- and nesting these under the sum took all three reasons
+   * down with it, leaving a page that said nothing about three rubbers a club can fix. */
+  var strangers = gap.rubbers_with_outsiders || 0;
+  var blanks = gap.rubbers_short_a_name || 0;
+  var crowded = gap.rubbers_overfull || 0;
+  /* One clause per cause, each on its own count: a season can have all three, and "or
+   * else it must be the other one" is how a page states the cause it did not find. */
+  if (strangers) {
+    caption += ' ' + strangers + ' ' + plural(strangers, 'rubber') + ' ' +
+      (strangers === 1 ? 'was' : 'were') +
+      ' played by somebody with no row in this table — borrowed for the ' +
+      'night, or registered to another squad.';
+  }
+  if (blanks) {
+    caption += ' ' + blanks + ' ' + plural(blanks, 'rubber') + ' ' +
+      (blanks === 1 ? 'is' : 'are') + ' short a name on the scorecard, so half of ' +
+      (blanks === 1 ? 'it' : 'each') + ' belongs to nobody.';
+  }
+  if (crowded) {
+    caption += ' ' + crowded + ' ' + plural(crowded, 'rubber') + ' ' +
+      (crowded === 1 ? 'has' : 'have') + ' more names on the scorecard than places ' +
+      'to play ' + (crowded === 1 ? 'it' : 'them') + ', so ' +
+      (crowded === 1 ? 'its' : 'their') + ' games are credited more than once.';
+  }
+  /* Only where a rubber was found to point at. A night credited to nobody is listed
+   * below as the pair of files it came from and not as a rubber, so on a season
+   * whose whole shortfall is that night this would send a reader looking for
+   * something the section does not list. */
+  var found = strangers + blanks + crowded;
+  if (found) {
+    caption += ' The data health section names ' + (found === 1 ? 'it' : 'them') + '.';
+  }
   return el('div', { class: 'table-wrap' }, [
-    table(['Player', { label: 'C', title: 'Captain' }, 'M', 'Sets', 'W–L', 'Win %',
-      'GF', 'GA', 'Diff',
+    table(['Player', { label: 'C', title: 'Captain' },
+      { label: 'M', title: 'Matches played' }, COL.setsPlayed, COL.setsWonLost,
+      { label: 'Win %', title: 'Sets won as a percentage of completed sets' },
+      COL.gamesFor, COL.gamesAgainst, COL.gamesDiff,
       { label: 'Share', title: 'Share of the team’s games won' },
       { label: 'S', title: 'Singles rating' }, { label: 'D', title: 'Doubles rating' }],
-      rows, { caption: 'Contribution of each registered player.' })
+      rows, { caption: caption, csv: t.name + ' players' })
   ]);
 }
 
 function teamH2HTable(t) {
   var others = IDX.teamsOrdered.filter(function (o) { return o.slug !== t.slug; });
-  var rows = others.map(function (o) {
-    var rec = h2hFor(t.slug, o.slug);
+  var records = others.map(function (o) { return h2hFor(t.slug, o.slug); });
+  var showUndecided = anyUndecidedMeetings(records);
+  var rows = others.map(function (o, i) {
+    var rec = records[i];
     var scheduled = (S.fixtures || []).filter(function (f) {
       return !f.played && ((f.home === t.slug && f.away === o.slug) ||
         (f.home === o.slug && f.away === t.slug));
@@ -2173,18 +3310,32 @@ function teamH2HTable(t) {
       cells: [
         teamLink(o, { long: true }),
         rec ? rec.played : 0,
-        rec ? rec.won + '–' + rec.lost + (rec.drawn ? '–' + rec.drawn : '') : { text: '—', cls: 'muted' },
+        rec ? rec.won + '–' + rec.lost + (rec.drawn ? '–' + rec.drawn : '') : { text: '—', cls: 'muted' }
+      ].concat(showUndecided ? [
+        rec && rec.undecided ? rec.undecided : { text: '—', cls: 'muted' }
+      ] : []).concat([
         rec ? num(rec.gamesFor) + '–' + num(rec.gamesAgainst) : { text: '—', cls: 'muted' },
         rec ? signed(rec.gamesFor - rec.gamesAgainst) : { text: '—', cls: 'muted' },
         scheduled.length ? scheduled.map(function (f) { return roundTick(f.round); }).join(', ')
           : { text: '—', cls: 'muted' }
-      ]
+      ])
     };
   });
+  var caption = 'Record against each other team in this competition.';
+  if (showUndecided) {
+    caption += ' A meeting that reached no result counts in Met and in Games, and in neither side of W–L.';
+  }
+  caption += finalsMeetingsNote(finalsMeetings(records));
   return el('div', { class: 'table-wrap' }, [
-    table(['Opponent', 'Met', 'W–L', 'Games', 'Diff',
-      { label: 'To come', title: 'Rounds where this fixture is still to be played' }],
-      rows, { caption: 'Record against each other team in this competition.' })
+    table(['Opponent', { label: 'Met', title: 'Meetings played' },
+      COL.meetingsWonLost]
+      .concat(showUndecided ? [{ label: 'No result',
+        title: 'Meetings played that reached no result: their games are counted, ' +
+          'their outcome is not' }] : [])
+      .concat([
+        { label: 'Games', title: 'Games for–against' }, COL.gamesDiff,
+        { label: 'To come', title: 'Rounds where this fixture is still to be played' }]),
+      rows, { caption: caption, csv: t.name + ' head to head' })
   ]);
 }
 
@@ -2195,13 +3346,13 @@ function renderPlayer(main, slug) {
   if (!p) { renderMissing(main, 'No player with the id "' + slug + '".'); return; }
   var team = teamOf(p.team);
   var sets = setsOfPlayer(p.slug);
-  document.title = p.name + ' — ' + (meta().label || '');
+  setPageName(p.name);
 
   main.appendChild(el('a', { class: 'crumb', href: '#/players', text: '← All players' }));
   var h1 = el('h1', { text: p.name + (p.is_captain ? ' (captain)' : '') });
   var nameFlag = provenanceFlag('players');
   if (nameFlag) h1.appendChild(nameFlag);
-  main.appendChild(el('div', { class: 'view-head' }, [
+  var head = [
     h1,
     el('p', {}, [
       team ? teamLink(team, { long: true })
@@ -2212,7 +3363,15 @@ function renderPlayer(main, slug) {
         (p.rating && p.rating.doubles !== null && p.rating.doubles !== undefined
           ? num(p.rating.doubles, 2) : '—') + ' doubles')
     ])
+  ];
+  var career = careersHref(p.slug);
+  if (career) head.push(el('p', { class: 'career-link' }, [
+    el('a', { href: career, text: 'Career across seasons →' })
   ]));
+  main.appendChild(el('div', { class: 'view-head' }, head));
+  if (meta().players) {
+    main.appendChild(el('p', { class: 'muted', text: meta().players_detail }));
+  }
 
   if (!p.matches) {
     main.appendChild(note('warning', 'No appearances yet',
@@ -2231,9 +3390,13 @@ function renderPlayer(main, slug) {
     tile('Games', num(p.games_won) + '–' + num(p.games_lost),
       signed(p.games_diff) + ' differential'),
     tile('Set streak', streakWord, 'longest win run ' + num(p.longest_win_streak)),
+    // A doubles rubber's games are shared by the pair, so this figure can be a
+    // half and is printed to one place. Rounding it to a whole number would show
+    // a column of figures that does not add up to the total beside it.
     tile('Team share', p.contribution ? pct(p.contribution.share_pct) : '—',
-      p.contribution ? num(p.contribution.games_won) + ' of ' +
-        num(p.contribution.team_games_won) + ' team games won' : '—')
+      !p.team ? 'on no team’s roster'
+        : p.contribution ? shareNum(p.contribution.games_won) + ' of ' +
+          num(p.contribution.team_games_won) + ' team games won' : '—')
   ]));
 
   var charts = el('div', { class: 'grid charts', style: { 'margin-top': '12px' } });
@@ -2246,11 +3409,11 @@ function renderPlayer(main, slug) {
 
   main.appendChild(sectionTitle('Doubles partners'));
   main.appendChild(el('div', { class: 'card' }, [pairTable(p.partners, 'partner',
-    'No doubles set played yet.')]));
+    'No doubles set played yet.', p.name)]));
 
   main.appendChild(sectionTitle('Opponents'));
   main.appendChild(el('div', { class: 'card' }, [pairTable(p.opponents, 'opponent',
-    'No opponent faced yet.')]));
+    'No opponent faced yet.', p.name)]));
 
   if ((p.rating_history || []).length > 1) {
     main.appendChild(sectionTitle('Rating as printed each round'));
@@ -2260,7 +3423,8 @@ function renderPlayer(main, slug) {
           return [roundTick(h.round),
             h.singles === null || h.singles === undefined ? { text: '—', cls: 'muted' } : num(h.singles, 2),
             h.doubles === null || h.doubles === undefined ? { text: '—', cls: 'muted' } : num(h.doubles, 2)];
-        }), { caption: 'Ratings come off the scorecard, so a mid-season change shows up here.' })
+        }), { caption: 'Ratings come off the scorecard, so a mid-season change shows up here.',
+          csv: p.name + ' ratings' })
       ])
     ]));
   }
@@ -2298,7 +3462,7 @@ function renderPlayer(main, slug) {
     });
     box.appendChild(el('div', { class: 'table-wrap' }, [
       table(['Round', 'Opponent team', 'Slot', 'With', 'Against', 'Games', 'Result'], rows,
-        { caption: 'Derived from the set rows on each scorecard.' })
+        { caption: 'Derived from the set rows on each scorecard.', csv: p.name + ' sets' })
     ]));
   }
   main.appendChild(box);
@@ -2330,6 +3494,7 @@ function disciplineChart(p) {
   });
   return hbarCard({
     title: 'Singles and doubles',
+    tableCsv: p.name + ' singles and doubles',
     sub: 'Games won and lost in each discipline.',
     rows: rows,
     mode: 'diverging',
@@ -2378,6 +3543,7 @@ function opponentDiffChart(p) {
   });
   return hbarCard({
     title: 'Games differential by opponent',
+    tableCsv: p.name + ' games differential by opponent',
     sub: 'Above the line to the right, behind to the left.',
     rows: rows,
     mode: 'diverging',
@@ -2388,7 +3554,8 @@ function opponentDiffChart(p) {
       { name: 'Behind', color: PAL.divNeg, kind: 'rect' }
     ]),
     empty: 'No opponent faced yet.',
-    tableHead: ['Opponent', 'Sets met', 'W–L', 'Games won', 'Games lost', 'Diff'],
+    tableHead: ['Opponent', 'Sets met', COL.setsWonLost, 'Games won', 'Games lost',
+      COL.gamesDiff],
     tableRow: function (r) {
       var o = list[rows.indexOf(r)];
       return [o.name, num(o.sets), o.won + '–' + o.lost, num(o.games_won),
@@ -2397,16 +3564,24 @@ function opponentDiffChart(p) {
   });
 }
 
+/* The rate is the Python's, out of the sets decided in the slot as the Win rate
+ * tile's is. Worked out here as won out of played, it counted a retired set against
+ * the player in this table and nowhere else. A slot with none decided, and every
+ * slot of a document written before the field, gets the muted dash, never a figure
+ * of the page's own. */
 function slotAppearanceTable(p) {
   var rows = IDX.slots.map(function (slot) {
     var rec = (p.by_slot || {})[slot.key] || { played: 0, won: 0 };
     return [slotTitle(slot.key), num(rec.played), num(rec.won),
-      rec.played ? pct(100 * rec.won / rec.played) : { text: '—', cls: 'muted' }];
+      rec.win_pct === null || rec.win_pct === undefined
+        ? { text: '—', cls: 'muted' } : pct(rec.win_pct)];
   });
   var out = el('div');
   out.appendChild(el('div', { class: 'table-wrap' }, [
-    table(['Slot', 'Played', 'Won', 'Win rate'], rows,
-      { caption: 'Which of this format’s set slots the player is used in.' })
+    table(['Slot', 'Played', 'Won',
+      { label: 'Win rate', title: 'Sets won as a percentage of completed sets' }], rows,
+      { caption: 'Which of this format’s set slots the player is used in.',
+        csv: p.name + ' set slots' })
   ]));
   // Matches, not sets: stats.py counts fill_in_appearances as the number of
   // distinct match keys the player appeared in off their own roster -- the same
@@ -2421,7 +3596,7 @@ function slotAppearanceTable(p) {
   return out;
 }
 
-function pairTable(list, kind, emptyText) {
+function pairTable(list, kind, emptyText, who) {
   if (!list || !list.length) return el('p', { class: 'empty-note', text: emptyText });
   var rows = list.slice().sort(function (a, b) { return b.sets - a.sets; }).map(function (r) {
     return {
@@ -2431,17 +3606,41 @@ function pairTable(list, kind, emptyText) {
     };
   });
   return el('div', { class: 'table-wrap' }, [
-    table([kind === 'partner' ? 'Partner' : 'Opponent', 'Sets', 'W–L', 'GF', 'GA', 'Diff'],
+    table([kind === 'partner' ? 'Partner' : 'Opponent', COL.setsPlayed,
+      COL.setsWonLost, COL.gamesFor, COL.gamesAgainst, COL.gamesDiff],
       rows, { caption: kind === 'partner'
         ? 'Record in doubles sets played together.'
-        : 'Record in every set contested against this player.' })
+        : 'Record in every set contested against this player.',
+        // The player's name as well as the kind: a folder of downloads holding
+        // `partners.csv` twice is a folder holding one of them under a number.
+        csv: (who ? who + ' ' : '') + (kind === 'partner' ? 'partners' : 'opponents') })
   ]);
 }
 
 /* =========================================================== view: matches == */
 
+/* The other cards of *m*'s night, as the exporter names them: by their places in the
+ * season's `matches`, which the page never reorders. By place and not by `source`,
+ * because a page that withholds names withholds every file name holding one, and
+ * those all read the same: joined on them, every such card was every other's, and a
+ * night of two cards showed four. A place the season does not hold is nobody. */
+function otherCards(m) {
+  var all = S.matches || [];
+  return (m.other_cards || []).map(function (at) { return all[at]; })
+    .filter(function (x) { return x !== undefined; });
+}
+
+/* The cards a list of keys names, in its order: a fixture's or a round's, as the
+ * exporter lists them. Every card has a key and no two share one, so a card that
+ * printed no match id is found, and so is each card of two that printed one. A key
+ * the season does not hold is nobody, rather than a card drawn from `undefined`. */
+function cardsOf(keys) {
+  return (keys || []).map(function (key) { return IDX.matchByKey[key]; })
+    .filter(function (x) { return x !== undefined; });
+}
+
 function renderMatches(main) {
-  document.title = 'Matches — ' + (meta().label || '');
+  setPageName('Matches');
   // A derived draw describes only rounds that happened (F2), so promising "every
   // fixture in the draw" would read as a missing schedule rather than as an
   // absent one.
@@ -2466,8 +3665,17 @@ function renderMatches(main) {
     main.appendChild(el('p', { class: 'empty-note', text: 'No rounds recorded yet.' }));
     return;
   }
+  // Every card this walk puts on the page, in the order it puts them there, which is
+  // what the table of every rubber is built from.
+  var shown = [];
   rounds.forEach(function (r) {
     var fixtures = (S.fixtures || []).filter(function (f) { return f.round === r.number; });
+    // A round with no cards is either one the season has not reached or one it went
+    // past leaving a card behind, and `r.played` cannot tell the two apart: it said
+    // a round had not been played over rows for cards from that very round. The rows'
+    // own answer settles the heading, so the two cannot disagree on one screen.
+    var absent = fixtures.filter(function (f) { return f.card_missing; }).length;
+    var state = r.played ? 'played' : (absent ? 'no cards yet' : 'not played yet');
     var head2 = el('div', { class: 'round-head' }, [
       // A finals round never contributes ladder points (F11), and it is the
       // round's own non-numeric label that says it is one.
@@ -2476,55 +3684,203 @@ function renderMatches(main) {
       // which is the reader's answer to "why is this round in the holidays?".
       el('span', { class: 'date',
         text: longDate(r.date) + (r.note ? ' (' + r.note + ')' : '') }),
-      el('span', { class: 'pill ' + (r.played ? 'good' : '') }, [
+      el('span', { class: 'pill ' + (r.played ? 'good' : (absent ? 'warning' : '')) }, [
         el('span', { class: 'dot', 'aria-hidden': 'true' }),
-        el('span', { text: r.played ? 'played' : 'not played yet' })
+        el('span', { text: state })
       ])
     ]);
     main.appendChild(head2);
     var box = el('div', { class: 'card' });
-    if (!fixtures.length && !(r.matches || []).length) {
+    if (!fixtures.length) {
       box.appendChild(el('p', { class: 'empty-note',
         text: r.is_finals
           ? 'Pairings are set by ladder position once the regular rounds are in.'
           : 'No fixtures listed for this round.' }));
     }
-    if (r.is_finals) {
-      box.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px' },
-        text: 'Finals do not contribute ladder points.' }));
-    }
+    if (r.is_finals) box.appendChild(finalsNote());
+    // Every card of the fixture, in the order the build read them, which is the
+    // order the finding and the data health section name them in: a clash's, so the
+    // page does not choose a reading, and a copy's, which says it is one. The
+    // exporter puts every card under exactly one fixture, so this is every card.
     fixtures.forEach(function (f) {
-      var m = f.match_id ? IDX.matchById[f.match_id] : null;
-      if (m) box.appendChild(matchCard(m));
-      else box.appendChild(scheduledRow(f));
-    });
-    // A card whose match id is not in any fixture still gets shown.
-    (r.matches || []).forEach(function (id) {
-      var known = fixtures.some(function (f) { return f.match_id === id; });
-      if (!known && IDX.matchById[id]) box.appendChild(matchCard(IDX.matchById[id]));
+      var cards = cardsOf(f.keys);
+      if (!cards.length) box.appendChild(scheduledRow(f));
+      cards.forEach(function (card) {
+        box.appendChild(matchCard(card));
+        shown.push(card);
+      });
     });
     (r.byes || []).forEach(function (slug) { box.appendChild(byeRow(slug)); });
     main.appendChild(box);
   });
+  // Under the heading, where the reader arrives, rather than after a page as long as
+  // the season. Built after the walk because it is the walk's list.
+  var every = rubbersCard(shown);
+  if (every) main.insertBefore(every, head.nextSibling);
+}
+
+/* Every rubber on the cards this page shows, in one table, so that a season of set
+ * rows can leave the page the way every other table does. The set rows inside each
+ * card have no Copy or CSV button of their own, deliberately, since a pair on every
+ * card is two buttons to every three or four rows; and until this there was no other
+ * way off the page for any of them: measured, 15 tables and 60 rows on the demo
+ * season's matches page, none exporting.
+ *
+ * Kept off the screen until asked for, because it more than doubles the page:
+ * measured at 1280px, the demo season's matches page is 1585px tall with it shut and
+ * 3860px open. The button is `.table-toggle`, so it is off the printed sheet with the
+ * charts' Values buttons, and the table prints only when it is open. */
+function rubbersCard(matches) {
+  var rows = [];
+  matches.forEach(function (m) {
+    (m.sets || []).forEach(function (st) { rows.push(rubberRow(m, st)); });
+  });
+  if (!rows.length) return null;
+  var wrap = el('div', { class: 'table-wrap' }, [
+    table(['Date', 'Round', 'Match id', 'Home', 'Away', 'Set', 'Home players',
+           'Home games', 'Away games', 'Away players', 'Status',
+           { label: 'Winner', title: 'The side the rubber went to, if it went to ' +
+             'either' },
+           { label: 'Night', title: 'What became of the night the rubber was ' +
+             'played on' }],
+      rows,
+      { caption: 'Every rubber on the cards below, in the order they are listed.',
+        csv: 'all rubbers' })
+  ]);
+  var box = el('div', { class: 'card all-rubbers', hidden: true }, [wrap]);
+  var label = 'All ' + rows.length + ' ' + plural(rows.length, 'rubber') + ' in one table';
+  return el('div', { class: 'rubbers' }, [
+    el('p', { class: 'rubbers-toggle' }, [
+      tableToggle(box, wrap, label, 'Hide the table of every rubber')
+    ]),
+    box
+  ]);
+}
+
+/* One row of the season's table of rubbers: the night it belongs to, then the row the
+ * night's own card prints -- through `setRow`, so the file and the card cannot come to
+ * disagree about a rubber's players, games or status -- then the two things a row
+ * loses when it leaves its card.
+ *
+ * Who won, because the card says it with a weight and a colour and a file keeps
+ * neither. From the season, which decides it with the forfeit ticks and the
+ * retirements in hand: measured, working it out from the games here would disagree
+ * once in each season measured, giving a 5-4 rubber that was retired to the side that
+ * was ahead. A 0-0 rubber nobody came for, which neither season had, would go to
+ * nobody.
+ *
+ * And what became of the night, because a washout's rubbers were won and count for
+ * nothing, and on the card only the sentence above them says so.
+ *
+ * The date is shown the long way, as every date on the page is, and leaves as ISO:
+ * measured, LibreOffice read `Wed 19 Aug 2026` as text and `2026-08-19` as a date,
+ * and a column of text sorts Fri before Wed. */
+function rubberRow(m, st) {
+  return [
+    m.date ? el('span', { text: longDate(m.date), 'data-export': m.date }) : null,
+    m.round, m.id || null, teamName(m.home), teamName(m.away)
+  ].concat(setRow(m, st)).concat([
+    st.winner === 'home' ? teamName(m.home)
+      : st.winner === 'away' ? teamName(m.away) : null,
+    upperFirst(uncountedWords(m) || m.status)
+  ]);
+}
+
+/* What a finals night is worth, in one place. The matches list says it on the round
+ * and a single match's page says it on the card, and two copies of one sentence is how
+ * two pages of this dashboard came to word the same rule differently. */
+function finalsNote() {
+  return el('p', { class: 'foot muted', style: { 'font-size': '12px' },
+    text: 'Finals do not contribute ladder points.' });
+}
+
+/* =========================================================== view: match == */
+
+/* One night, at an address a club can send somebody.
+ *
+ * The id is the association's: Match Centre prints it on the scorecard, the reader
+ * transcribes it and the exporter writes it through, so `#/match/4200003` still opens
+ * the same night after a rebuild and after the next round lands. A position in the
+ * read order would not -- the tree is walked in directory order, and a round arriving
+ * in a folder that sorts earlier moves every id after it.
+ *
+ * Every card with that id, not the one the index kept: two cards can print one id --
+ * the same night exported twice, or two clubs' readings of one fixture -- and
+ * validate.py reports it as something to go and fix. An index by id holds whichever
+ * was written last, so answering from it would show one card and hide the other
+ * without saying so. A card that printed no id is addressed by nothing, which is also
+ * what makes `#/match/` with nothing after it a page that was not found rather than
+ * whichever card had no number. */
+function matchesWithId(id) {
+  return (S.matches || []).filter(function (m) { return !!m.id && m.id === id; });
+}
+
+function renderMatch(main, id) {
+  var found = matchesWithId(id);
+  if (!found.length) {
+    // Nothing is named before this returns, so the sheet is still the club's: the
+    // router has already put the season in the title. The id is said back to the
+    // reader because it is the one thing they can check against the card in front
+    // of them.
+    renderMissing(main, id
+      ? 'No card in this competition prints match id ' + id + '. Every card here ' +
+        'shows its own, beside the date under its set scores.'
+      : 'That address names no match. A match is addressed by the id printed on ' +
+        'its scorecard.');
+    return;
+  }
+  var m = found[0];
+  var fixture = teamName(m.home) + ' v ' + teamName(m.away);
+  setPageName(fixture);
+  main.appendChild(el('a', { class: 'crumb', href: '#/matches', text: '← All matches' }));
+  main.appendChild(el('div', { class: 'view-head' }, [
+    el('h1', { text: fixture }),
+    el('p', { text: dotted([roundTitle(m.round), longDate(m.date), matchIdWords(m)]) })
+  ]));
+  // Where a reader who arrived from a link goes next: this night is one of eighteen
+  // each of these two teams played, and nothing else on the page leads to either.
+  main.appendChild(el('p', { class: 'sub' }, [
+    document.createTextNode('Both teams: '),
+    teamLinkBySlug(m.home, { long: true }),
+    document.createTextNode(' · '),
+    teamLinkBySlug(m.away, { long: true })
+  ]));
+  var box = el('div', { class: 'card' });
+  var round = (S.rounds || []).filter(function (r) { return r.number === m.round; })[0];
+  if (round && round.is_finals) box.appendChild(finalsNote());
+  if (found.length > 1) {
+    box.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px' },
+      text: found.length + ' cards print this match id, so all of them are here. The ' +
+            'data health section on the front page lists them as a fault to fix.' }));
+  }
+  // Open, because the card is the page: a shared link that arrives holding one row to
+  // press has sent the reader somewhere they still have to look for the night.
+  found.forEach(function (x) { box.appendChild(matchCard(x, { open: true, own: true })); });
+  main.appendChild(box);
 }
 
 /* =========================================================== view: players == */
 
+/* Its own list rather than the shared COL specs, because these columns carry a sort
+ * key and a type as well -- but the same words, so a reader comparing this table with
+ * a team's page is reading one wording of GF and not two. */
 var PLAYER_COLS = [
   { key: 'name', label: 'Player', type: 'text' },
   { key: 'team', label: 'Team', type: 'text' },
   { key: 'matches', label: 'M', type: 'num', title: 'Matches played' },
-  { key: 'sets_played', label: 'Sets', type: 'num' },
-  { key: 'sets_won', label: 'Won', type: 'num' },
-  { key: 'win_pct', label: 'Win %', type: 'num' },
-  { key: 'games_won', label: 'GF', type: 'num', title: 'Games won' },
-  { key: 'games_lost', label: 'GA', type: 'num', title: 'Games lost' },
-  { key: 'games_diff', label: 'Diff', type: 'num' },
+  { key: 'sets_played', label: 'Sets', type: 'num', title: 'Sets played' },
+  { key: 'sets_won', label: 'Won', type: 'num', title: 'Sets won' },
+  { key: 'win_pct', label: 'Win %', type: 'num',
+    title: 'Sets won as a percentage of completed sets' },
+  { key: 'games_won', label: 'GF', type: 'num', title: 'Games for' },
+  { key: 'games_lost', label: 'GA', type: 'num', title: 'Games against' },
+  { key: 'games_diff', label: 'Diff', type: 'num', title: 'Games differential' },
   { key: 'singles_pct', label: 'S W-L', type: 'text', title: 'Singles record' },
   { key: 'doubles_pct', label: 'D W-L', type: 'text', title: 'Doubles record' },
-  { key: 'share', label: 'Share', type: 'num', title: 'Share of team games won' },
-  { key: 'rating_s', label: 'S rating', type: 'num' },
-  { key: 'rating_d', label: 'D rating', type: 'num' }
+  { key: 'share', label: 'Share', type: 'num',
+    title: 'Share of the team’s games won' },
+  { key: 'rating_s', label: 'S rating', type: 'num', title: 'Singles rating' },
+  { key: 'rating_d', label: 'D rating', type: 'num', title: 'Doubles rating' }
 ];
 
 function playerSortValue(p, key) {
@@ -2532,7 +3888,8 @@ function playerSortValue(p, key) {
     case 'name': return p.name;
     case 'team': return p.team_name || '';
     case 'win_pct': return p.win_pct === null || p.win_pct === undefined ? -1 : p.win_pct;
-    case 'share': return p.contribution ? p.contribution.share_pct : -1;
+    case 'share': return p.contribution && p.contribution.share_pct !== null &&
+      p.contribution.share_pct !== undefined ? p.contribution.share_pct : -1;
     case 'rating_s': return p.rating && p.rating.singles !== null &&
       p.rating.singles !== undefined ? p.rating.singles : -1;
     case 'rating_d': return p.rating && p.rating.doubles !== null &&
@@ -2544,7 +3901,7 @@ function playerSortValue(p, key) {
 }
 
 function renderPlayers(main) {
-  document.title = 'Players — ' + (meta().label || '');
+  setPageName('Players');
   var head = el('div', { class: 'view-head' }, [
     el('h1', { text: 'Players' }),
     el('p', { text: 'Every registered player, including those yet to play. ' +
@@ -2576,10 +3933,11 @@ function renderPlayers(main) {
     clear(host);
     var sorted = players.slice().sort(function (a, b) {
       var va = playerSortValue(a, PLAYER_SORT.key), vb = playerSortValue(b, PLAYER_SORT.key);
+      // Numeric, so that a withheld page's "Brindle Magpies #10" follows #9.
       var cmp = typeof va === 'string'
-        ? String(va).localeCompare(String(vb))
+        ? String(va).localeCompare(String(vb), undefined, { numeric: true })
         : (va - vb);
-      if (cmp === 0) return String(a.name).localeCompare(String(b.name));
+      if (cmp === 0) return String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
       return cmp * PLAYER_SORT.dir;
     });
     var head2 = PLAYER_COLS.map(function (c) {
@@ -2607,7 +3965,9 @@ function renderPlayers(main) {
           num(p.games_won), num(p.games_lost), signed(p.games_diff),
           (s.won || 0) + '–' + (s.lost || 0),
           (d.won || 0) + '–' + (d.lost || 0),
-          p.contribution ? pct(p.contribution.share_pct) : { text: '—', cls: 'muted' },
+          p.contribution && p.contribution.share_pct !== null &&
+            p.contribution.share_pct !== undefined
+            ? pct(p.contribution.share_pct) : { text: '—', cls: 'muted' },
           p.rating && p.rating.singles !== null && p.rating.singles !== undefined
             ? num(p.rating.singles, 2) : { text: '—', cls: 'muted' },
           p.rating && p.rating.doubles !== null && p.rating.doubles !== undefined
@@ -2617,7 +3977,8 @@ function renderPlayers(main) {
     });
     host.appendChild(el('div', { class: 'table-wrap' }, [
       table(head2, rows, { caption: (S.players || []).length + ' registered ' +
-        plural((S.players || []).length, 'player') + '. A dash means nothing recorded yet.' })
+        plural((S.players || []).length, 'player') + '. A dash means nothing recorded yet.',
+        csv: 'players' })
     ]));
   }
 }
@@ -2657,7 +4018,7 @@ function playersToCheck(players) {
   }).sort(function (a, b) {
     var byPlayed = (a.matches || 0) - (b.matches || 0);
     if (byPlayed) return byPlayed;
-    return String(a.name).localeCompare(String(b.name));
+    return String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
   });
 }
 
@@ -2710,7 +4071,7 @@ function playersToCheckCard(players) {
         { caption: flagged.length + ' of ' + players.length + ' ' +
           plural(players.length, 'player') + ' have played at most ' +
           CHECK_AT_MOST + ' ' + plural(CHECK_AT_MOST, 'match', 'matches') +
-          '. Everyone else is in the table above.' })
+          '. Everyone else is in the table above.', csv: 'players to check' })
     ])
   ]);
 }
@@ -2753,7 +4114,7 @@ function playerDiffChart(players) {
       { name: 'Behind', color: PAL.divNeg, kind: 'rect' }
     ]),
     empty: 'Nobody has played a set yet.',
-    tableHead: ['Player', 'Team', 'Games won', 'Games lost', 'Diff'],
+    tableHead: ['Player', 'Team', 'Games won', 'Games lost', COL.gamesDiff],
     tableRow: function (r) {
       var p = list[rows.indexOf(r)];
       return [p.name, p.team_name || '', num(p.games_won), num(p.games_lost), signed(p.games_diff)];
@@ -2767,7 +4128,20 @@ function playerDiffChart(players) {
  * the ladder when they are wrong, and none of them can be
  * read off a scoreline. So all three are named here, permanently, with the detail
  * strings export.py spells out from the Ruleset and the SetRule — a club running
- * the wrong preset can recognise it without reading any code. */
+ * the wrong preset can recognise it without reading any code.
+ *
+ * In two parts, and the split is the whole of item 3.22. The names are what a club
+ * recognises its competition by, so they are always on screen; the sentence that
+ * explains each one, and the sentence saying which config keys to change, are what
+ * a reader needs once. Together they cost 250px of a 640px phone — 39% of the
+ * screen, and the dashboard itself started 635px down, which is 5px of it visible
+ * before a scroll. Measured with `/tmp/bannerh.py`: the explanations are what wrap
+ * each line to two, four lines of them, and the closing advisory is three lines on
+ * its own. Behind a disclosure they cost one line, and nothing is hidden: a
+ * `<details>` is a control a reader can open, the print sheet forces it open (the
+ * banner is a caveat, and paper outlives the page), and hiding the banner itself on
+ * a phone — the cheap way to buy the same height — is what the tests for 3.12
+ * forbid. */
 function renderRulesBanner() {
   var main = document.getElementById('view');
   var host = hook('rules-banner', 'rules-banner', main ? main.parentNode : document.body, main);
@@ -2781,14 +4155,34 @@ function renderRulesBanner() {
      * average. A club comparing totals with its association has no other way to
      * see which convention produced the number in front of it. */
     ['Unplayed', r.unplayed, r.unplayed_detail],
+    /* Empty for almost every club, and the loop below drops a pair with nothing in
+     * it, so this row appears only where draws = false is set. There it is the
+     * reason a night is missing from the ladder on this very page, which is not
+     * something a reader should have to find in the terminal output of whoever ran
+     * the build. */
+    ['Draws', r.draws, r.draws_detail],
     ['Format', r.format, r.format_detail]
   ];
+  var more = el('details', { class: 'rules-more' });
+  more.appendChild(el('summary', { text: 'What these mean' }));
   pairs.forEach(function (bits) {
     if (!bits[1] && !bits[2]) return;
     var span = el('span', {}, [el('strong', { text: bits[0] + ': ' })]);
-    span.appendChild(document.createTextNode(bits[1] || ''));
-    if (bits[2]) span.appendChild(el('span', { class: 'muted', text: ' — ' + bits[2] }));
+    /* The explanation on the line itself where there is no name to put there. A
+     * label with nothing after its colon is worse than a long line, and it is the
+     * shape `draws` would take if the exporter ever wrote one of its pair without
+     * the other. */
+    span.appendChild(document.createTextNode(bits[1] || bits[2]));
     host.appendChild(span);
+    if (bits[1] && bits[2]) {
+      /* Labelled again inside, because an explanation reached by opening something
+       * is read on its own: "a bye or a washout is scored as nothing" has to say
+       * which of the five rules above it is about. */
+      more.appendChild(el('p', { class: 'rules-detail' }, [
+        el('strong', { text: bits[0] + ': ' }),
+        document.createTextNode(bits[2])
+      ]));
+    }
   });
   var slotNames = IDX.slots.map(function (s) { return s.key + ' ' + s.label; });
   if (slotNames.length) {
@@ -2799,12 +4193,39 @@ function renderRulesBanner() {
   }
   var formatFlag = provenanceFlag('format');
   if (formatFlag) host.appendChild(formatFlag);
-  host.appendChild(el('span', { class: 'muted',
+  more.appendChild(el('p', { class: 'rules-detail muted',
     text: 'These decide every points and ladder number on this page. ' +
-      'If they are not this competition’s rules, set scoring, sets, unplayed and format in config.toml.' }));
+      'If they are not this competition’s rules, set scoring, sets, unplayed, draws and format in config.toml.' }));
+  host.appendChild(more);
 }
 
 /* ============================================================ data health == */
+
+/* n refusals, apart: the folders among them are the build's count, and never a
+ * card, because how many cards a folder it could not list holds is what nobody
+ * knows. A document without the count was built before a folder was refused. */
+function refusedApart(n) {
+  var folders = meta().folders_unlisted || 0;
+  return { cards: n - folders, folders: folders };
+}
+
+/* The same n in the report's words, cards and then folders, one clause each for
+ * inWords to join into the sentence around them. */
+function refusedWords(n, card, unscored) {
+  var apart = refusedApart(n), said = [];
+  if (apart.cards) said.push(apart.cards + ' ' + plural(apart.cards, card) + unscored);
+  if (apart.folders) {
+    said.push(apart.folders + ' ' + plural(apart.folders, 'folder') + ' not opened');
+  }
+  return said;
+}
+
+/* items as a sentence lists them, "a", "a and b", "a, b and c": the build's
+ * scope.in_words, so the page and the report join the same count alike. */
+function inWords(items) {
+  if (items.length < 2) return items.join('');
+  return items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
+}
 
 function renderHealth() {
   var host = document.getElementById('health');
@@ -2813,17 +4234,22 @@ function renderHealth() {
   var m = meta();
   var v = (S && S.validation) || { ok: true, errors: [], warnings: [] };
   var errors = v.errors || [], warnings = v.warnings || [], rejected = v.rejected || [];
+  /* The competition's own errors, counted by the build: every document carries
+   * every refused card as an F4 error, and those are counted once, by the
+   * "seen and not scored" pill. A document written before the count existed
+   * has every error counted, which states a refusal twice and hides nothing. */
+  var own = typeof v.own_errors === 'number' ? v.own_errors : errors.length;
   var row = el('div', { class: 'health-row' });
 
-  var state = (errors.length || rejected.length) ? 'critical' : warnings.length ? 'warning' : 'good';
-  var label = errors.length
-    ? errors.length + ' validation ' + plural(errors.length, 'error')
+  var state = own ? 'critical' : warnings.length ? 'warning' : 'good';
+  var label = own
+    ? own + ' validation ' + plural(own, 'error')
     : warnings.length
       ? 'Validated with ' + warnings.length + ' ' + plural(warnings.length, 'warning')
-      : 'Validated clean';
+      : rejected.length ? 'No errors in the cards scored' : 'Validated clean';
   row.appendChild(el('span', { class: 'pill ' + state }, [
     el('span', { class: 'dot', 'aria-hidden': 'true' }),
-    el('span', { text: (errors.length ? '✕ ' : warnings.length ? '! ' : '✓ ') + label })
+    el('span', { text: (own ? '✕ ' : warnings.length ? '! ' : '✓ ') + label })
   ]));
   // Every PDF found is scored or named (F4), so the count is stated as a
   // fraction rather than as a total: "6 cards read" cannot distinguish six from
@@ -2833,11 +4259,18 @@ function renderHealth() {
     el('span', { text: (m.cards_scored || 0) + ' of ' + (m.cards_seen || 0) +
       ' ' + plural(m.cards_seen || 0, 'card') + ' scored' })
   ]));
+  // Neutral: a page that withholds names is doing what it was asked to.
+  if (m.players) {
+    row.appendChild(el('span', { class: 'pill' }, [
+      el('span', { class: 'dot', 'aria-hidden': 'true' }),
+      el('span', { text: 'names withheld' })
+    ]));
+  }
   if (rejected.length) {
     row.appendChild(el('span', { class: 'pill critical' }, [
       el('span', { class: 'dot', 'aria-hidden': 'true' }),
-      el('span', { text: '✕ ' + rejected.length + ' ' + plural(rejected.length, 'card') +
-        ' seen and not scored' })
+      el('span', { text: '✕ ' + inWords(refusedWords(rejected.length, 'card',
+        ' seen and not scored')) })
     ]));
   }
   var mismatched = (S.matches || []).filter(function (x) { return (x.warnings || []).length; }).length;
@@ -2860,20 +4293,44 @@ function renderHealth() {
 
   var provenance = provenanceBlock();
   if (provenance) host.appendChild(provenance);
+  /* On every page, because the panel is. The second sentence is what makes a
+   * message's config advice readable: it names a label, and the club finds the
+   * player it stands for in the report the build printed. */
+  if (m.players) {
+    host.appendChild(el('p', { class: 'muted', text: 'Players: ' + m.players_detail +
+      '. Messages on this page use the same labels. The report the build printed ' +
+      'names each player, for whoever keeps config.toml.' }));
+  }
 
-  if (S.format !== undefined && S.format !== SEASON_FORMAT) {
+  /* Two ways to be out of step, and both are said out loud. A document naming no
+   * format at all was written before the marker existed, which makes it older
+   * than format 1 rather than current -- the `S.format !== undefined &&` guard
+   * this replaced read that silence as agreement, and left a genuinely old
+   * document to render blanks with nothing on the page to explain them. */
+  if (S.format !== SEASON_FORMAT) {
     host.appendChild(note('warning', 'Schema version',
-      'This page reads season document format ' + SEASON_FORMAT + ' and the data says ' +
-      S.format + '. Some values may be missing or mean something else. Re-run ' +
+      'This page reads season document format ' + SEASON_FORMAT + ' and the data ' +
+      (S.format === undefined
+        ? 'names none, so it was built before this page started recording one'
+        : 'says ' + S.format) +
+      '. The season is not shown, as some of its values may be missing or mean ' +
+      'something else. Re-run ' +
       'python3 build.py to regenerate the dashboard beside its data.'));
   }
 
   if (errors.length || warnings.length) {
     var det = el('details');
-    if (errors.length) det.setAttribute('open', '');
-    det.appendChild(el('summary', { text: 'Data health detail (' + errors.length + ' ' +
-      plural(errors.length, 'error') + ', ' + warnings.length + ' ' +
-      plural(warnings.length, 'warning') + ')' }));
+    /* Counted as the pill counts. The list's other errors are the refused cards
+     * every document carries, named apart, as the report's own line names them,
+     * and they do not open it: the "seen and not scored" list already shows each.
+     * The errors and the warnings are one clause, so a page with no refusal reads
+     * as it always did. */
+    var refused = errors.length - own;
+    if (own) det.setAttribute('open', '');
+    det.appendChild(el('summary', { text: 'Data health detail (' + inWords([own + ' ' +
+      plural(own, 'error') + ', ' + warnings.length + ' ' +
+      plural(warnings.length, 'warning')].concat(refused ?
+        refusedWords(refused, 'card', ' not scored') : [])) + ')' }));
     var list = el('ul');
     errors.concat(warnings).forEach(function (item, i) {
       var isError = i < errors.length;
@@ -2881,7 +4338,8 @@ function renderHealth() {
       li.appendChild(el('strong', { text: (isError ? 'Error' : 'Warning') +
         (item.rule ? ' · ' + item.rule : '') + ': ' }));
       li.appendChild(document.createTextNode(item.message || String(item)));
-      if (item.subject) li.appendChild(el('code', { text: ' [' + item.subject + ']' }));
+      // Not where the message already begins with it: the build decided which.
+      if (item.subject && !item.subject_said) li.appendChild(el('code', { text: ' [' + item.subject + ']' }));
       if (item.detail) li.appendChild(el('span', { class: 'muted', text: ' ' + item.detail }));
       list.appendChild(li);
     });
@@ -2899,11 +4357,16 @@ function renderRejected(host, rejected) {
   if (!rejected || !rejected.length) return;
   var box = hook('rejected', 'rejected-list', host);
   if (!box) return;
-  box.appendChild(note('critical', rejected.length + ' ' +
-    plural(rejected.length, 'scorecard') + ' seen and not scored',
+  var apart = refusedApart(rejected.length), said = [];
+  if (apart.cards) said.push(
     'Each file below was found under the data folder and produced no result, so ' +
     'every number on this page is missing whatever it contained. Run ' +
-    'python3 tools/doctor.py on a path to see why it was refused.'));
+    'python3 tools/doctor.py on a path to see why it was refused.');
+  if (apart.folders) said.push('Each folder below could not be opened, so every ' +
+    'card in it is missing from every number on this page. The account that ' +
+    'runs the build needs permission to read it.');
+  box.appendChild(note('critical', inWords(refusedWords(rejected.length, 'scorecard',
+    ' seen and not scored')), said.join(' ')));
   rejected.forEach(function (r) {
     var item = el('p', { class: 'rejected-item' });
     item.appendChild(el('code', { text: r.path + (r.page ? ' page ' + (r.page + 1) : '') }));
@@ -2925,12 +4388,41 @@ function renderMissing(main, message) {
   ]));
 }
 
+/* What the page draws in place of any view when the document is of another format
+ * than this page's, under the Schema version note (4.68). Measured on the demo's
+ * document rewritten to older shapes, every view drawn anyway read a missing key
+ * as a verdict: at format 2 the match list said "scheduled" over 15 nights with
+ * cards, and at format 1 a team's page said "counts for nothing" 5 times. A later
+ * format may have changed anything. So nothing of the season is drawn, and this
+ * says so, pointing at the note rather than saying its numbers and remedy twice. */
+function renderWithheld(main) {
+  main.appendChild(el('div', { class: 'view-head' }, [
+    el('h1', { text: 'Season not shown' }),
+    el('p', { text: 'The Schema version note above says why, and what to run to ' +
+      'show it again.' })
+  ]));
+}
+
+/* `decodeURIComponent` throws on a malformed escape, and the router runs inside
+ * render() with nothing above it to catch: `#/team/%` took the whole dashboard blank,
+ * and a fragment gets typed, truncated in an email and pasted back by hand. A slug
+ * that will not decode is not a slug any team has, so handing the raw text on reaches
+ * the same not-found page by the route that does not throw. */
+function decodeOr(text) {
+  try {
+    return decodeURIComponent(text);
+  } catch (e) {
+    return text;
+  }
+}
+
 function parseRoute() {
   var hash = location.hash.replace(/^#\/?/, '');
   var parts = hash.split('/').filter(function (s) { return s.length; });
   if (!parts.length) return { view: 'overview' };
-  if (parts[0] === 'team') return { view: 'team', slug: decodeURIComponent(parts[1] || '') };
-  if (parts[0] === 'player') return { view: 'player', slug: decodeURIComponent(parts[1] || '') };
+  if (parts[0] === 'team') return { view: 'team', slug: decodeOr(parts[1] || '') };
+  if (parts[0] === 'player') return { view: 'player', slug: decodeOr(parts[1] || '') };
+  if (parts[0] === 'match') return { view: 'match', id: decodeOr(parts[1] || '') };
   if (parts[0] === 'matches') return { view: 'matches' };
   if (parts[0] === 'players') return { view: 'players' };
   return { view: 'overview' };
@@ -2947,7 +4439,33 @@ function markTabs(route) {
   if (picker) {
     picker.value = route.view === 'team' ? 'team:' + route.slug
       : route.view === 'player' ? 'player:' + route.slug : '';
+    // Setting .value fires no event, so the button beside it would otherwise keep
+    // whatever state the reader's last choice left it in.
+    markJumpReady(picker);
   }
+}
+
+/* What every printed sheet says, and what the browser tab says.
+ *
+ * The topbar prints, so sheet one of a printout names the club, the competition and the
+ * season. Sheets two onwards named nothing: 23 of 28 sheets across the five routes were
+ * numbers with nothing saying whose. CSS cannot repeat the bar in Chrome -- `position:
+ * fixed` does repeat it, into the page area where the content starts, and `@page` margins
+ * move the bar and the content down together -- but the browser's own print header
+ * repeats `document.title` on every sheet, and is ticked by default in the print dialog.
+ *
+ * So the title is the thing that has to carry the identity, and there is one of it. The
+ * five views used to write their own -- `Matches — ` + the competition, and four more
+ * wordings of that -- which is how all five came to be missing the club and the season:
+ * there was nowhere to add them once. The order matters because Chrome ellipsises the
+ * tail at about 110 characters of 8pt: the page's own name leads, since nothing else on
+ * the sheet repeats it, and the season is last, since every match sheet is covered in
+ * dates. Empty parts are dropped rather than joined, by dotted(), or a season file with
+ * no club in it prints its separators with nothing between them.
+ */
+function setPageName(what) {
+  var m = meta();
+  document.title = dotted([what, m.label, m.club, m.season_label]);
 }
 
 function render() {
@@ -2957,14 +4475,23 @@ function render() {
   hideTip();
   readPalette();
   var route = parseRoute();
-  document.title = (meta().label || 'Season') + ' — dashboard';
-  if (route.view === 'team') renderTeam(main, route.slug);
+  // The season's own name, before the dispatch: the overview's title is this and
+  // nothing more, and it is also what a mistyped team or player slug is left with,
+  // since those two answer with renderMissing() and return before naming anything.
+  setPageName('');
+  if (S.format !== SEASON_FORMAT) renderWithheld(main);
+  else if (route.view === 'team') renderTeam(main, route.slug);
   else if (route.view === 'player') renderPlayer(main, route.slug);
+  else if (route.view === 'match') renderMatch(main, route.id);
   else if (route.view === 'matches') renderMatches(main);
   else if (route.view === 'players') renderPlayers(main);
   else renderOverview(main);
   markTabs(route);
   drawCharts();
+  // Last, and here rather than inside each view: the wrappers are in the document
+  // by now, which is the first moment any of them can be measured.
+  markScrollRegions();
+  markStickyOffset();
   window.scrollTo(0, 0);
 }
 
@@ -2978,7 +4505,45 @@ function drawCharts() {
 var resizeTimer = null;
 function onResize() {
   if (resizeTimer) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(function () { readPalette(); drawCharts(); }, 150);
+  resizeTimer = setTimeout(function () {
+    readPalette();
+    drawCharts();
+    // The window is the thing a table is too wide for, so the answer changes here
+    // in both directions: a tab stop appears on the way narrow and goes again on
+    // the way back. The bar's height changes with the width too, and below the
+    // narrow breakpoint it stops sticking altogether.
+    markScrollRegions();
+    markStickyOffset();
+  }, 150);
+}
+
+/* What a scroll has to clear. The topbar is `position: sticky; top: 0`, so the page
+ * scrolls underneath it -- and every scroll the browser performs itself puts its
+ * target at the top of the page, which is exactly where the bar is. Measured at 360
+ * wide: Shift+Tab onto a control above the screen landed it 186px behind the bar, an
+ * anchor jump the same, and at 1280 an anchor jump lands 82px behind it. WCAG 2.2
+ * 2.4.11 (Focus Not Obscured (Minimum), Level AA) names the focus half of it; Find in
+ * page and every future in-page link are the same scroll.
+ *
+ * `scroll-padding-top` on the scrollport is the fix in one property: it tells the
+ * browser that the top of the page is not the top of the page, and the browser applies
+ * it to the scrolls it does on the reader's behalf without any of them being listed
+ * here.
+ *
+ * Measured rather than written down, because there is no one right number: the bar is
+ * 82px at 1280, 128px at 700 where its three rows wrap to two, 187px on a phone, and
+ * taller again with a long club name in it. And the question asked is `position`, not
+ * the width, so the stylesheet keeps the single decision about where the bar stops
+ * sticking: below that width it scrolls away like anything else, and a page still
+ * holding 187px clear would open every jump with a gap that nothing is in.
+ */
+function markStickyOffset() {
+  var bar = document.querySelector('.topbar');
+  if (!bar) return;
+  var stuck = getComputedStyle(bar).position === 'sticky';
+  // Rounded up: half a pixel of bar left over is still bar.
+  document.documentElement.style.scrollPaddingTop =
+    stuck ? Math.ceil(bar.getBoundingClientRect().height) + 'px' : '';
 }
 
 /* ================================================================== theme == */
@@ -2989,13 +4554,15 @@ function onResize() {
  * the picker page from the club name, so the two agree and one choice covers the
  * whole site. */
 function slugifyName(text) {
-  var s = String(text === null || text === undefined ? '' : text).toLowerCase();
+  var s = String(text === null || text === undefined ? '' : text);
   if (typeof s.normalize === 'function') {
     // Strip combining marks so an accented club name slugs the way slugs.py
     // slugs it. Guarded because String.prototype.normalize is not ES5.
     s = s.normalize('NFKD').replace(/[̀-ͯ]/g, '');
   }
-  return s.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  // Lowered after, as slugs.py folds: NFKD makes a capital of a superscript or a
+  // mathematical letter, which lowering first would leave to be dropped.
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function themeKey() {
@@ -3053,18 +4620,56 @@ function fillPicker() {
   picker.appendChild(gt);
   var gp = el('optgroup', { label: 'Players' });
   (S.players || []).slice().sort(function (a, b) {
-    return String(a.name).localeCompare(String(b.name));
+    return String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
   }).forEach(function (p) {
     gp.appendChild(el('option', { value: 'player:' + p.slug,
       text: p.name + (p.team_name ? ' — ' + teamShort(p.team) : '') }));
   });
   picker.appendChild(gp);
-  picker.addEventListener('change', function () {
+
+  function jump() {
     var v = picker.value;
+    // Enter with the prompt still selected asks to be taken nowhere, and '#/' is
+    // somewhere: the overview, arrived at by accident.
     if (!v) return;
     var bits = v.split(':');
     location.hash = '#/' + bits[0] + '/' + bits[1];
+  }
+
+  /* Choosing is not asking to be taken there. This used to navigate on `change`,
+   * and a closed <select> fires `change` on every arrow keypress -- so a reader
+   * looking for the twentieth player was taken to the nineteen before it on the
+   * way, each one a re-render, a scroll back to the top and a history entry, with
+   * the page they were reading gone before they had finished choosing. Back was
+   * then nineteen presses from where they started. A reader with a mouse sees the
+   * popup and commits once, and never meets any of it.
+   *
+   * WCAG 2.2 3.2.2 (On Input, Level A) draws the line for everybody rather than
+   * for the keyboard alone: changing the setting of a control must not change the
+   * context unless the reader was told beforehand that it would. So the list
+   * chooses, and the button goes -- one extra press for a mouse, and the first
+   * press that does what it says for everybody else. */
+  picker.addEventListener('change', function () { markJumpReady(picker); });
+  picker.addEventListener('keydown', function (e) {
+    // Enter reaches this only while the list is closed, because an open popup
+    // consumes its own keys -- and the closed list is exactly the case that had
+    // no way to commit. Two keystrokes for a mouse's one click would be this fix
+    // charging its cost to the reader it is for.
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    jump();
   });
+  var go = document.getElementById('entity-go');
+  if (go) go.addEventListener('click', jump);
+}
+
+/* Read off the list rather than remembered beside it: the value changes from two
+ * directions -- the reader choosing, and each render syncing it to the route --
+ * and a second copy of "is anything chosen" would be wrong in whichever direction
+ * it was not updated from. */
+function markJumpReady(picker) {
+  var go = document.getElementById('entity-go');
+  if (go) go.disabled = !picker.value;
 }
 
 /* ============================================================ season picker */
@@ -3080,9 +4685,39 @@ function fillPicker() {
  * which is how this dashboard is meant to be opened, the browser shows a listing
  * of the folder instead. */
 function rootHref() {
+  return seasonKey() ? '../../index.html' : '../index.html';
+}
+
+/* Which season of an archive this page is: its key, which is the folder the season
+ * was built into, or '' on a site of one season. Asked in one place because two
+ * things turn on it -- how far up the front page is, and the name of every file this
+ * page exports -- and two readings of one question are two chances to disagree. */
+function seasonKey() {
   var m = meta();
-  return (m.seasons_mode === 'multi' && m.season_key) ? '../../index.html'
-                                                     : '../index.html';
+  return m.seasons_mode === 'multi' ? (m.season_key || '') : '';
+}
+
+/* Whether this page is the whole dashboard: written by `build.py --single-file`
+ * with the stylesheet, this script and the season folded into it, and reaching its
+ * reader with no site around it. The folded page sets the flag itself, above this
+ * script, because the question is about the file and not about the season.
+ *
+ * Two things follow, and both are about not sending a reader somewhere that is not
+ * there: no link out to a front page (site.py removes the one in the markup; this
+ * covers the one the season picker builds), and a footer that names this file
+ * rather than a season-data.js nobody can open. */
+function isSingleFile() { return window.SINGLE_FILE === true; }
+
+/* This player's entry on the careers page, which build.py writes at the site root
+ * in multi-season mode only, and only by a build that prints players' names; ''
+ * where there is no such page to reach. meta.players is there only on a document
+ * that withholds them, and a withheld slug is a label for one season, which no
+ * career can be looked up by. Never from a one-file dashboard, which travels
+ * without the site around it. Built from rootHref(), so it is exactly as deep as
+ * the link to the front page beside it. */
+function careersHref(slug) {
+  if (meta().seasons_mode !== 'multi' || isSingleFile() || meta().players) return '';
+  return rootHref().replace(/index\.html$/, 'careers.html') + '#p-' + slug;
 }
 
 /* In multi mode the reader needs to know which season this ladder belongs to and
@@ -3116,8 +4751,10 @@ function fillSeasonPicker() {
             (derivedSeason ? ' (worked out, not declared)' : '')
     }));
     if (derivedSeason) node.setAttribute('title', provenanceAdvice('season'));
-    node.appendChild(el('option', { value: rootHref(),
-      text: 'All seasons and competitions…' }));
+    if (!isSingleFile()) {
+      node.appendChild(el('option', { value: rootHref(),
+        text: 'All seasons and competitions…' }));
+    }
     node.addEventListener('change', function () {
       if (node.value) location.href = node.value;
     });
@@ -3128,8 +4765,10 @@ function fillSeasonPicker() {
   node.appendChild(value);
   var flag = provenanceFlag('season');
   if (flag) node.appendChild(flag);
-  node.appendChild(el('a', { class: 'home-link', href: rootHref(),
-    text: 'All seasons →' }));
+  if (!isSingleFile()) {
+    node.appendChild(el('a', { class: 'home-link', href: rootHref(),
+      text: 'All seasons →' }));
+  }
 }
 
 /* ================================================================== boot === */
@@ -3142,9 +4781,24 @@ function fetchJson(url) {
   });
 }
 
-/* Priority: the real file over http, then the season-data.js carrier (the file://
- * escape hatch, since browsers block fetch of a sibling file), then a clear
- * message.
+/* Priority: the copy the page is already holding, then a request for season.json,
+ * then a clear message.
+ *
+ * season-data.js is a plain <script> and nothing here runs until it has been read,
+ * so by this line the whole season is in memory. It used to fetch season.json
+ * anyway and prefer it -- the same document, written out a second time. Measured
+ * in Chrome over http on an eight-team home-and-away season (/tmp/payload.py):
+ * 415KB of island, 414KB of season.json, 829KB of a 1,033KB page spent on 415KB of
+ * season. The fetch was asking the network for something already on the heap.
+ *
+ * It is kept as the fallback, because the island is not guaranteed: a folder can
+ * be published with season.json beside a shell that is served from somewhere else,
+ * and the case where neither arrives has to end at showLoadFailure()'s page rather
+ * than a blank screen.
+ *
+ * Whichever is read is named in the footer. That is not decoration: with the
+ * island preferred, hand-editing season.json and reloading changes nothing, and
+ * the page has to be able to say so.
  *
  * There is deliberately no sample/fixture fallback. Both sources here are written
  * by the same build run, so they cannot disagree; a third checked-in copy would
@@ -3152,14 +4806,13 @@ function fetchJson(url) {
  * on the very failure it was meant to soften. Showing nothing, with instructions,
  * is the safer failure — a wrong ladder looks exactly like a right one. */
 function loadSeason() {
+  if (window.SEASON_DATA) {
+    return Promise.resolve({ data: window.SEASON_DATA,
+                             note: isSingleFile() ? 'source: this file'
+                                                  : 'source: season-data.js' });
+  }
   return fetchJson('season.json')
-    .then(function (data) { return { data: data, note: 'source: season.json' }; })
-    .catch(function (err) {
-      if (window.SEASON_DATA) {
-        return { data: window.SEASON_DATA, note: 'source: season-data.js' };
-      }
-      throw err;
-    });
+    .then(function (data) { return { data: data, note: 'source: season.json' }; });
 }
 
 function showLoadFailure(err) {
@@ -3195,8 +4848,50 @@ function showLoadFailure(err) {
   }
 }
 
+/* The first tab stop on the page, and it used to be the one control that lost a
+ * reader's place. A skip link has to name the id of the region it skips to -- so
+ * its href is `#view`, and this page keeps its route in the fragment too. The
+ * browser's own jump therefore set location.hash to something the router reads as
+ * a route and cannot parse, parseRoute() fell through to the overview, and a
+ * reader on Matches who pressed Tab then Enter was handed the overview, scrolled
+ * to the top, with a URL that no longer said where they had been.
+ *
+ * There is no href that is both a valid skip target and a valid route, so the
+ * jump is refused and focus is moved here instead. The href stays in the markup,
+ * because a link needs one to be focusable at all, and because it is still the
+ * right behaviour in the one case this handler cannot cover: a press that lands
+ * before app.js has run.
+ *
+ * Rejected: teaching the router to ignore a fragment it does not recognise. That
+ * leaves the address bar saying `#view` after the press, which is a route the
+ * next reload cannot restore, and it adds a branch no shipped page can reach.
+ */
+function initSkipLink() {
+  var link = document.querySelector('.skip-link');
+  if (!link) return;
+  link.addEventListener('click', function (e) {
+    var id = (link.getAttribute('href') || '').replace(/^#/, '');
+    var target = id ? document.getElementById(id) : null;
+    // Nothing to focus: leave the browser to do whatever it would have done,
+    // which is at worst what this page did before.
+    if (!target) return;
+    e.preventDefault();
+    // focus() scrolls by "nearest", and this target is taller than the screen, so
+    // nearest is "do nothing": the press moved focus and left the reader looking at
+    // the middle of the content, or -- from the top -- at a first heading 169px behind
+    // the sticky bar. So the scroll is asked for in its own right, at the default
+    // block alignment of `start`, which is the one markStickyOffset() offsets.
+    target.focus({ preventScroll: true });
+    target.scrollIntoView();
+  });
+}
+
 function boot() {
   readPalette();
+  // Before the season, not after: a dashboard whose season.json is missing still
+  // has a page, and the reader who most needs to reach the message explaining
+  // that is the one who cannot use a mouse to get there.
+  initSkipLink();
   loadSeason().then(function (res) {
     S = res.data;
     SOURCE_NOTE = res.note;
@@ -3209,9 +4904,8 @@ function boot() {
     if (title) title.textContent = m.label || m.competition || 'Season dashboard';
     var brand = document.getElementById('brand-sub');
     if (brand) {
-      brand.textContent = [m.club, m.season_label, m.generated
-        ? 'generated ' + String(m.generated).replace('T', ' ') : '']
-        .filter(function (s) { return !!s; }).join(' · ');
+      brand.textContent = dotted([m.club, m.season_label, m.generated
+        ? 'generated ' + String(m.generated).replace('T', ' ') : '']);
     }
     var home = document.querySelector('.home-link');
     if (home) home.setAttribute('href', rootHref());

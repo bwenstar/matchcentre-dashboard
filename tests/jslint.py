@@ -20,23 +20,39 @@ it -- appending ``/* oops`` to a balanced file left it still looking balanced, s
 a bracket check alone called a file healthy that a browser would refuse to load.
 An unclosed literal is therefore reported in its own right rather than inferred.
 
-Known limitation, stated rather than hidden: a backtick inside a ``${...}``
-substitution inside a template literal will confuse the scanner. The dashboard
+Known limitations, stated rather than hidden. A backtick inside a ``${...}``
+substitution inside a template literal will confuse the scanner; the dashboard
 code is deliberately ES5-compatible and uses no template literals, and
-:func:`uses_template_literals` exists so a test can assert that stays true.
+:func:`uses_template_literals` exists so a test can assert that stays true. And
+telling a regular expression from a division is decided on what precedes the
+slash, which is a heuristic: after a keyword it is a regex, after a value it is
+division, so a reserved word used as a property name -- ``counts.in / 2`` -- is
+read as a regex. No such name appears in the dashboard.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["Fault", "blank_literals", "code_only", "unterminated", "balance",
+__all__ = ["Fault", "blank_literals", "code_only", "without_comments", "unterminated",
+           "balance",
            "uses_template_literals", "find_calls"]
 
 # A '/' begins a regular expression unless the previous significant character
 # could end a value -- after `)`, `]`, an identifier or a number it is division.
 _VALUE_END = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
                  "0123456789_$)]")
+
+# Except after these, which are words rather than values: `return /"/.test(s)` is a
+# regular expression, and read as a division the quote inside it opens a string that
+# runs to the end of the file. The letter before the '/' cannot tell the two apart, so
+# the whole word is read -- `noreturn / 2` is still a division.
+_WORD_BEFORE_REGEX = frozenset({
+    "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of",
+    "return", "throw", "typeof", "void", "yield",
+})
+_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                        "0123456789_$")
 
 _PAIRS = {"(": ")", "[": "]", "{": "}"}
 _CLOSERS = {v: k for k, v in _PAIRS.items()}
@@ -70,23 +86,44 @@ def _position(source: str, index: int) -> tuple[int, int]:
     return line, index - start + 1
 
 
-def _scan(source: str, *, templates: bool = True) -> tuple[str, Fault | None]:
+def _scan(source: str, *, templates: bool = True,
+          literals: bool = True) -> tuple[str, Fault | None]:
     """Blank out every literal, and report the first one that never closed.
 
     Returns the blanked text and the fault, if any. The text is always the same
     length as the input and keeps every newline, so line and column numbers
-    computed from it match the original file.
+    computed from it match the original file. With ``literals=False`` the text
+    returned has only its comments blanked; the scan that decides where each one
+    is stays the same scan, so the two answers cannot disagree about a comment.
     """
     out = list(source)
+    kept = list(source)    # the same text with only the comments blanked
     length = len(source)
     index = 0
     previous = ""          # last significant (non-space) code character
     fault: Fault | None = None
 
-    def blank(start: int, stop: int) -> None:
+    def blank(start: int, stop: int, *, comment: bool = False) -> None:
         for position in range(start, min(stop, length)):
             if out[position] != "\n":
                 out[position] = " "
+                if comment:
+                    kept[position] = " "
+
+    def word_before(at: int) -> str:
+        """The identifier ending just before ``at``, over already-blanked text.
+
+        Reading ``out`` rather than ``source`` is what makes a comment between the
+        word and the slash invisible: by the time the slash is reached everything
+        before it has been blanked, so ``return /* why */ /x/`` reads ``return``.
+        """
+        cursor = at - 1
+        while cursor >= 0 and out[cursor].isspace():
+            cursor -= 1
+        stop = cursor + 1
+        while cursor >= 0 and out[cursor] in _WORD_CHARS:
+            cursor -= 1
+        return "".join(out[cursor + 1:stop])
 
     def unclosed(start: int, opener: str, closer: str) -> None:
         nonlocal fault
@@ -104,7 +141,7 @@ def _scan(source: str, *, templates: bool = True) -> tuple[str, Fault | None]:
         if char == "/" and source.startswith("//", index):
             stop = source.find("\n", index)
             stop = length if stop < 0 else stop
-            blank(index, stop)
+            blank(index, stop, comment=True)
             index = stop
             continue
 
@@ -113,9 +150,9 @@ def _scan(source: str, *, templates: bool = True) -> tuple[str, Fault | None]:
             stop = source.find("*/", index + 2)
             if stop < 0:
                 unclosed(index, "/*", "*/")
-                blank(index, length)
+                blank(index, length, comment=True)
                 break
-            blank(index, stop + 2)
+            blank(index, stop + 2, comment=True)
             index = stop + 2
             continue
 
@@ -162,7 +199,8 @@ def _scan(source: str, *, templates: bool = True) -> tuple[str, Fault | None]:
             continue
 
         # Regular expression literal.
-        if char == "/" and previous not in _VALUE_END:
+        if char == "/" and (previous not in _VALUE_END
+                            or word_before(index) in _WORD_BEFORE_REGEX):
             cursor = index + 1
             in_class = False
             while cursor < length:
@@ -194,7 +232,7 @@ def _scan(source: str, *, templates: bool = True) -> tuple[str, Fault | None]:
             previous = char
         index += 1
 
-    return "".join(out), fault
+    return "".join(out if literals else kept), fault
 
 
 def blank_literals(source: str, *, templates: bool = True) -> str:
@@ -211,6 +249,17 @@ def blank_literals(source: str, *, templates: bool = True) -> str:
 def code_only(source: str) -> str:
     """Alias for :func:`blank_literals`, for callers that read better this way."""
     return blank_literals(source)
+
+
+def without_comments(source: str) -> str:
+    """``source`` with its comments replaced by spaces and every string kept.
+
+    What a page can say: a sentence is in a string, and a sentence in a comment is
+    a note to whoever reads the code. Same length and same newlines as the input,
+    so an offset found here is an offset into ``source`` and into
+    :func:`code_only`'s text alike.
+    """
+    return _scan(source, literals=False)[0]
 
 
 def unterminated(source: str) -> Fault | None:

@@ -17,18 +17,25 @@ asserts a *refusal*, and each names the failure it stands for.
 
 from __future__ import annotations
 
+import dataclasses
+import os
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from matchcentre import cardwriter as cw, pdf, scorecard        # noqa: E402
+from matchcentre import card as card_mod                        # noqa: E402
 from matchcentre import format as fmt_mod                       # noqa: E402
 from matchcentre.card import CardError                          # noqa: E402
-from matchcentre.model import SetStatus                         # noqa: E402
+from matchcentre.model import (SetStatus, forfeit_match_winner,  # noqa: E402
+                               forfeit_set_winner)
 
 
 HOME_PLAYERS = ("Alpha Ashford", "Bravo Beeching", "Charlie Cotterill")
@@ -129,6 +136,15 @@ class TestAnOrdinaryCardIsReadCorrectly(CardCase):
         self.assertEqual(card.court, 7)
         self.assertEqual(card.match_id, "1000042")
 
+    def test_a_card_that_prints_no_id_is_read_as_having_none(self):
+        # The dashboard addresses a match by this id -- `#/match/<id>` is a page a
+        # club can send somebody -- so what it does with a card that prints none
+        # rests on this being empty rather than filled in from somewhere. An id
+        # borrowed from the filename or from the read order is an address that opens
+        # a different night on the next build.
+        card = self.read(cw.CardSpec(match_id=""))
+        self.assertEqual(card.match_id, "")
+
     def test_team_names_are_kept_exactly_as_printed(self):
         card = self.read(cw.CardSpec(home_name="RIVERSIDE ROCKETS",
                                      away_name="HILLTOP RTC"))
@@ -172,6 +188,259 @@ class TestAnOrdinaryCardIsReadCorrectly(CardCase):
         self.assertAlmostEqual(ana.doubles, 3.97, places=2)
 
 
+class TestADateIsReadInEveryFormTheMessagesName(CardCase):
+    """A date printed any other way than ``18/08/2026`` was read as no date at all.
+
+    The reader knew two forms, ``dd/mm/yyyy`` and ``yyyy-mm-dd``. Measured with one
+    card per stamp (``/tmp/t4/scratch/i416b/probe_read.py``): ``18 August 2026``,
+    ``18 Aug 2026``, ``18-08-2026``, ``18.08.2026`` and ``18/08/26`` each came back
+    as date ``''`` with the warning "no date printed above the set table", which
+    was untrue of every one of them, and a season printed any of those ways was
+    refused whole -- six cards found, none scored.
+
+    The forms read now are the ones :data:`~matchcentre.card.DATE_FORMS` lists.
+    That list is what the warning and the refusal name to a club, so every example
+    in it is tested here against the reader rather than trusted. A numeric date is read day first,
+    which is the convention these cards follow, and a date impossible that way is
+    still read month first with a warning. Rejected: trying orders and formats until
+    one parses. ``05/08/2026`` is a real date both ways round, and a reader that
+    takes whichever parses first files a card on the wrong night without a word, so
+    a form outside the list is left unread and the warning says what would have
+    been read.
+    """
+
+    def test_every_form_the_messages_name_reads_as_the_date_it_prints(self):
+        self.assertTrue(card_mod.DATE_FORMS)
+        for _, form in card_mod.DATE_FORMS:
+            for when in (form, f"Tue {form} 7:00 PM"):
+                with self.subTest(when=when):
+                    card = self.read(cw.CardSpec(when=when))
+                    self.assertEqual(card.date, "2026-08-18")
+                    self.assertEqual(
+                        [w for w in card.warnings if "date" in w], [])
+
+    def test_the_messages_name_every_form_in_the_list_and_quote_no_date(self):
+        # By its notation, so the list cannot be read as dates found on the card
+        # and survives a redacted doctor report, which shapes every date in it.
+        said = card_mod.date_forms()
+        for name, form in card_mod.DATE_FORMS:
+            with self.subTest(name=name):
+                self.assertIn(name, said)
+                self.assertNotIn(form, said)
+        self.assertIn("YY as 20YY", said)
+
+    def test_a_month_in_words_is_read_in_any_case_and_any_abbreviation(self):
+        # Three letters or more, from the front of the name: `Sept` is how a
+        # September is commonly printed, and no list of abbreviations agrees on it.
+        # The full stop that marks a cut and the comma some print before the year
+        # change nothing about which day it is.
+        for when, date in (("18 AUG 2026", "2026-08-18"),
+                           ("18 august 2026", "2026-08-18"),
+                           ("18 Sept 2026", "2026-09-18"),
+                           ("3 May 2026", "2026-05-03"),
+                           ("18 Aug. 2026", "2026-08-18"),
+                           ("18 August, 2026", "2026-08-18")):
+            with self.subTest(when=when):
+                self.assertEqual(self.read(cw.CardSpec(when=when)).date, date)
+
+    def test_a_two_digit_year_is_read_in_this_century(self):
+        # The rule is 20yy and nothing cleverer. A pivot of the kind strptime uses
+        # would put `99` in 1999, a season no Match Centre export can be from; so
+        # would 2099, but refusing the card instead leaves a club whose template
+        # prints two digits with no dashboard and nothing it can change.
+        for when, date in (("18/08/26", "2026-08-18"), ("18.08.99", "2099-08-18"),
+                           ("05-03-00", "2000-03-05")):
+            with self.subTest(when=when):
+                self.assertEqual(self.read(cw.CardSpec(when=when)).date, date)
+
+    def test_a_numeric_date_is_read_day_first_whatever_separates_it(self):
+        for when in ("05/08/2026", "05-08-2026", "05.08.2026", "05/08/26"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(when=when))
+                self.assertEqual(card.date, "2026-08-05")
+                self.assertEqual([w for w in card.warnings if "date" in w], [])
+
+    def test_a_date_impossible_day_first_is_read_month_first_and_says_so(self):
+        for when in ("08/18/2026", "08-18-2026", "08.18.26"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(when=when))
+                self.assertEqual(card.date, "2026-08-18")
+                said = [w for w in card.warnings if "month/day/year" in w]
+                self.assertEqual(len(said), 1, card.warnings)
+
+    def test_a_date_that_is_not_a_real_one_is_quoted_and_left_unread(self):
+        # Quoted, because the club has to find it on the card to correct it; the
+        # figures are said to fail both ways round because both were tried, and a
+        # month in words or a year in front has only the one.
+        for when, says in (("32/13/2026", "'32/13/2026', is not a real date either "
+                                          "way round, "),
+                           ("31 February 2026", "'31 February 2026', is not a real "
+                                                "date, "),
+                           ("2026-13-45", "'2026-13-45', is not a real date, ")):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(when=when))
+                self.assertEqual(card.date, "")
+                said = [w for w in card.warnings if "date" in w]
+                self.assertEqual(len(said), 1, card.warnings)
+                self.assertIn(says, said[0])
+
+    def test_a_form_outside_the_list_is_not_guessed_at_and_the_warning_names_the_list(self):
+        for when in ("August 18, 2026", "18th August 2026", "2026/08/18",
+                     "18/08-2026", "18-Aug-2026", "18 Augustus 2026", "18 Ju 2026",
+                     "118/08/2026", "1/18/08/2026", "118 August 2026"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(when=when))
+                self.assertEqual(card.date, "")
+                said = [w for w in card.warnings if card_mod.date_forms() in w]
+                self.assertEqual(len(said), 1, card.warnings)
+
+
+class TestTheWeekdayIsReadAsPrintedAndNotWorkedOutFromTheDate(CardCase):
+    """``card.weekday`` was the date's own weekday again, so nothing could disagree.
+
+    ``_read_date`` returned ``strftime("%A")`` of the date it had read. Measured: a
+    card printing ``Wed 18/08/2026`` read as weekday ``'Tuesday'``, and a card
+    printing ``Tue 7:00 PM`` and no date read as weekday ``''``. Both things
+    :mod:`matchcentre.discover` does with the field were therefore dead: the
+    fallback that files a card whose date did not read by the weekday it prints,
+    and the note that a printed weekday disagrees with the date.
+
+    The weekday is now the word printed beside the date: the nearest word in front
+    of it, or failing that the word straight after it, and when no date reads the
+    nearest word in front of the start time, passing over what is left of the
+    date. In full or cut to three letters or more, and kept as that weekday's
+    name. Rejected: the nearest weekday word in front of the date whatever stands
+    between. The first draft read that, and a letterhead ``SAT 1 TENNIS`` on the
+    date's line then gave six false notes on a dated season and filed an undated
+    one as ``saturday-division-b``, a night none of its cards prints
+    (``/tmp/t4/scratch/i416b-review/probe/build.py``). Rejected too: any weekday
+    word in the header. The demo league's competition line prints ``Wednesday
+    Night Fixtures`` and a team can be called ``FRI 3``.
+    """
+
+    def test_a_weekday_the_date_contradicts_is_read_as_the_card_prints_it(self):
+        card = self.read(cw.CardSpec(when="Wed 18/08/2026 7:00 PM"))
+        self.assertEqual(card.date, "2026-08-18")
+        self.assertEqual(card.weekday, "Wednesday")
+
+    def test_every_spelling_of_a_weekday_is_read_as_its_name(self):
+        # In front of a Sunday's date, so that the name can only have come from
+        # the word: the date's own weekday is what the reader used to return.
+        for printed, name in (("Tue", "Tuesday"), ("Tues", "Tuesday"),
+                              ("TUE", "Tuesday"), ("Tuesday", "Tuesday"),
+                              ("tuesday", "Tuesday"), ("Tue.", "Tuesday"),
+                              ("Tuesday,", "Tuesday"), ("Tue:", "Tuesday"),
+                              ("Tue -", "Tuesday"), ("Weds", "Wednesday"),
+                              ("Thurs", "Thursday")):
+            with self.subTest(printed=printed):
+                card = self.read(cw.CardSpec(when=f"{printed} 23/08/2026 7:00 PM"))
+                self.assertEqual(card.date, "2026-08-23")
+                self.assertEqual(card.weekday, name)
+
+    def test_a_weekday_printed_after_the_date_is_read_as_well(self):
+        # Straight after it, before the start time. Left unread, the card below
+        # prints a Wednesday over a Tuesday's date and nothing says so, which is
+        # the disagreement this reading exists to report.
+        for when in ("18/08/2026 Wed 7:00 PM", "18 August 2026, Wednesday 7:00 PM",
+                     "18/08/2026 (Wed) 7:00 PM"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(when=when))
+                self.assertEqual(card.date, "2026-08-18")
+                self.assertEqual(card.weekday, "Wednesday")
+
+    def test_a_weekday_in_front_of_a_date_that_does_not_read_is_still_read(self):
+        for when in ("Tue August 18, 2026 7:00 PM", "Tue 18th August 2026 7:00 PM",
+                     "Tue 7:00 PM", "Tue 32/13/2026 7:00 PM"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(when=when))
+                self.assertEqual(card.date, "")
+                self.assertEqual(card.weekday, "Tuesday")
+
+    def test_the_warning_for_a_date_that_does_not_read_says_what_files_the_card(self):
+        with_day = self.read(cw.CardSpec(when="Tue 7:00 PM"))
+        said = [w for w in with_day.warnings if "date" in w]
+        self.assertEqual(len(said), 1, with_day.warnings)
+        self.assertIn("filed by the Tuesday it prints", said[0])
+        without = self.read(cw.CardSpec(when="7:00 PM"))
+        said = [w for w in without.warnings if "date" in w]
+        self.assertEqual(len(said), 1, without.warnings)
+        self.assertIn("no weekday", said[0])
+
+    def test_a_weekday_word_that_does_not_stand_beside_the_date_is_not_read(self):
+        # The letterhead's first line is printed on the date's own line, in front
+        # of it. A weekday word in it followed by a figure looks like the front of
+        # a date, so what decides is the word nearest the date, and with no date
+        # to read, how many words of one there can be.
+        for label, spec in (
+                ("competition line", cw.CardSpec(
+                    competition_line="Example Tennis Wednesday Night Fixtures 2026",
+                    when="18/08/2026 7:00 PM")),
+                ("letterhead beginning with a weekday", cw.CardSpec(
+                    club_lines=("SUN QUILLBOROUGH TENNIS", "CLUB INC"),
+                    when="18/08/2026 7:00 PM")),
+                ("letterhead with a figure, over a date", cw.CardSpec(
+                    club_lines=("SAT 1 QUILLBOROUGH", "TENNIS CLUB INC"),
+                    when="18/08/2026 7:00 PM")),
+                ("letterhead with a figure, over no date", cw.CardSpec(
+                    club_lines=("SUN 18 QUILLBOROUGH", "TENNIS CLUB INC"),
+                    when="August 18, 2026 7:00 PM")),
+                ("letterhead ending in a figure, over a date", cw.CardSpec(
+                    club_lines=("QUILLBOROUGH SAT 1", "TENNIS CLUB INC"),
+                    when="18/08/2026 7:00 PM")),
+                ("letterhead ending in a figure, over no date", cw.CardSpec(
+                    club_lines=("QUILLBOROUGH SAT 1", "TENNIS CLUB INC"),
+                    when="August 18, 2026 7:00 PM")),
+                ("letterhead after the start time", cw.CardSpec(
+                    when="18/08/2026 7:00 PM SUN 1 QUILLBOROUGH")),
+                ("a team, on a card that prints no weekday", cw.CardSpec(
+                    away_name="FRI 3", when="18/08/2026 7:00 PM")),
+                ("a team, with no date or time", cw.CardSpec(
+                    home_name="MONDAY 1", when="18th August 2026")),
+                ("two letters", cw.CardSpec(when="Tu 18/08/2026 7:00 PM"))):
+            with self.subTest(label):
+                self.assertEqual(self.read(spec).weekday, "")
+
+    def test_describing_the_card_says_the_weekday_is_the_one_printed(self):
+        # The doctor pastes this line above its verdict, and "2026-08-18
+        # (Wednesday)" under a verdict saying the date is a Tuesday reads as the
+        # reader getting the calendar wrong.
+        path = self.write(cw.CardSpec(when="Wed 18/08/2026 7:00 PM"))
+        described = scorecard.describe(pdf.extract(path))
+        self.assertIn("date 2026-08-18 (printed Wednesday)", described)
+
+
+class TestADateLineWithinTheCourtsReachIsNotReadAsTheCourt(CardCase):
+    """The court reader skipped the date's line only if one word of it was a date.
+
+    ``_read_court`` takes the court from a line near the ``Court:`` label, and
+    passes over the date-and-time line by finding one word shaped ``dd/mm/yyyy`` or
+    containing a colon. A worded date has neither. Widening the reach above the
+    label by ten points, so that the date line falls inside it, a card printing
+    ``Tue 18 August 2026`` read as court ``2026``, venue ``'18 August'``
+    (``/tmp/t4/scratch/i416b/probe_court.py``). The measured template puts that
+    line 31.1pt above the label against a 30pt reach, so no card seen so far is
+    affected. Rejected: another per-word pattern -- a second copy of the date rule
+    is the copy that falls behind it, which is how this one came about.
+    """
+
+    def test_a_worded_date_in_reach_of_the_court_label_is_passed_over(self):
+        with mock.patch.object(scorecard, "_COURT_REACH_ABOVE", 40.0):
+            for when in ("Tue 18 August 2026", "18 Aug 2026"):
+                with self.subTest(when=when):
+                    card = self.read(cw.CardSpec(when=when, venue="", court="07"))
+                    self.assertEqual(card.court, 7)
+
+    def test_a_date_elsewhere_on_the_courts_line_does_not_hide_the_court(self):
+        # A guard on the fix rather than a defect the old reader had: the line is
+        # asked whole, so it has to be the date's reaching into the court's column
+        # that passes it over, not a date anywhere on it. The letterhead's second
+        # line shares the court's line, and "a date on it" would lose the court of
+        # every card whose letterhead prints one.
+        card = self.read(cw.CardSpec(
+            club_lines=("EXAMPLE DISTRICT TENNIS", "EST 1 MARCH 1990"), court="07"))
+        self.assertEqual(card.court, 7)
+
+
 class TestTheCourtIsReadWhateverTheVenueIsCalled(CardCase):
     """The venue is printed in the same cell as the court, and it is a club string.
 
@@ -210,6 +479,683 @@ class TestTheCourtIsReadWhateverTheVenueIsCalled(CardCase):
         self.assertEqual(card.court, 11)
 
 
+class TestADivisionNamedTwiceOnOneLineIsOneDivision(CardCase):
+    """`Division 3 Grade B` is a competition. `3` is half of its name.
+
+    Associations word this four ways -- Division, Div, Grade, Section -- and some of
+    them use two at once, because the section and the grade inside it are two levels
+    of one draw. The reader took the first word it recognised and the single token
+    after it, so `Division 3 Grade B` read as division `3` and `Grade B` fell off the
+    end. Two grades of one section then produced the same competition id, and one
+    ladder with two draws in it: every team playing half the matches, points from two
+    competitions in one column, and nothing anywhere to say so. The predecessor's
+    merged-seasons bug, arrived at from the other direction.
+
+    Only another of those four words extends the name. The rest of the line is not
+    part of it -- `Division C / Yellow Ball / Round 1 / #3665611` is one division, a
+    ball colour, a round and an id -- and reading to the end of the line would have
+    swallowed all three on a card whose template separates them with spaces.
+    """
+
+    def test_the_whole_designation_is_read_and_not_the_first_word_of_it(self):
+        card = self.read(cw.CardSpec(division="3 Grade B", round_label="1"))
+        self.assertEqual(card.division, "3 Grade B")
+
+    def test_two_grades_of_one_section_are_two_divisions(self):
+        first = self.read(cw.CardSpec(division="3 Grade A", round_label="1"))
+        second = self.read(cw.CardSpec(division="3 Grade B", round_label="1"))
+        self.assertNotEqual(first.division, second.division)
+
+    def test_a_division_named_once_is_read_exactly_as_before(self):
+        for division in ("C", "B2", "3"):
+            with self.subTest(division=division):
+                self.assertEqual(self.read(cw.CardSpec(division=division,
+                                                       round_label="1")).division,
+                                 division)
+
+    def test_the_rest_of_the_line_is_still_not_part_of_the_division(self):
+        card = self.read(cw.CardSpec(division="C", ball="Yellow Ball",
+                                     round_label="1", match_id="3665611"))
+        self.assertEqual(card.division, "C")
+        self.assertEqual(card.round, "1")
+        self.assertEqual(card.match_id, "3665611")
+
+    def test_the_fixture_prints_the_line_without_slashes_when_asked(self):
+        # The claim the test below rests on. A fixture that quietly printed the
+        # slashes anyway would leave that test green while proving nothing, since
+        # the slashes end a name on their own.
+        page = pdf.extract(self.write(cw.CardSpec(
+            division="3 Grade B", ball="Yellow Ball", round_label="1",
+            match_id="3665611", identity_separator=" ")))
+        printed = [" ".join(word.text for word in line)
+                   for line in page.lines()]
+        identity = [text for text in printed if "Division" in text]
+        self.assertEqual(identity, ["Division 3 Grade B Yellow Ball Round 1 "
+                                    "#3665611"])
+
+    def test_a_template_without_slashes_ends_the_division_at_the_right_word(self):
+        # `Division C Yellow Ball Round 1 #3665611`, all one run of words. The
+        # slashes are what a name read to the end of the line stops at, so with
+        # them gone this is the only line that says where the division ends.
+        for division in ("C", "3 Grade B"):
+            with self.subTest(division=division):
+                card = self.read(cw.CardSpec(
+                    division=division, ball="Yellow Ball", round_label="1",
+                    match_id="3665611", identity_separator=" "))
+                self.assertEqual(card.division, division)
+                self.assertEqual(card.round, "1")
+                self.assertEqual(card.match_id, "3665611")
+
+
+class IdentityCase(CardCase):
+    """Cards whose identity line is printed exactly as a test spells it.
+
+    The writer composes that line from the division and the round and always as
+    ``Division C / ... / Round 1``, which is the one wording nothing here is about.
+    A template that prints a colon, an abbreviation or the grade after its letter
+    can only be had by replacing the line itself.
+    """
+
+    def printed(self, line: str, **spec):
+        """The page a card printing ``line`` as its identity line becomes."""
+        with mock.patch.object(cw, "_identity_line", lambda _spec: line):
+            return pdf.extract(self.write(cw.CardSpec(**spec)))
+
+    def read_line(self, line: str, **spec):
+        return scorecard.read_page(self.printed(line, **spec))
+
+    def refusal(self, line: str, **spec) -> CardError:
+        with self.assertRaises(CardError, msg=f"{line!r} was read") as caught:
+            self.read_line(line, **spec)
+        return caught.exception
+
+
+class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
+    """`Division: C / Yellow Ball / Round: 1 / #3665611` was refused, and it names both.
+
+    The division and the round were found by the word, then an optional dot, then a
+    space. Measured, one card per line: `Division: C / Yellow Ball / Round: 1 /
+    #3665611`, `Division C / Yellow Ball / Rd 1 / #3665611`, `Division C / Rnd 1`
+    and `C Grade / Round 1` were all refused with "no line above the set table names
+    both a division and a round" -- a sentence the line it is about disproves -- and
+    the difference between the first of them and a card that reads is one colon, the
+    cheapest thing two exports of one template can differ by.
+
+    Two wordings were worse than refused. `Division : C / Round : 1` was scored, as
+    division `''` and round `''`, because the space before the colon satisfied the
+    pattern and the colon became the value; the run filed it under a competition
+    with no division and said no card printed one. `C Grade Round 1` was scored as
+    division `'Round'`, a competition called `Tuesday Division Round`.
+
+    The colon is accepted with or without spaces round it, and a separator is still
+    required. `[.:]?\\s*`, which the filing proposed, makes `Divisional` the word
+    `Division` followed by the division `al`; `(?:[.:]\\s*|\\s+)` keeps a separator
+    mandatory but, measured on the old reader with only that separator swapped in,
+    still reads `Division : C` as `''`, since the space is taken first and the colon
+    is left over as the value, and on a card whose identity is split over two lines
+    it reads the web address above them, `www.example-division.org.au`, as division
+    `org.au`. `Rd` and `Rnd` are rounds
+    when a number follows, and `C Grade` is division `C`. The line is read from the
+    left, so a `Grade` further along it does not take over, and a letter after the
+    word is kept, as it is after `Division 3 Grade`: `3 Grade B` is `3 Grade B`. So is
+    a grade printed as a field of its own, after a slash: `Division 3 / Grade: B`,
+    refused before, read as `3` in the first version of this fix, the ladder
+    `Division 3 / Grade: A` also read as. Capitals are the same words, as `DIVISION C
+    ROUND 1` always was.
+    """
+
+    def test_a_colon_after_the_word_reads_as_the_space_it_replaces(self):
+        for line in ("Division: C / Yellow Ball / Round: 1 / #3665611",
+                     "Division:C / Yellow Ball / Round:1 / #3665611",
+                     "Div: C / Yellow Ball / Round: 1 / #3665611"):
+            with self.subTest(line=line):
+                card = self.read_line(line)
+                self.assertEqual((card.division, card.round, card.match_id),
+                                 ("C", "1", "3665611"))
+
+    def test_a_colon_with_a_space_before_it_is_not_an_empty_division(self):
+        card = self.read_line("Division : C / Yellow Ball / Round : 3 / #3665611")
+        self.assertEqual((card.division, card.round), ("C", "3"))
+        # The one line was quoted twice as two lines, because the same line had
+        # been found once for each field and each find had come back empty.
+        self.assertFalse([w for w in card.warnings if "different lines" in w],
+                         card.warnings)
+
+    def test_rd_and_rnd_are_the_round_when_a_number_follows(self):
+        for line in ("Division C / Yellow Ball / Rd 1 / #3665611",
+                     "Division C / Yellow Ball / Rd. 1 / #3665611",
+                     "Division C / Yellow Ball / Rnd 1 / #3665611",
+                     "Division: C / Yellow Ball / Rd: 1 / #3665611"):
+            with self.subTest(line=line):
+                card = self.read_line(line)
+                self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_the_grade_printed_after_its_letter_is_the_division(self):
+        for line, expected in (("C Grade / Yellow Ball / Round 1 / #3665611", "C"),
+                               ("A Grade Rd 2 / #3665611", "A"),
+                               ("3 Grade / Round 2 / #3665611", "3")):
+            with self.subTest(line=line):
+                self.assertEqual(self.read_line(line).division, expected)
+
+    def test_c_grade_round_1_is_division_c_and_not_division_round(self):
+        card = self.read_line("C Grade Round 1 / #3665611")
+        self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_a_line_is_read_from_the_left(self):
+        # The filed line with a ball colour in it. Measured before, division
+        # `Yellow`: `Grade Yellow`, read out of the middle. Trying `Grade C`
+        # before `C Grade` still reads that, and trying `C Grade` first reads a
+        # competition's name printed after the division as division `A`.
+        for line in ("C Grade Yellow Ball Round 1 / #3665611",
+                     "Division C / Yellow Ball / Round 1 / Night Tennis A Grade / "
+                     "#3665611"):
+            with self.subTest(line=line):
+                card = self.read_line(line)
+                self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_a_letter_after_the_grade_is_half_of_the_name(self):
+        # `3 Grade B` was division `B`. Read from the left and stopped at the
+        # word, measured, `3 Grade A` and `3 Grade B` are both `3`: one ladder.
+        for grade in ("A", "B"):
+            for line in (f"3 Grade {grade} / Round 1 / #3665611",
+                         f"3 Grade: {grade} / Round 1 / #3665611"):
+                with self.subTest(line=line):
+                    self.assertEqual(self.read_line(line).division,
+                                     f"3 Grade {grade}")
+
+    def test_a_final_is_a_round_however_its_label_is_separated(self):
+        # Only the abbreviations need a number after them; a final is a word.
+        for line, final in (("Division C / Yellow Ball / Round SF / #3665611", "SF"),
+                            ("Division: C / Yellow Ball / Round: GF / #3665611",
+                             "GF")):
+            with self.subTest(line=line):
+                self.assertEqual(self.read_line(line).round, final)
+
+    def test_a_label_in_capitals_is_the_same_label(self):
+        # Each refused before; `DIVISION C ROUND 1` was already read.
+        for line in ("DIVISION C / YELLOW BALL / RD 1 / #3665611",
+                     "DIVISION: C / YELLOW BALL / RND: 1 / #3665611",
+                     "C GRADE / YELLOW BALL / ROUND 1 / #3665611"):
+            with self.subTest(line=line):
+                card = self.read_line(line)
+                self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_a_grade_after_a_slash_is_still_half_of_the_name(self):
+        # Measured before: the colon forms refused, and `Division 3 / Grade A`
+        # read as `3`, the ladder `Division 3 / Grade B` also read as. The first
+        # version of this fix read the colon forms as `3` as well.
+        for grade in ("A", "B"):
+            for line in (f"Division 3 / Grade: {grade} / Round: 1 / #3665611",
+                         f"Division 3 / Grade {grade} / Round 1 / #3665611",
+                         f"Division 3/Grade {grade}/Round 1/#3665611",
+                         f"Division 3, Grade {grade}, Round 1, #3665611"):
+                with self.subTest(line=line):
+                    self.assertEqual(self.read_line(line).division,
+                                     f"3 Grade {grade}")
+
+    def test_a_grade_inside_a_division_is_one_name_however_it_is_separated(self):
+        # Measured before: `Division 3 Grade: B` read as division `3`, the ladder
+        # `Division 3 Grade: A` also reads as, and `Division 3 Grade. B` as
+        # `3 Grade. B`, a name no `division = "3 Grade B"` in a config matches.
+        for line in ("Division 3 Grade B / Round 1 / #3665611",
+                     "Division 3 Grade: B / Round 1 / #3665611",
+                     "Division: 3 Grade: B / Round: 1 / #3665611",
+                     "Division 3 Grade. B / Round 1 / #3665611"):
+            with self.subTest(line=line):
+                self.assertEqual(self.read_line(line).division, "3 Grade B")
+
+
+class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
+    """Every word the reader learns is a word some other line above the table prints.
+
+    The reader looks at the lines above the set table: the letterhead with the date and
+    the venue beside it, the web address, the competition's title, the season, the phone
+    number, the identity line, the email address and the banner. The identity line is
+    the one nearest the table that prints either half, because the template prints it
+    below the letterhead, the title and the season line, and if it prints only one half,
+    each half is taken from the nearest line naming it in the long forms. The banner,
+    which prints the team names, and a line of contact details are below it, so neither
+    is read for it. So each wording accepted here was measured against the line most
+    likely to be mistaken for it, with the looser version of the rule it was rejected
+    for:
+
+    - no separator at all reads `Divisional Rules Apply To Every Round 2026`, a
+      competition's title, as division `al`, and gives it to a card that prints no
+      division;
+    - `Rd` followed by anything reads `Division C / Yellow Ball / Example Rd Courts /
+      #3665611`, a template printing the venue where the round would be, as round
+      `Courts`, and that card prints no round;
+    - any word before `Grade` reads a title's `Example District Pennant Grade, Rd 2
+      onwards` as division `Pennant` and round `2` on a card that prints neither half; a
+      letter that may end a word reads the same title in capitals as division `T`.
+
+    And the short forms are read only on the identity line, when it prints both halves.
+    Measured with them allowed on a split identity too, two cards the reader refuses
+    were scored: a letterhead printing `14 Example Rd` beside court `01`, on a card with
+    no venue, joins into the line `14 Example Rd 01`, and gave round `01` to a card that
+    prints no round; a title ending `Example District Night Tennis B Grade` gave
+    division `B` to a card that prints no division. With the line chosen by the short
+    forms and read without them, that card was scored as division `''`.
+
+    Nor is the identity line whichever line prints both halves. The first version of
+    this fix read the first one, and a title printing a grade and a round, `Example
+    District A Grade Pennant, Rd 2 onwards`, was read in place of the identity line
+    below it: division `A`, round `2`, no id, on a card the old reader read correctly. A
+    season line's `Rd 1-14 a Grade event` was division `a`, and a small `a` before
+    `Grade` is now the article. Reading the lines that print both in the long forms
+    first, as was proposed, and one printing the match id before either, still loses to
+    a line as sure as the identity line: over `C Grade / Yellow Ball / Round 1`, which
+    prints no id, the season line `Season 2026 Rd 1-14 a Grade event` read as division
+    `event`, round `1-14`, where the old reader read `event` and `1`. Reading the
+    nearest line that prints both passes over an identity line printing one: a title
+    `Example District Division 1, Round 2 onwards` over `Division C / Yellow Ball /
+    #3665611` and a season line `Round 1` gave division `1`, round `2` and no id, as the
+    old reader did, and the season line `Season 2026 Rd 1-14 a Grade event` over the
+    same identity line gave division `event`, round `1-14`, to a card the old reader
+    refused. A split identity was wrong the same way before, paired from the first line
+    naming each half: a title `Example District Division 1 Pennant` over `Division C /
+    Yellow Ball / #3665611` gave division `1` and no id. `Round Robin` is a format and
+    not a round: read as one, a title `Example District Division 1 Round Robin 2026`
+    over a split identity gave division `1`, round `Robin`, and a card that prints no
+    round took the round `Robin`, which it still does with `Robin` read as a round.
+
+    Two wordings are not accepted, and no card measured prints either. `R` and a
+    digit as a round, tried as a short form, reads `Division R1 / Yellow Ball`
+    over a season line `Round 2` as round `1`: the division's name is taken for
+    its round. `Pool` as a division word reads `EXAMPLE POOL AND TENNIS`, a
+    club's name, as division `AND` on a card that prints no division, and taking
+    it would decide without a card what `Division 3 Pool A` is.
+    """
+
+    SPLIT = "Division C / Yellow Ball / #3665611"
+    DIVISIONAL = "Divisional Rules Apply To Every Round 2026"
+
+    def test_divisional_is_a_word_and_not_the_division_al(self):
+        # A card whose only line naming a division would be the title's. Measured
+        # with the separator optional: division `al`, round `1`.
+        self.refusal("Round 1 / #3665611", competition_line=self.DIVISIONAL)
+
+    def test_a_street_named_on_the_identity_line_is_not_a_round(self):
+        self.refusal("Division C / Yellow Ball / Example Rd Courts / #3665611")
+
+    def test_a_street_beside_the_court_number_is_not_a_round(self):
+        street = {"club_lines": ("EXAMPLE DISTRICT TENNIS", "14 Example Rd"),
+                  "venue": ""}
+        card = self.read_line(self.SPLIT, season_line="Round 1", **street)
+        self.assertEqual(card.round, "1")
+        self.refusal(self.SPLIT, **street)
+
+    def test_a_title_ending_in_a_grade_is_not_the_division(self):
+        title = {"competition_line": "Example District Night Tennis B Grade"}
+        card = self.read_line(self.SPLIT, season_line="Round 1", **title)
+        self.assertEqual(card.division, "C")
+        self.refusal("Round 1 / #3665611", **title)
+
+    def test_a_word_before_grade_in_a_title_is_not_a_division(self):
+        # On a card that prints neither half, so that the title is the nearest line
+        # printing one.
+        for title in ("Example District Pennant Grade, Rd 2 onwards",
+                      "EXAMPLE DISTRICT PENNANT GRADE, RD 2 ONWARDS"):
+            with self.subTest(title=title):
+                self.refusal("Yellow Ball / #3665611", competition_line=title)
+
+    def test_a_division_named_r1_is_not_also_the_round(self):
+        for line, spec in (("Division R1 / Yellow Ball / Round 2 / #3665611", {}),
+                           ("Division R1 / Yellow Ball / #3665611",
+                            {"season_line": "Round 2"})):
+            with self.subTest(line=line, **spec):
+                card = self.read_line(line, **spec)
+                self.assertEqual((card.division, card.round), ("R1", "2"))
+
+    def test_a_title_printing_a_grade_and_a_round_is_not_the_identity_line(self):
+        # Measured on the first version of this fix, the first five as division
+        # `A` or `1`, round `2` and no id, and the last as division `A`, round
+        # `Robin`. Before it, the third and fourth were refused, the last read as
+        # division `Round`, round `Robin`, and the others read correctly.
+        pennant = "Example District A Grade Pennant, Rd 2 onwards"
+        division_1 = "Example District Division 1 Pennant, Rd 2 onwards"
+        for line, title in (
+                ("Division C / Yellow Ball / Round 1 / #3665611", pennant),
+                ("Division C / Yellow Ball / Round 1 / #3665611", division_1),
+                ("Division C / Yellow Ball / Rd 1 / #3665611", division_1),
+                ("C Grade / Yellow Ball / Rd 1 / #3665611", division_1),
+                ("Division C / Yellow Ball / Round 1", pennant),
+                ("Division C / Yellow Ball / Round 1 / #3665611",
+                 "Example District Night Tennis A Grade Round Robin 2026")):
+            with self.subTest(line=line, title=title):
+                card = self.read_line(line, competition_line=title)
+                self.assertEqual((card.division, card.round, card.match_id),
+                                 ("C", "1", "3665611" if "#" in line else ""))
+
+    def test_a_small_a_before_grade_is_the_article(self):
+        # Measured on the first version of this fix: division `a`, round `1-14`,
+        # and division `a`, round `1`, on cards that print no division.
+        for season in ("Season 2026 Rd 1-14, a Grade-only event",
+                       "Season 2026 Round 1, a Grade-only event"):
+            with self.subTest(season_line=season):
+                self.refusal("Yellow Ball / #3665611", season_line=season)
+
+    def test_of_two_lines_printing_both_halves_the_one_nearer_the_table_is_read(self):
+        # Measured before: division `event` and round `1`, refused, and division
+        # `1`, round `2`. On the first version of this fix, `a` and `1-14` twice
+        # and `1` and `2`; with the lines ranked by the match id and then by the
+        # long forms, `event` and `1-14` twice and `1` and `2`. None of the three
+        # prints an id, and each line is as sure as the other.
+        grade_event = {"season_line": "Season 2026 Rd 1-14 a Grade event"}
+        for line, spec in (
+                ("C Grade / Yellow Ball / Round 1", grade_event),
+                ("C Grade Rd 1", grade_event),
+                ("Division C / Yellow Ball / Round 1",
+                 {"competition_line": "Example District Division 1, Round 2 onwards"})):
+            with self.subTest(line=line, **spec):
+                card = self.read_line(line, **spec)
+                self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_a_split_identity_is_paired_from_the_lines_nearest_the_table(self):
+        # Measured before, and on the first version of this fix: division `1` and
+        # no id, round `2026`, and round `2` and no id. The first line naming each
+        # half was paired, and a title is above the identity.
+        for line, spec in (
+                (self.SPLIT, {"season_line": "Round 1", "competition_line":
+                              "Example District Division 1 Pennant"}),
+                (self.SPLIT, {"season_line": "Round 1",
+                              "competition_line": self.DIVISIONAL}),
+                ("Round 1 / #3665611", {"season_line": "Division C", "competition_line":
+                                        "Example District Round 2 Pennant"})):
+            with self.subTest(line=line, **spec):
+                card = self.read_line(line, **spec)
+                self.assertEqual((card.division, card.round, card.match_id),
+                                 ("C", "1", "3665611"))
+
+    def test_an_identity_line_printing_one_half_is_not_passed_over(self):
+        # Measured with the nearest line printing both halves read before the
+        # identity line: division `1`, round `2` and no id, `A`, `2` and no id, and
+        # `1`, `2` and no id, where the old reader read `1` and `2`, `Pennant` and
+        # `1`, and `1` and `2`; and the last two as division `event`, round `1-14`,
+        # the season line's, on cards the old reader refused.
+        both = "Example District Division 1, Round 2 onwards"
+        for line, spec in (
+                (self.SPLIT, {"season_line": "Round 1", "competition_line": both}),
+                (self.SPLIT, {"season_line": "Round 1", "competition_line":
+                              "Example District A Grade Pennant, Rd 2 onwards"}),
+                ("Round 1 / #3665611", {"season_line": "Division C",
+                                        "competition_line": both})):
+            with self.subTest(line=line, **spec):
+                card = self.read_line(line, **spec)
+                self.assertEqual((card.division, card.round, card.match_id),
+                                 ("C", "1", "3665611"))
+        for line in (self.SPLIT, "Yellow Ball / Rd 4"):
+            with self.subTest(line=line):
+                self.refusal(line, season_line="Season 2026 Rd 1-14 a Grade event")
+
+    def test_a_team_named_after_a_division_or_a_round_is_not_the_identity(self):
+        # The team names are below the identity line, and nearest the table.
+        # Measured with them read as well: division `2` and no id, round `2` and
+        # no id, and division `1`, round `2` and no id.
+        for line, spec in (
+                (self.SPLIT, {"season_line": "Round 1",
+                              "home_name": "EXAMPLE DIV 2 ALPHAS"}),
+                ("Round 1 / #3665611", {"season_line": "Division C",
+                                        "home_name": "EXAMPLE ROUND 2 ALPHAS"}),
+                ("Division C / Yellow Ball / Round 1 / #3665611",
+                 {"home_name": "EXAMPLE ROUND 2 ALPHAS",
+                  "away_name": "DIVISION 1 BRAVOS"})):
+            with self.subTest(line=line, **spec):
+                card = self.read_line(line, **spec)
+                self.assertEqual((card.division, card.round, card.match_id),
+                                 ("C", "1", "3665611"))
+
+    def test_a_round_robin_is_a_format_and_not_a_round(self):
+        # Measured before and on the first version of this fix: division `1`, round
+        # `Robin` and no id, and round `Robin` on a card that prints no round. With
+        # `Robin` read as a round on this one, the second.
+        card = self.read_line(self.SPLIT, season_line="Round 1",
+                              competition_line="Example District Division 1 "
+                                               "Round Robin 2026")
+        self.assertEqual((card.division, card.round, card.match_id),
+                         ("C", "1", "3665611"))
+        self.refusal(self.SPLIT, competition_line="Example District Night Tennis "
+                                                  "Round Robin 2026")
+
+    def test_a_club_named_after_its_pool_is_not_a_division(self):
+        # Measured with `Pool` a division word: division `AND` on the second card,
+        # which prints none.
+        club = {"club_lines": ("EXAMPLE POOL AND TENNIS", "CLUB INC")}
+        card = self.read_line("Round 1 / #3665611", season_line="Division C", **club)
+        self.assertEqual(card.division, "C")
+        self.refusal("Round 1 / #3665611", **club)
+
+    def test_a_split_identity_is_quoted_as_every_other_echo_is(self):
+        # 4.168, the review's: the warning quoted each line by its first 40
+        # characters and no word that it had stopped, so lines of 51 and 64 read
+        # as lines of 40 (/tmp/t7/scratch/WID/p168-review.txt). Rejected: leaving
+        # the cut at 40, a second rule for one echo. Up to sixty is quoted whole.
+        whole = "Division C / Yellow Ball / Tuesday Night / #3665611"
+        long = "Division C / Yellow Ball / Tuesday Night Pennant 2026 / #3665611"
+        for line, quoted in ((whole, repr(whole)),
+                             (long, f"'Division C /...' ({len(long)} characters)")):
+            with self.subTest(line=line):
+                card = self.read_line(line, season_line="Round 1")
+                self.assertIn(f"the division and the round are printed on different "
+                              f"lines ({quoted} and 'Round 1')", card.warnings)
+        # And the round's line, which is quoted by the same rule.
+        rounds = "Round 1 / Yellow Ball / Tuesday Night Pennant 2026 / #3665611"
+        card = self.read_line(rounds, season_line="Division C")
+        self.assertIn(f"the division and the round are printed on different lines "
+                      f"('Division C' and 'Round 1 / Ye...' ({len(rounds)} "
+                      f"characters))", card.warnings)
+
+
+class TestAValueIsAWordAndNeverTheNextLabel(IdentityCase):
+    """What follows `Division` or `Round` is the value only if it could be one.
+
+    A value was whatever ran up to the next space, slash or comma. Measured:
+    `Division - C / Round - 1` was scored as division `'-'` and round `'-'`, and
+    `Division C / Round . 1` as round `''` -- punctuation, and nothing, filed as a
+    competition's name and a round's. Accepting a colon made the next label a value
+    too: a template printing its labels with a field left blank, `Division: Round:
+    1`, reads as division `Round`, and `Division C Grade Rd 1` as division `C Grade
+    Rd` once `Rd` is a round.
+
+    So a value carries a letter or a digit and is never a label word, the
+    division's or the round's. That also settles a title, `Example District Pennant
+    Grade Round Robin 2026`, which was read before as division `Round` and round
+    `Robin` in place of the identity line below it. With a label word allowed as a
+    value it is division `Round` on a card that prints no division, the title being
+    the only line that names one. A word that only
+    begins with a label word is a value like any other. Punctuation where a value
+    should be is refused rather than read: a dash is not the name of a division.
+    `Division - C` does print the `C`, but no card measured separates its words
+    with a dash, so a dash is not taken as a separator, and the refusal quotes the
+    line.
+    """
+
+    def test_punctuation_is_not_a_division_or_a_round(self):
+        for line in ("Division - C / Yellow Ball / Round - 1 / #3665611",
+                     "Division C / Yellow Ball / Round . 1 / #3665611"):
+            with self.subTest(line=line):
+                self.refusal(line)
+
+    def test_a_label_left_blank_does_not_take_the_next_label_as_its_value(self):
+        self.refusal("Division: Round: 1 / #3665611")
+
+    def test_a_designation_word_is_never_the_division_it_introduces(self):
+        # `Division: Grade B` was division `B`, because the colon stopped the
+        # first word matching; accepting the colon must not make it `Grade`.
+        for line in ("Division: Grade B / Round 1 / #3665611",
+                     "Division Grade B / Round 1 / #3665611"):
+            with self.subTest(line=line):
+                self.assertEqual(self.read_line(line).division, "B")
+
+    def test_a_second_designation_does_not_take_the_round_word(self):
+        card = self.read_line("Division C Grade Rd 1 #3665611")
+        self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_a_label_word_in_a_title_is_not_a_value(self):
+        # Measured before: division `Round`, round `Robin`, both times.
+        title = "Example District Pennant Grade Round Robin 2026"
+        card = self.read_line("Division C / Yellow Ball / Round 1 / #3665611",
+                              competition_line=title)
+        self.assertEqual((card.division, card.round), ("C", "1"))
+        self.refusal("Round 1 / #3665611", competition_line=title)
+
+    def test_a_word_that_begins_with_a_label_word_is_still_a_value(self):
+        for division in ("Divas", "Roundabout"):
+            with self.subTest(division=division):
+                card = self.read_line(
+                    f"Division {division} / Yellow Ball / Round 1 / #3665611")
+                self.assertEqual(card.division, division)
+
+
+class TestARefusedIdentityLineNamesTheWordingItReads(IdentityCase):
+    """A card the reader cannot place now says what it would have placed.
+
+    The refusal quoted the line it came closest to, which is the half of the answer
+    a club can see for itself, and never said what the reader looks for, which is
+    the half they cannot. Measured on every refusal above: `no line above the set
+    table names both a division and a round, so this page cannot be placed in a
+    competition`, followed by the line -- which, printing `Division: C` and `Round:
+    1`, reads as the program denying what is on the page.
+
+    The wording is built from the same words the patterns are, and every wording it
+    names is read off a card here, so the sentence cannot offer one the reader does
+    not take. The hint for a card with no such line used to say that no line above
+    the table `mentions a division, a grade or a round`. It said so, measured, of
+    `Div.C / Yellow Ball / Round.1`, which prints two of them, and of `Division: C /
+    Yellow Ball`, `A Grade / Yellow Ball` and `Yellow Ball / Rd 4`, each half an
+    identity in words the reader now reads. The first version of this fix said `no
+    line above the table uses any of those words` of the first, and of `Division - C
+    / Yellow Ball / Round - 1`: the same denial, reworded. And because it looked for
+    the other three with the short forms as well, it quoted a letterhead's `14
+    Example Rd 01` for `Pool C Round 1`, and a title ending `B Grade` for `Division C
+    / Yellow Ball / R1`, the filed line without its id. Looking for half an
+    identity in the long forms first, then in the short ones, then for any listed
+    word, as was proposed, still quotes the letterhead for `Div.C / Yellow Ball /
+    Round.1` and for `A Grade / Yellow Ball`, and a title printing `Division 1`
+    over the first. So the hint quotes the line nearest the table that prints any
+    of the words the reason lists, as the identity line is read and from the same
+    lines: the team names and the email address are below it and are not quoted.
+    Only a page that prints none of the words is told so.
+    """
+
+    DIVISIONS = ("Division C", "Div C", "Grade C", "Section C", "C Grade")
+    ROUNDS = ("Round 1", "Rnd 1", "Rd 1")
+    REFUSED = ("Pool C / Yellow Ball / Round 1 / #3665611",
+               "Division C / Yellow Ball / R1 / #3665611")
+    # A wording as the reason spells one: the word and `C` or `1`, or `C Grade`.
+    WORDING = re.compile(r"\b(?:[A-Z][a-z]+ [C1]|C [A-Z][a-z]+)\b")
+    # A letterhead printing a street, on a card with no venue, joins into the line
+    # `14 Example Rd 01` with the court beside it.
+    STREET = {"club_lines": ("EXAMPLE DISTRICT TENNIS", "14 Example Rd"), "venue": ""}
+
+    def test_the_reason_names_every_wording_the_reader_accepts(self):
+        for line in self.REFUSED:
+            reason = self.refusal(line).reason
+            for wording in (*self.DIVISIONS, *self.ROUNDS, "colon"):
+                with self.subTest(line=line, wording=wording):
+                    self.assertIn(wording, reason)
+
+    def test_every_wording_the_reason_names_is_one_the_reader_reads(self):
+        # Read out of the sentence itself, so a wording added to it is read too.
+        named = self.WORDING.findall(self.refusal(self.REFUSED[0]).reason)
+        divisions = [wording for wording in named if not wording.endswith("1")]
+        rounds = [wording for wording in named if wording.endswith("1")]
+        self.assertTrue(divisions and rounds, named)
+        for division in divisions:
+            for round_ in rounds:
+                for line in (f"{division} / {round_} / #3665611",
+                             f"{division.replace(' ', ': ', 1)} / "
+                             f"{round_.replace(' ', ': ')} / #3665611"):
+                    if line.startswith("C: Grade"):
+                        continue         # `C Grade` has no word before its value
+                    with self.subTest(line=line):
+                        card = self.read_line(line)
+                        self.assertEqual((card.division, card.round), ("C", "1"))
+
+    def test_a_line_it_cannot_read_is_not_said_to_mention_nothing(self):
+        for line in ("Div.C / Yellow Ball / Round.1",
+                     "Division - C / Yellow Ball / Round - 1"):
+            with self.subTest(line=line):
+                self.assertEqual(self.refusal(line).detail, f'closest line: "{line}"')
+
+    def test_a_page_that_prints_none_of_the_words_is_told_so(self):
+        self.assertEqual(self.refusal("Yellow Ball / #3665611").detail,
+                         "no line above the table uses any of those words")
+
+    def test_the_closest_line_is_not_a_street_or_a_title(self):
+        # Measured on the first version of this fix: `14 Example Rd 01`, the same,
+        # the title, `14 Example Rd 01` twice and the title. Looking for half an
+        # identity in the long forms and then in the short ones before any label
+        # word, as was proposed, quotes the last three the same. Before, the
+        # fourth and fifth were told no line mentions a division, and the last
+        # quoted the title.
+        for line, spec in (
+                ("Pool C Round 1", self.STREET),
+                ("Division C / Yellow Ball / R1", self.STREET),
+                ("Division C / Yellow Ball / R1",
+                 {"competition_line": "Example District Night Tennis B Grade"}),
+                ("Div.C / Yellow Ball / Round.1", self.STREET),
+                ("A Grade / Yellow Ball", self.STREET),
+                ("Div.C / Yellow Ball / Round.1",
+                 {"competition_line": "Example District Division 1 Pennant"})):
+            with self.subTest(line=line, **spec):
+                self.assertEqual(self.refusal(line, **spec).detail,
+                                 f'closest line: "{line}"')
+
+    def test_the_closest_line_is_not_a_team_or_an_address(self):
+        # Both are below the identity line. Measured with each read as well, the
+        # team's line and the address were quoted in its place.
+        for spec in ({"home_name": "SMITH RD ALPHAS"},
+                     {"club_email": "info@example-division.org.au"}):
+            with self.subTest(**spec):
+                line = "Div.C / Yellow Ball / Round.1"
+                self.assertEqual(self.refusal(line, **spec).detail,
+                                 f'closest line: "{line}"')
+
+    def test_a_line_printing_half_an_identity_is_the_line_quoted(self):
+        for line in ("Division: C / Yellow Ball", "A Grade / Yellow Ball",
+                     "Yellow Ball / Rd 4"):
+            with self.subTest(line=line):
+                self.assertEqual(self.refusal(line).detail,
+                                 f'closest line: "{line}"')
+
+
+class TestACardThatPrintsNoRoundIsRefusedBeforeAMatchIsMadeOfIt(IdentityCase):
+    """The reader returns no card without a round, so discovery makes no match without one.
+
+    Discovery carried a note for cards that print no round number, saying they were
+    scored and sat together at the end of the draw. The reader either finds a
+    division and a round or refuses the page, and a round is a word with a letter
+    or a digit in it, so nothing reached the note. Measured on the demo season with
+    round 2's first card rewritten with a round label of "", " ", "-", "." and "_"
+    (/tmp/t7/scratch/DR/probe.py): each was refused as ``no line above the set
+    table names both a division and a round, so this page cannot be placed in a
+    competition``, and the note never printed. The note is removed, and this is the
+    premise the removal rests on. Rejected: keeping it and testing it with a match
+    built by hand, which the reader cannot return.
+    """
+
+    REASON = "no line above the set table names both a division and a round"
+    # "?" and not a dash of another width: the card writer prints "—" as "?", so
+    # the reader would never have been handed the dash.
+    LABELS = ("", " ", "-", ".", "_", ":", "?")
+    LINES = ("Division C / Yellow Ball / Round / #3665611",
+             "Division C / Yellow Ball / Round: / #3665611",
+             "Division C / Yellow Ball / Round _ / #3665611")
+
+    def test_a_round_label_with_no_letter_or_digit_is_refused(self):
+        for label in self.LABELS:
+            with self.subTest(label=label):
+                with self.assertRaises(CardError, msg=f"{label!r} was read") as caught:
+                    self.read(cw.CardSpec(round_label=label))
+                self.assertIn(self.REASON, caught.exception.reason)
+
+    def test_the_word_round_with_nothing_after_it_is_refused(self):
+        for line in self.LINES:
+            with self.subTest(line=line):
+                self.assertIn(self.REASON, self.refusal(line).reason)
+
+
 class TestTheFormatIsReadOffTheCard(CardCase):
 
     def test_a_three_set_card_yields_three_sets(self):
@@ -246,6 +1192,121 @@ class TestTheFormatIsReadOffTheCard(CardCase):
         shape = fmt_mod.from_rows(card.doubles_flags)
         self.assertEqual(len(shape.slots), 3)
         self.assertEqual([s.doubles for s in shape.slots], [True, False, True])
+
+
+class TestAPairingMarkerIsAPairingHoweverItIsSpaced(CardCase):
+    """`1 & 2` is the same pairing as `1&2`, and it used to read as singles.
+
+    The marker column is the card stating its own format, one row at a time, and it
+    is why this reader never has to be told how many sets a match has. It was read
+    a printed word at a time, so a template that puts spaces around the ampersand
+    offers the reader `1`, `&` and `2` separately: `1` is a marker, `&` is nothing,
+    and the row -- two names a side, plainly a doubles rubber -- was filed as
+    singles. A whole card of them reads as four singles, which is a different
+    competition.
+
+    Two warnings do fire, one per side, saying two names were read from a row its
+    marker calls singles. That is the row's names being doubted, which is the wrong
+    way round, and the format read off the card is wrong regardless.
+
+    So the cell is read whole, then a word at a time if the whole of it means
+    nothing -- a template that labels the rubber as well as numbering it still
+    reads. What is *not* guessed at is a cell holding two numbers and no separator
+    at all: that is a pairing to a human and unreadable to a program, so it stays
+    singles and stays complained about.
+    """
+
+    PAIR_ROWS = (True, False, False, True)
+
+    def spec(self, marker: str, *, doubles: bool = True) -> cw.CardSpec:
+        """A four-row card whose first row prints ``marker``."""
+        built = list(rows((6, 1), (6, 2), (6, 3), (6, 4),
+                          doubles=list(self.PAIR_ROWS)))
+        built[0] = dataclasses.replace(built[0], marker=marker, doubles=doubles)
+        return cw.CardSpec(rows=tuple(built))
+
+    def spaced(self, marker: str, *, doubles: bool = True):
+        """That card, read."""
+        return self.read(self.spec(marker, doubles=doubles))
+
+    def test_a_spaced_pairing_is_read_as_doubles(self):
+        card = self.spaced("1 & 2")
+        self.assertTrue(card.sets[0].doubles)
+        self.assertEqual(card.doubles_flags, self.PAIR_ROWS)
+
+    def test_every_separator_reads_the_same_spaced_as_tight(self):
+        for separator in ("&", "+", "/", ","):
+            for marker in (f"1{separator}2", f"1 {separator} 2"):
+                with self.subTest(marker=marker):
+                    self.assertTrue(self.spaced(marker).sets[0].doubles)
+
+    def test_the_competition_the_card_describes_is_the_one_it_prints(self):
+        # The consequence, in the words the report and the config stub use: a card
+        # of spaced pairings read as `singles-4`, and the run then offered the club
+        # `format = "singles-4"` to pin.
+        card = self.spaced("1 & 2")
+        self.assertEqual(fmt_mod.from_rows(card.doubles_flags).name,
+                         "doubles-singles-doubles")
+
+    def test_the_marker_is_reported_as_the_card_printed_it(self):
+        # Not normalised. The report quotes this back at whoever has to find the
+        # row on the page.
+        self.assertEqual(self.spaced("1 & 2").sets[0].marker, "1 & 2")
+
+    def test_a_spaced_pairing_no_longer_doubts_the_names_beside_it(self):
+        # The two warnings this used to produce were about the row's own player
+        # names, which were right all along. Nothing else is said either: a card
+        # read whole and then read again a word at a time would find `1` and `2`
+        # as well as the pairing, and report a disagreement with itself. A correct
+        # card has to read silently, or the warnings stop meaning anything.
+        card = self.spaced("1 & 2")
+        self.assertEqual([w for w in card.warnings if "player name" in w], [])
+        self.assertEqual(list(card.warnings), [])
+
+    def test_a_singles_marker_is_still_singles(self):
+        card = self.spaced("3", doubles=False)
+        self.assertFalse(card.sets[0].doubles)
+        self.assertEqual(card.doubles_flags, (False, False, False, True))
+
+    def test_a_labelled_pairing_still_reads(self):
+        # A template that names the rubber as well as numbering it. The whole cell
+        # means nothing as one string, so the words are tried one at a time.
+        card = self.spaced("Doubles 1&2")
+        self.assertTrue(card.sets[0].doubles)
+
+    def test_two_numbers_and_no_separator_are_not_read_as_a_pairing(self):
+        # Deliberate. A human reads `1 2` in a marker column as a pair; a program
+        # that does has invented the separator, and the same cell is what a stray
+        # digit from the next column looks like. It stays singles, and the names
+        # beside it stay complained about, which is what sends somebody to the card.
+        card = self.spaced("1 2")
+        self.assertFalse(card.sets[0].doubles)
+        self.assertEqual(len([w for w in card.warnings if "player name" in w]), 2)
+
+    def test_a_pairing_beside_a_stray_number_still_reports_the_disagreement(self):
+        # Reading the line whole must not become reading *only* whole, and it must
+        # not stop at the first thing it recognises. `1&2 3` is a cell that means
+        # two things -- a pairing and a singles marker -- and which of them the row
+        # is cannot be settled from the card, so both readings are kept and the
+        # disagreement is said out loud. An earlier draft of this fix took the
+        # first reading per side, which would have deleted this warning and left
+        # the row silently doubles.
+        card = self.spaced("1&2 3")
+        disagreed = [w for w in card.warnings if "marker" in w and "disagree" in w]
+        self.assertEqual(len(disagreed), 1,
+                         "the cell means two things and nothing said so; the "
+                         f"warnings were {card.warnings}")
+        self.assertIn("row 1", disagreed[0])
+        self.assertTrue(card.sets[0].doubles)
+
+    def test_a_marker_column_with_no_number_in_it_is_still_refused(self):
+        # The guard the whole-line pass must not walk past. A card printing a dash
+        # where the discipline goes says nothing about the row, and a row that says
+        # nothing is refused rather than read as singles: a template this reader
+        # has not met and a cell somebody left blank look the same here, and they
+        # need opposite responses.
+        self.assert_refused(self.spec("-"),
+                            "the marker column prints no number")
 
 
 class TestSetStatusComesFromTheTickedBox(CardCase):
@@ -293,6 +1354,316 @@ class TestSetStatusComesFromTheTickedBox(CardCase):
                                      cancelled=True, winner=cw.NO_TICK,
                                      omit_totals=True, omit_verb=True))
         self.assertTrue(card.cancelled)
+
+
+class TestTheCardsOwnTotalsAskTheModelWhoAForfeitedRubberWentTo(CardCase):
+    """The F6 totals check reads a forfeited row through the one shared rule.
+
+    The check bounds each side's sets from the rows, and it held its own copy of
+    who a forfeited row goes to -- the ticked box first, the games otherwise --
+    written before the model had a rule of its own. Measured on every forfeit shape
+    the reader can produce (one box ticked at 0-0 and at 6-0, both ticked at 0-0 and
+    at 6-0), the copy and :func:`~matchcentre.model.forfeit_set_winner` agree, which
+    is exactly why nothing would notice the day one of them changed and the other
+    did not: the first sign would be a ``totals-mismatch`` on a correct card.
+
+    Rejected: leaving the copy because it agrees today. A spy rather than a card,
+    because two copies that agree cannot be told apart by any card.
+    """
+
+    def test_a_forfeited_row_is_asked_of_the_rule_the_model_uses(self):
+        spec = cw.CardSpec(rows=rows((0, 0), (6, 3), (6, 4), (2, 6),
+                                     status=SetStatus.FORFEIT,
+                                     status_side="away"))
+        with mock.patch.object(scorecard, "forfeit_set_winner",
+                               wraps=forfeit_set_winner) as rule:
+            card = self.read(spec)
+        self.assertIn(mock.call(home_forfeit=False, away_forfeit=True,
+                                home_games=0, away_games=0), rule.call_args_list)
+        totals, = [c for c in card.checks if c.name == "totals"]
+        self.assertTrue(totals.agrees, totals.detail)
+
+
+# What a font drawing a superscript three hands a reader: the ToUnicode map reads the
+# code for ``~`` as ``³``, since the writer prints ASCII alone.
+SUPERSCRIPT_CMAP = (b"<20> <7E> <0020>\nendbfrange\n",
+                    b"<20> <7D> <0020>\nendbfrange\n1 beginbfchar\n<7E> <00B3>\n"
+                    b"endbfchar\n")
+
+
+class TestAFigureInDigitsIntCannotReadIsReadAsMissingAndNamed(CardCase):
+    """A court, a games cell or a TOTAL figure printed ``³``: the card is read.
+
+    The reader asked ``str.isdigit`` of each and then ``int``, and ``isdigit`` is
+    true of characters ``int`` refuses, superscript and circled digits among them
+    (128 in the Unicode 15.0 of Python 3.12). Measured on cards printing ``³`` in
+    each place (``/tmp/t7/scratch/F1/before/reader.log``): every one was refused,
+    ``the page could not be read``, ``ValueError: invalid literal for int() with
+    base 10: '³'``; and through ``build.py``, beside the suite's season
+    (``build.log``), the card's result was dropped, ``cards 6 across round(s) 1, 2,
+    3`` where the plain card gave 7 across 1 to 4, and the run exited 1 with ``1
+    card(s) found and not scored``. A figure is now what
+    ``competition.decimal_figure`` reads, the test ``round_number`` made (4.151).
+    The court is then unknown, with the warning a court printed with no number has,
+    since the court's line holds the venue as well and its last word is not always
+    meant as a figure. A games cell reads as 0, as a blank one does, and a TOTAL
+    figure is not read, each with a warning quoting what the cell prints, every word
+    of it, so the cross-checks, and the club, see it. That is so of any text that is
+    no figure, a ``-``, ``ret`` or ``3.`` as much as a ``³``: base read a TOTAL cell
+    printing ``-`` or ``3.`` as blank and said nothing (``/tmp/t7/scratch/F1/fixup/
+    cells-base.log``). A TOTAL cell is named once, and the row's ``no figures``
+    warning is not said of it as well, nor its ``no games figure`` one of a games
+    cell named; a games cell left blank beside a named one is still warned about. A
+    cell holding a figure it reads beside the ``³`` (``/tmp/t7/scratch/F1/after/
+    beside.log``) is read, and nothing is named.
+
+    Rejected: refusing the card and naming the figure, which drops the result the
+    rest of the card states for the way one field of it is written, as 4.151
+    rejected for a round; reading ``³`` as 3, which guesses what the club meant;
+    and taking ``.,;:`` off a TOTAL cell as the court's line does, which is a second
+    reading of a figure beside the games cell's, which never took them off.
+    """
+
+    SCORES = ((6, 2), (6, 3), (4, 6), (6, 1))
+
+    def read_superscript(self, spec: cw.CardSpec):
+        """The card read back with every ``~`` it prints as ``³``, and not refused."""
+        cmap = cw._TO_UNICODE_CMAP.replace(*SUPERSCRIPT_CMAP)
+        self.assertNotEqual(cmap, cw._TO_UNICODE_CMAP)
+        with mock.patch.object(cw, "_TO_UNICODE_CMAP", cmap):
+            path = self.write(spec)
+        cards, rejected = scorecard.read(path)
+        self.assertEqual([r.reason for r in rejected], [])
+        card, = cards
+        return card
+
+    def with_row_one(self, **changed) -> tuple[cw.SetRow, ...]:
+        played = rows(*self.SCORES)
+        return (dataclasses.replace(played[0], **changed),) + played[1:]
+
+    def test_a_court_printed_in_superscript_is_not_read(self):
+        card = self.read_superscript(cw.CardSpec(court="~", rows=rows(*self.SCORES)))
+        self.assertIsNone(card.court)
+        court, = [w for w in card.warnings if "ourt" in w]
+        self.assertRegex(court, r"^the 'Court' label at x [\d.]+ has no number "
+                                r"printed with it, so the court is unknown$")
+
+    def test_a_games_figure_printed_in_superscript_is_read_as_0_and_named(self):
+        card = self.read_superscript(cw.CardSpec(
+            rows=self.with_row_one(home_games="~"), totals=(2, 16, 12, 1),
+            verb="DEFEATS", winner="home"))
+        self.assertEqual([(s.home_games, s.away_games) for s in card.sets],
+                         [(0, 2), (6, 3), (4, 6), (6, 1)])
+        self.assertEqual([w for w in card.warnings if "games" in w],
+                         ["row 1: the home games figure printed, '³', is not a "
+                          "number, read as 0"])
+        self.assertTrue(all(c.agrees for c in card.checks), card.checks)
+
+    def test_a_total_printed_in_superscript_is_not_read_and_named(self):
+        fields = ("home_sets", "home_games", "away_games", "away_sets")
+        for index, (side, heading) in enumerate((("home", "sets"), ("home", "games"),
+                                                 ("away", "games"), ("away", "sets"))):
+            printed = [3, 22, 12, 1]
+            printed[index] = "~"
+            with self.subTest(figure=f"{side} {heading}"):
+                card = self.read_superscript(cw.CardSpec(rows=rows(*self.SCORES),
+                                                         totals=tuple(printed)))
+                read = [getattr(card.totals, name) for name in fields]
+                printed[index] = None
+                self.assertEqual(read, printed)
+                self.assertEqual([w for w in card.warnings if "TOTAL" in w],
+                                 [f"the card's TOTAL row prints '³' as the {side} "
+                                  f"{heading}, which is not a number, so that "
+                                  f"figure was not read"])
+                totals, = [c for c in card.checks if c.name == "totals"]
+                self.assertTrue(totals.agrees, totals.detail)
+
+    def test_a_total_row_printed_all_in_superscript_names_each_figure_once(self):
+        card = self.read_superscript(cw.CardSpec(rows=rows(*self.SCORES),
+                                                 totals=("~",) * 4))
+        self.assertFalse(card.totals.present)
+        self.assertEqual([w for w in card.warnings if "TOTAL" in w],
+                         [f"the card's TOTAL row prints '³' as the {figure}, which is "
+                          f"not a number, so that figure was not read"
+                          for figure in ("home sets", "home games", "away games",
+                                         "away sets")])
+
+    def test_a_cell_holding_a_figure_beside_the_superscript_is_read(self):
+        card = self.read_superscript(cw.CardSpec(
+            rows=self.with_row_one(home_games="6 ~"), totals=("3 ~", 22, 12, 1),
+            verb="DEFEATS", winner="home"))
+        self.assertEqual(card.sets[0].home_games, 6)
+        self.assertEqual((card.totals.home_sets, card.totals.home_games,
+                          card.totals.away_games, card.totals.away_sets),
+                         (3, 22, 12, 1))
+        self.assertEqual([w for w in card.warnings if "TOTAL" in w or "games" in w],
+                         [])
+
+    def test_a_cell_is_quoted_whole(self):
+        card = self.read_superscript(cw.CardSpec(
+            rows=self.with_row_one(home_games="~ ~"),
+            totals=("~ ~", 16, 12, "not played"), verb="DEFEATS", winner="home"))
+        self.assertEqual([w for w in card.warnings if "TOTAL" in w or "games" in w],
+                         ["row 1: the home games figure printed, '³ ³', is not a "
+                          "number, read as 0",
+                          "the card's TOTAL row prints '³ ³' as the home sets, which "
+                          "is not a number, so that figure was not read",
+                          "the card's TOTAL row prints 'not played' as the away sets, "
+                          "which is not a number, so that figure was not read"])
+
+    def test_text_that_is_no_figure_is_quoted_in_any_script(self):
+        card = self.read(cw.CardSpec(rows=self.with_row_one(home_games="ret"),
+                                     totals=("-", 16, 12, "1."), verb="DEFEATS",
+                                     winner="home"))
+        self.assertEqual((card.sets[0].home_games, card.totals.home_sets,
+                          card.totals.away_sets), (0, None, None))
+        self.assertEqual([w for w in card.warnings if "TOTAL" in w or "games" in w],
+                         ["row 1: the home games figure printed, 'ret', is not a "
+                          "number, read as 0",
+                          "the card's TOTAL row prints '-' as the home sets, which is "
+                          "not a number, so that figure was not read",
+                          "the card's TOTAL row prints '1.' as the away sets, which "
+                          "is not a number, so that figure was not read"])
+
+    def test_a_games_cell_left_blank_beside_a_named_one_is_still_warned_about(self):
+        partly = ("the card's TOTAL row prints no games figure for one side, so the "
+                  "strongest cross-check on this card is only partly available")
+        for printed, named in ((("~", "", "", ""), ("home sets",)),
+                               (("~", "", "", "~"), ("home sets", "away sets")),
+                               ((3, "~", "", 1), ("home games",))):
+            with self.subTest(printed=printed):
+                card = self.read_superscript(cw.CardSpec(rows=rows(*self.SCORES),
+                                                         totals=printed))
+                self.assertEqual([w for w in card.warnings if "TOTAL" in w],
+                                 [f"the card's TOTAL row prints '³' as the {figure}, "
+                                  "which is not a number, so that figure was not read"
+                                  for figure in named] + [partly])
+
+    def test_a_figure_left_blank_is_warned_about_as_it_was(self):
+        card = self.read(cw.CardSpec(rows=self.with_row_one(home_games=""),
+                                     totals=("", 16, "", 1), verb="DEFEATS",
+                                     winner="home"))
+        self.assertEqual(card.sets[0].home_games, 0)
+        self.assertEqual([w for w in card.warnings if "games" in w],
+                         ["row 1: no home games figure printed, read as 0",
+                          "the card's TOTAL row prints no games figure for one "
+                          "side, so the strongest cross-check on this card is only "
+                          "partly available"])
+        card = self.read(cw.CardSpec(rows=rows(*self.SCORES),
+                                     totals=("", "", "", "")))
+        self.assertEqual([w for w in card.warnings if "TOTAL" in w],
+                         ["the card's TOTAL row has no figures under its headings, "
+                          "so its own totals were not read"])
+
+    def test_every_figure_read_asks_the_one_function(self):
+        from matchcentre import competition as comp_mod
+        stated = comp_mod.decimal_figure
+
+        def reading_superscripts(text):
+            """A rule nobody states: ``³`` read as 3, the alternative rejected."""
+            return 3 if text == "³" else stated(text)
+
+        spec = cw.CardSpec(court="~", rows=self.with_row_one(home_games="~"),
+                           totals=("~", "~", 12, 1), verb="DEFEATS", winner="home")
+        with mock.patch.object(comp_mod, "decimal_figure", reading_superscripts), \
+                mock.patch.object(scorecard, "decimal_figure", reading_superscripts,
+                                  create=True):
+            card = self.read_superscript(spec)
+        self.assertEqual((card.court, card.sets[0].home_games, card.totals.home_sets,
+                          card.totals.home_games), (3, 3, 3, 3))
+        self.assertEqual([w for w in card.warnings if "³" in w], [])
+
+
+class TestARetiredOrIncompleteSetIsNobodysInTheCardsOwnChecks(CardCase):
+    """The reader's set claims give a set that stopped short to nobody, as the model does.
+
+    ``_row_claims`` bounds each side's sets from the rows, and credited the leader
+    of any unequal row whatever its box said. The model gives a retired or
+    incomplete set to nobody (``SetResult.completed`` and ``winner``), and so do
+    validate's ``_set_finished`` and the writer's TOTAL row. Measured over demo
+    seeds 1 to 40, of the default shape and of ``--teams 12 --rounds 1``
+    (``/tmp/t7/scratch/F1/before/sweep.log``): seed 4 of the first and seeds 30 and
+    34 of the second exit 1, each with two F6 errors on one card, and no other seed
+    fails. Seed 4's card (``before/demo-cards.log``) prints rows 5-6, 6-3, 3-6 and
+    5-4 retired, ``LOSES TO``, the away tick and a TOTAL of 1, 19, 19, 2, which is the
+    model's reading; the verb and the tick were each an error, ``the set rows give
+    games 19-19 (level) and at most 2-2 sets (level)``. The claims now ask
+    ``model.stopped_short``, the one rule the model, validate and the writer ask, so
+    such a card agrees with itself, and a TOTAL crediting the stopped set to its
+    leader is told it disagrees with the rows.
+
+    Rejected: crediting the leader of an unfinished set, which records a lead as a
+    win, and is a second answer to who won a set beside the model's.
+    """
+
+    def stopped_card(self, status, side, **changed) -> cw.CardSpec:
+        played = rows((5, 6), (6, 3), (3, 6), (5, 4))
+        stopped = dataclasses.replace(played[3], status=status, status_side=side)
+        return cw.CardSpec(rows=played[:3] + (stopped,), **changed)
+
+    STOPPED = ((SetStatus.RETIRED, "away"), (SetStatus.INCOMPLETE, "both"))
+
+    def test_a_card_won_on_its_finished_sets_agrees_with_itself(self):
+        for status, side in self.STOPPED:
+            with self.subTest(status=status.value):
+                card = self.read(self.stopped_card(status, side))
+                self.assertEqual(card.sets[3].status, status)
+                self.assertEqual((card.verb, card.winner_tick), ("LOSES TO", "away"))
+                self.assertEqual(
+                    [(c.name, c.agrees) for c in card.checks],
+                    [("totals", True), ("verb", True), ("winner-tick", True)],
+                    [c.detail for c in card.checks])
+
+    def test_the_rows_are_said_to_allow_the_stopped_set_to_nobody(self):
+        for status, side in self.STOPPED:
+            with self.subTest(status=status.value):
+                card = self.read(self.stopped_card(status, side, verb="DEFEATS",
+                                                   winner="home"))
+                verb, = [c for c in card.checks if c.name == "verb"]
+                self.assertFalse(verb.agrees)
+                self.assertIn("the set rows give games 19-19 (level) and at most "
+                              "1-2 sets (away)", verb.detail)
+
+    def test_a_total_crediting_the_stopped_set_to_its_leader_disagrees(self):
+        for status, side in self.STOPPED:
+            with self.subTest(status=status.value):
+                card = self.read(self.stopped_card(status, side,
+                                                   totals=(2, 19, 19, 2)))
+                totals, = [c for c in card.checks if c.name == "totals"]
+                self.assertFalse(totals.agrees)
+                self.assertEqual(totals.detail, "home sets 2 printed, but the rows "
+                                                "allow at most 1")
+
+    def test_the_model_validate_the_reader_and_the_writer_ask_one_rule(self):
+        from matchcentre import format as fmt
+        from matchcentre import model as model_mod
+        from matchcentre import validate as validate_mod
+        from matchcentre.card import ParsedSet
+        rule = fmt.set_rule("first-to-6")
+        slot = fmt.match_format("doubles-singles-doubles").slots[0]
+
+        def asked():
+            """Who each of the four gives a set 6-4 and retired to."""
+            result = model_mod.SetResult(slot=slot, home_games=6, away_games=4,
+                                         status=SetStatus.RETIRED, rule=rule)
+            parsed = ParsedSet(index=0, doubles=True, marker="1&2", home_games=6,
+                               away_games=4, status=SetStatus.RETIRED)
+            row = cw.SetRow(home_games=6, away_games=4, status=SetStatus.RETIRED,
+                            status_side="away")
+            return (result.winner, validate_mod._set_winner_of(parsed, rule),
+                    scorecard._row_claims([parsed]), cw._row_set_winner(row, rule))
+
+        self.assertEqual(asked(), (None, None, (0, 0), None))
+        # Given to every name, so each follows it however it reaches the rule.
+        with mock.patch.object(model_mod, "stopped_short", lambda status: False,
+                               create=True), \
+                mock.patch.object(validate_mod, "stopped_short",
+                                  lambda status: False, create=True), \
+                mock.patch.object(scorecard, "stopped_short", lambda status: False,
+                                  create=True), \
+                mock.patch.object(cw, "stopped_short", lambda status: False,
+                                  create=True):
+            self.assertEqual(asked(), ("home", "home", (1, 0), "home"))
 
 
 PLACEHOLDER = "Unspecified player"
@@ -395,6 +1766,1631 @@ class TestTheSitesPlaceholderForNobodyIsNotAPlayer(CardCase):
         self.assertIn("no player", described)
 
 
+class TestAHeadingInTheRosterBlockPutsNobodyOnEitherSquad(CardCase):
+    """A line printed once for each team, differing only in home and away, is a heading.
+
+    The roster block ended at the first word beginning ``fill-in`` or ``comment``,
+    and every line above it that carried a name was a squad member. Measured with
+    the fill-ins heading reworded to ``Reserves``, the same eight letters: the card
+    still prints ``Comments`` further down, so the block was bounded, and the
+    heading was inside it. Each squad came back one person longer, ``Reserves (Home
+    Team)`` and ``Reserves (Away Team)``, and a fill-in printed under the heading
+    one longer again, with no warning on the card. Built, both headings were players
+    with a full record at exit 0.
+
+    The template prints its fill-ins heading once over each team's column, and the
+    two copies read the same except that one says ``home`` where the other says
+    ``away``. That is the rule, and those are its only two words: it knows nothing
+    else a side is called. Two people's names do not differ by exactly that, and
+    the tests below hold it to that and no further: a squad member named ``Home``,
+    and two players on one row who share a first name, are still players. The block
+    ends there, as it ends at ``Fill-ins``, which is what keeps the names printed
+    under it out.
+
+    Two stricter rules were rejected. A roster line that must carry a rating drops
+    every player a card prints unrated, and the reader keeps those on purpose. And
+    two lines reading exactly the same are not enough on their own, because two
+    players who share a printed name can stand on the same row of opposing squads.
+    """
+
+    RESERVES = ("Golf Garside", "Hotel Hartigan")
+    # In a word the reader does not know a heading by, as it now knows `Reserves`,
+    # so that it is this rule that ends the block below and not the word.
+    MIRRORED = ("Emergencies (Home Team)", "Emergencies (Away Team)")
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def test_the_fixture_prints_the_headings_it_is_given(self):
+        # The claim every test below rests on. A fixture that printed `Fill-ins`
+        # whatever it was asked would leave them green while proving nothing,
+        # since `Fill-ins` ends the block on its own.
+        text = pdf.extract(self.write(cw.CardSpec(
+            fill_ins_headings=("Reserves (Host)", "Reserves (Guest)"),
+            comments_heading="Remarks"))).text().splitlines()
+        self.assertIn("Reserves (Host) Reserves (Guest)", text)
+        self.assertIn("Remarks", text)
+        self.assertNotIn("Fill-ins", " ".join(text))
+        bare = " ".join(pdf.extract(self.write(cw.CardSpec(
+            fill_ins_headings=("", ""), comments_heading="",
+            comments="Rain stopped play at nine"))).text().splitlines())
+        for word in ("Fill-ins", "(Home", "(Away", "Comments"):
+            with self.subTest(word=word):
+                self.assertNotIn(word, bare)
+        self.assertIn("Rain stopped play at nine", bare)
+
+    def test_a_reworded_fill_ins_heading_is_on_neither_squad(self):
+        card = self.read(cw.CardSpec(fill_ins_headings=self.MIRRORED))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(card.warnings, ())
+
+    def test_the_names_printed_under_it_are_on_neither_squad(self):
+        # A fill-in borrowed for the night is printed under the heading because they
+        # are not in the squad. Skipping the heading and reading on would register
+        # them to the team they filled in for.
+        card = self.read(cw.CardSpec(fill_ins_headings=self.MIRRORED,
+                                     home_fill_ins=self.RESERVES[:1],
+                                     away_fill_ins=self.RESERVES[1:]))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_it_ends_the_block_when_no_heading_the_reader_knows_is_printed(self):
+        # Neither `Fill-ins` nor `Comments` on the page: the heading printed for
+        # both teams is then the only thing that says where the squads stop, and it
+        # is enough to read them.
+        card = self.read(cw.CardSpec(fill_ins_headings=self.MIRRORED,
+                                     comments_heading="",
+                                     home_fill_ins=self.RESERVES[:1]))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(card.warnings, ())
+
+    def test_it_ends_both_squads_when_one_is_longer_than_the_other(self):
+        # The heading is on one row across the card, but it is not the same line
+        # of each squad unless the squads are the same size, and they seldom are.
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=self.MIRRORED,
+            away_roster=tuple(cw.RosterRow(n, 3.0, 3.0) for n in AWAY_PLAYERS)
+            + (cw.RosterRow("Kilo Kavanagh", 2.5, 2.5),)))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS) + ["Kilo Kavanagh"]))
+        self.assertEqual(card.warnings, ())
+
+    def test_the_word_fill_ins_still_ends_the_block_printed_the_same_over_both(self):
+        # No side named and no bracket, word for word the same over both squads: to
+        # the rule above that is two namesakes, and only the old word says heading.
+        card = self.read(cw.CardSpec(fill_ins_headings=("Fill-ins", "Fill-ins"),
+                                     home_fill_ins=self.RESERVES[:1]))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(card.warnings, ())
+
+    def test_the_comments_heading_still_ends_the_block_with_no_fill_ins_heading(self):
+        # A template that prints no fill-ins heading at all has the old word
+        # `Comments` under its squads and nothing else.
+        card = self.read(cw.CardSpec(fill_ins_headings=("", "")))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(card.warnings, ())
+
+    def test_a_squad_member_named_home_is_not_a_heading(self):
+        # The side word in a name, beside a line on the other side that says the
+        # other side. What makes a heading is that the rest of the line matches,
+        # not that both lines name a side somewhere.
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=self.MIRRORED,
+            home_roster=(cw.RosterRow("Alpha Ashford", 3.10, 3.25, captain=True),
+                         cw.RosterRow("Kit Home-Ashby", 2.90, 2.90),
+                         cw.RosterRow("Bravo Beeching", 2.80, 2.95))))
+        self.assertEqual(self.names(card),
+                         (["Alpha Ashford", "Kit Home-Ashby", "Bravo Beeching"],
+                          list(AWAY_PLAYERS)))
+
+    def test_two_players_on_one_row_who_share_a_first_name_are_not_a_heading(self):
+        # A heading's two copies share their first word, and so do two people
+        # called Alex. Only the whole line, side word aside, says heading.
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=self.MIRRORED,
+            home_roster=(cw.RosterRow("Alex Ashford", 3.10, 3.25, captain=True),
+                         cw.RosterRow("Bravo Beeching", 2.80, 2.95)),
+            away_roster=(cw.RosterRow("Alex Dunmore", 2.60, 2.40, captain=True),
+                         cw.RosterRow("Echo Elmsworth", 3.35, 3.55))))
+        self.assertEqual(self.names(card),
+                         (["Alex Ashford", "Bravo Beeching"],
+                          ["Alex Dunmore", "Echo Elmsworth"]))
+
+    def test_two_namesakes_on_one_row_are_both_still_on_their_squads(self):
+        # Word for word the same on both sides of one row, and neither rated: the one
+        # shape of two real people that a heading printed for both teams can also
+        # take, which is why it takes a side named to make a heading, and why a
+        # line printed the same over both is one only when nothing else is.
+        namesake = cw.RosterRow(name="India Ingleby")
+        card = self.read(cw.CardSpec(
+            home_roster=(cw.RosterRow("Alpha Ashford", 3.10, 3.25, captain=True),
+                         cw.RosterRow("Bravo Beeching", 2.80, 2.95), namesake),
+            away_roster=(cw.RosterRow("Delta Dunmore", 2.60, 2.40, captain=True),
+                         cw.RosterRow("Echo Elmsworth", 3.35, 3.55), namesake)))
+        self.assertEqual(self.names(card),
+                         (["Alpha Ashford", "Bravo Beeching", "India Ingleby"],
+                          ["Delta Dunmore", "Echo Elmsworth", "India Ingleby"]))
+
+    def test_a_player_printed_with_no_rating_is_still_on_the_squad(self):
+        # The decision the rule above is built around. Last in the squad, because a
+        # block cut at the last rated line is the other way the filed fix could
+        # have gone, and it loses exactly this player.
+        card = self.read(cw.CardSpec(home_roster=(
+            cw.RosterRow("Alpha Ashford", 3.10, 3.25, captain=True),
+            cw.RosterRow("Bravo Beeching", 2.80, 2.95),
+            cw.RosterRow("Juliet Jardine"))))
+        self.assertEqual(self.names(card)[0],
+                         ["Alpha Ashford", "Bravo Beeching", "Juliet Jardine"])
+
+
+class TestALineThatHoldsNoNameEndsTheSquadAndTheCardSaysSo(CardCase):
+    """A heading that does not say home and away is not a player either.
+
+    The rule above knows a heading by its two copies reading the same but for
+    ``home`` and ``away``. Measured with that rule in place and ``Comments`` still
+    printed, eight other ways of printing the heading each put it on the squads,
+    with the fill-in under it, and no warning: ``Reserves (Visitors)`` beside
+    ``Reserves (Home Team)``, ``(Visiting Team)``, ``(Host)`` and ``(Guest)``, the
+    same in square brackets and in braces, a heading that names the team after a
+    dash, the same bracketed heading over both columns, and ``Reserves:`` over
+    both. Built on two legs with ``(Visitors)``, the season had 9
+    players where there are 7, at exit 0, and the report told the club to register
+    each heading as a namesake.
+
+    What those lines share is what no squad member's line has. A heading carries no
+    rating; the only bracket the template puts beside a name is the captain's
+    ``(C)``, which is read off before the name is; and a name holds no colon and no
+    word without a letter in it. So an unrated line whose name has any of those is
+    no player's, and it ends the squad on its side as a heading does. An unrated
+    player with a bracket in their name looks the same, and this reader cannot tell
+    them from a heading nobody taught it, so the card says so, once, and quotes the
+    line: if it was a player, the club can see where the squad stopped.
+
+    Rejected: dropping the line and reading on, which puts the fill-ins printed
+    under it on the squad; a vocabulary of what a side can be called, which covers
+    the templates somebody thought of; and any bracket on any line, which ends the
+    squad at a rated player with a nickname in brackets.
+
+    ``Reserves:`` beside ``Emergencies:`` is here for the colon alone. The rule
+    below ends a line printed the same over both squads that no set row names, so
+    with the colon let into names ``Reserves:`` over both still read 3 and 3, with
+    one warning in that rule's words, and test_parsing, test_cli, test_pipeline and
+    test_hostile_input all passed (/tmp/t4/scratch/f6/before/colon-modules.log).
+    These two differ, and not by ``home`` and ``away``, and hold no bracket, so
+    nothing else ends them: with the colon let in, both went on the squads with the
+    fill-in, and no warning. Rejected: pinning that rule's words on ``Reserves:``
+    over both, which pins that rule and leaves this one unpinned; and ``Reserves:``
+    over one squad, which the colon alone ends as well but pins nothing more, since
+    each line is judged by itself.
+
+    The reader now knows ``Reserves`` and ``Substitutes`` by the word, as it knows
+    ``Fill-ins``, so each of those lines ends the block before this rule sees it and
+    the card says nothing (TestAReservesOrSubstitutesHeadingOverEitherSquadEndsBoth).
+    The shapes below are the same ones in words it does not know that way,
+    ``Emergencies`` and ``Spares``, so that it is this rule that ends them.
+    """
+
+    FILL_IN = ("Golf Garside",)
+    SHAPES = {
+        "visitors": ("Emergencies (Home Team)", "Emergencies (Visitors)"),
+        "visiting team": ("Emergencies (Home Team)", "Emergencies (Visiting Team)"),
+        "host and guest": ("Emergencies (Host)", "Emergencies (Guest)"),
+        "square brackets": ("Emergencies [Home Team]", "Emergencies [Visitors]"),
+        "braces": ("Emergencies {Host}", "Emergencies {Guest}"),
+        "the team's name": ("Emergencies - EXAMPLE ALPHAS",
+                            "Emergencies - EXAMPLE BRAVOS"),
+        "the same over both": ("Emergencies (Away Team)", "Emergencies (Away Team)"),
+        "a colon": ("Emergencies:", "Emergencies:"),
+        "two colon headings that differ": ("Spares:", "Emergencies:"),
+    }
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def test_each_heading_ends_both_squads_above_it(self):
+        for shape, headings in self.SHAPES.items():
+            with self.subTest(shape=shape):
+                card = self.read(cw.CardSpec(fill_ins_headings=headings,
+                                             home_fill_ins=self.FILL_IN))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_the_card_says_so_once_and_quotes_what_it_took_for_a_heading(self):
+        for shape, headings in self.SHAPES.items():
+            with self.subTest(shape=shape):
+                card = self.read(cw.CardSpec(fill_ins_headings=headings,
+                                             home_fill_ins=self.FILL_IN))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                for heading in headings:
+                    self.assertIn(f"'{heading}'", card.warnings[0])
+
+    def test_it_ends_the_block_with_no_heading_under_it_the_reader_knows(self):
+        card = self.read(cw.CardSpec(fill_ins_headings=self.SHAPES["visitors"],
+                                     comments_heading="",
+                                     home_fill_ins=self.FILL_IN))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertNotEqual(card.warnings, (scorecard.ROSTER_BLOCK_UNBOUNDED,))
+
+    def test_a_rated_player_with_a_bracket_in_their_name_is_still_a_player(self):
+        # A heading carries no rating, and a nickname in brackets is a name some
+        # clubs print. With the rating, the line is a squad member's.
+        nickname = "Romeo (Rom) Radcliffe"
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=self.SHAPES["visitors"],
+            home_roster=(cw.RosterRow("Alpha Ashford", 3.10, 3.25, captain=True),
+                         cw.RosterRow(nickname, 2.90, 2.90),
+                         cw.RosterRow("Bravo Beeching", 2.80, 2.95))))
+        self.assertEqual(self.names(card),
+                         (["Alpha Ashford", nickname, "Bravo Beeching"],
+                          list(AWAY_PLAYERS)))
+        self.assertFalse([w for w in card.warnings if nickname in w], card.warnings)
+
+    def test_an_unrated_player_with_a_bracket_in_their_name_is_where_it_stops(self):
+        # The cost of the rule, said on the card rather than left to be found. The
+        # squad is short from that line down, and the warning is the one place a
+        # club learns it.
+        nickname = "Romeo (Rom) Radcliffe"
+        card = self.read(cw.CardSpec(
+            home_roster=(cw.RosterRow("Alpha Ashford", 3.10, 3.25, captain=True),
+                         cw.RosterRow(nickname),
+                         cw.RosterRow("Bravo Beeching", 2.80, 2.95))))
+        self.assertEqual(self.names(card), (["Alpha Ashford"], list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertIn(f"'{nickname}'", card.warnings[0])
+
+
+class TestALinePrintedTheSameOverBothSquadsThatNobodyPlayedIsAHeading(CardCase):
+    """A fill-ins heading printed word for word over both squads is not a player.
+
+    The two rules above know a heading by its copies differing only in ``home`` and
+    ``away``, or by a bracket, a colon or a word with no letter. A heading with none
+    of those, printed the same over each team's column, read exactly like two
+    namesakes, one in each squad. Measured with ``Comments`` still printed and a
+    fill-in under the home heading: ``Reserves``, ``Substitutes``, ``Reserve
+    Players``, ``Fill Ins`` and ``Emergencies`` each came back as the last member
+    of both squads, with the fill-in on the home squad under it, and no warning;
+    with no ``Comments`` heading the same card lost both squads to the unbounded
+    block. Built on two legs, the season had 8 players where there are 7.
+
+    Nothing on the line itself tells such a heading from two unrated namesakes who
+    sat the night out, so the rest of the card has to. The line is judged only on a
+    card that has printed no heading this reader knows: the block ends at
+    ``Comments`` or the foot of the page, not at a word beginning ``fill-in``, and
+    neither squad has ended at a heading. And it has to be what a heading printed
+    over both squads is and two namesakes need not be: one printed line across the
+    card, so both copies are level; under somebody, since squads are printed above
+    it; in the run of unrated lines at the foot of each squad, since it is never
+    rated and stands over names printed with none; and named by neither side of any
+    set row, since a heading never plays. The first such line is the one taken,
+    because what is printed under both copies of a heading is in neither squad. The
+    card says so once, quoting the line.
+
+    The cost, pinned below: two such namesakes, level at the foot of their squads,
+    who both sat the night out over no heading this reader knows, are where the
+    squads stop, and the card says so and what it means if they are two people.
+
+    Rejected: any line printed the same over both squads, which drops the namesakes
+    above the template's own heading; the lowest such line rather than the first,
+    which puts the heading back on both squads under anything printed the same under
+    both copies, a placeholder or a name; copies at the same place in their squads
+    rather than on one line, which misses the heading under squads of different
+    lengths; a word beginning ``fill-in`` anywhere under ``Players`` rather than the
+    one the block ends at, which a comment holds; a vocabulary of heading words,
+    which covers the templates somebody thought of; and deciding it over the season,
+    from both legs, which has no more to go on than the card.
+
+    The reader now knows ``Reserves`` and ``Substitutes`` by the word, as it knows
+    ``Fill-ins`` (TestAReservesOrSubstitutesHeadingOverEitherSquadEndsBoth), so a
+    heading in either never reaches this rule. The headings below are in words it
+    does not know that way, ``Emergencies``, ``Spares`` and ``Fill Ins``, which are
+    what this rule is still for.
+    """
+
+    FILL_IN = ("Golf Garside",)
+    SHAPES = ("Emergencies", "Spares", "Spare Players", "Fill Ins")
+    NAMESAKE = "India Ingleby"
+    # One of each way the squads can end before a line printed over both is judged:
+    # the template's heading, the old word printed the same over both, a pair naming
+    # the sides with `Comments` under it, and a line no name could be, over both
+    # squads or over one.
+    ABOVE_A_HEADING = {
+        "the template's own": ("Fill-ins (Home Team)", "Fill-ins (Away Team)"),
+        "fill-ins over both": ("Fill-ins", "Fill-ins"),
+        "a pair naming the sides": ("Emergencies (Home Team)",
+                                    "Emergencies (Away Team)"),
+        "a line no name could be": ("Emergencies (Home Team)",
+                                    "Emergencies (Visitors)"),
+        "a line no name could be, over the home squad only": ("Emergencies (Home Team)",
+                                                              ""),
+        "a line no name could be, over the away squad only": ("",
+                                                              "Emergencies (Visitors)"),
+    }
+    # And what the namesakes can stand over that this reader knows for a heading by
+    # this rule alone, or not at all.
+    ABOVE_NOTHING_IT_KNOWS = {
+        "nothing": ("", ""),
+        "the same line over both": ("Emergencies", "Emergencies"),
+        "such a line over the home squad only": ("Emergencies", ""),
+        "a different such line over each": ("Spares", "Emergencies"),
+    }
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def with_namesakes(self, *, rating: tuple[float | None, float | None] = (None, None),
+                       under: tuple[str, ...] = (), **spec) -> cw.CardSpec:
+        """The squads with the namesake last but for a rated player on ``under``."""
+        namesake = cw.RosterRow(self.NAMESAKE, *rating)
+        home = [cw.RosterRow("Alpha Ashford", 3.10, 3.25, captain=True),
+                cw.RosterRow("Bravo Beeching", 2.80, 2.95), namesake]
+        away = [cw.RosterRow("Delta Dunmore", 2.60, 2.40, captain=True),
+                cw.RosterRow("Echo Elmsworth", 3.35, 3.55), namesake]
+        if "home" in under:
+            home.append(cw.RosterRow("Charlie Cotterill", 3.0, 3.0))
+        if "away" in under:
+            away.append(cw.RosterRow("Foxtrot Fenwick", 3.0, 3.0))
+        return cw.CardSpec(home_roster=tuple(home), away_roster=tuple(away), **spec)
+
+    def squads(self, under: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+        """What :meth:`with_namesakes` printed, as the squads it should be read as."""
+        return (["Alpha Ashford", "Bravo Beeching", self.NAMESAKE]
+                + (["Charlie Cotterill"] if "home" in under else []),
+                ["Delta Dunmore", "Echo Elmsworth", self.NAMESAKE]
+                + (["Foxtrot Fenwick"] if "away" in under else []))
+
+    def test_each_heading_ends_both_squads_above_it(self):
+        for heading in self.SHAPES:
+            with self.subTest(heading=heading):
+                card = self.read(cw.CardSpec(fill_ins_headings=(heading, heading),
+                                             home_fill_ins=self.FILL_IN))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_the_card_says_so_once_and_quotes_the_line(self):
+        for heading in self.SHAPES:
+            with self.subTest(heading=heading):
+                card = self.read(cw.CardSpec(fill_ins_headings=(heading, heading),
+                                             home_fill_ins=self.FILL_IN))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                note, = card.warnings
+                self.assertIn(f"'{heading}'", note)
+                self.assertIn("as a heading, not two players", note)
+                self.assertIn("both squads are short", note)
+
+    def test_it_ends_the_block_with_no_comments_heading_under_it(self):
+        # Measured before: neither squad read, and the card told the block had no
+        # bottom. The line printed over both is then the bottom.
+        card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies", "Emergencies"),
+                                     comments_heading="",
+                                     home_fill_ins=self.FILL_IN))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_a_word_beginning_fill_in_above_the_squads_is_not_a_fill_ins_heading(self):
+        # Only a word under `Players` says the card prints the old heading. A
+        # competition that calls itself a fill-in night says nothing about where
+        # its squads stop.
+        card = self.read(cw.CardSpec(
+            competition_line="Example District Tennis Fill-in Night Fixtures 2026",
+            fill_ins_headings=("Emergencies",) * 2, home_fill_ins=self.FILL_IN))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_a_comment_that_says_fill_in_is_not_a_fill_ins_heading(self):
+        # The old word is a heading where the block ends at it. Under `Comments` it
+        # is what a captain wrote, and a night that used a fill-in is the one whose
+        # comment is likeliest to say so. Measured: either comment put the heading
+        # back on both squads and the fill-in on the home one.
+        for comment in ("Fill-in Golf Garside played second singles",
+                        "Fill-ins arrived late", "Reserves arrived late",
+                        "Substitute Golf Garside played second singles"):
+            with self.subTest(comment=comment):
+                card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies",) * 2,
+                                             home_fill_ins=self.FILL_IN,
+                                             comments=comment))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_what_is_printed_under_both_copies_stays_under_the_heading(self):
+        # A line printed the same under both copies, a placeholder or one name, is
+        # a line printed the same over both squads as much as the heading is, and
+        # the heading is the first of them. Measured with the lowest taken instead:
+        # the heading on both squads, and the note calling the placeholder it.
+        for under in ("None", "Nil", "N/A", "Golf Garside"):
+            with self.subTest(under=under):
+                card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies",) * 2,
+                                             home_fill_ins=(under,),
+                                             away_fill_ins=(under,)))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_squads_of_different_lengths_end_at_the_one_line_across_both(self):
+        # The heading is printed once across the card, under the longer squad, so
+        # its two copies stand at different places in their squads.
+        home, away = cw.CardSpec().home_roster, cw.CardSpec().away_roster
+        longer = {"home": (home + (cw.RosterRow("Hotel Hartley", 3.0, 3.0),), away),
+                  "away": (home, away + (cw.RosterRow("Kilo Kavanagh", 3.0, 3.0),))}
+        for side, (home_roster, away_roster) in longer.items():
+            with self.subTest(longer=side):
+                card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies",) * 2,
+                                             home_fill_ins=self.FILL_IN,
+                                             home_roster=home_roster,
+                                             away_roster=away_roster))
+                self.assertEqual(self.names(card),
+                                 ([e.name for e in home_roster],
+                                  [e.name for e in away_roster]))
+
+    def test_a_line_naming_nobody_in_one_squad_does_not_move_the_heading(self):
+        # Match Centre's placeholder for nobody is read past, not into the squad, so
+        # a squad's members and its printed lines are not one to one. Where a member
+        # is printed is the line it came from, not its place in the squad.
+        home = cw.CardSpec().home_roster + (cw.RosterRow("Unspecified Player"),)
+        card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies", "Emergencies"),
+                                     home_fill_ins=self.FILL_IN, home_roster=home))
+        self.assertEqual(self.names(card), (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_a_heading_over_one_printed_squad_ends_both(self):
+        # A card with one side's squad missing still prints the heading across both,
+        # and the missing squad is a note of its own.
+        for side in ("home", "away"):
+            with self.subTest(missing=side):
+                card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies",) * 2,
+                                             **{f"{side}_roster": ()}))
+                self.assertEqual(self.names(card),
+                                 ([] if side == "home" else list(HOME_PLAYERS),
+                                  [] if side == "away" else list(AWAY_PLAYERS)))
+                self.assertEqual(len(card.warnings), 2, card.warnings)
+                self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_namesakes_above_a_heading_are_still_players(self):
+        for shape, headings in self.ABOVE_A_HEADING.items():
+            with self.subTest(shape=shape):
+                # The fill-in under a heading that is printed.
+                side = "home_fill_ins" if headings[0] else "away_fill_ins"
+                card = self.read(self.with_namesakes(fill_ins_headings=headings,
+                                                     **{side: self.FILL_IN}))
+                self.assertEqual(self.names(card), self.squads())
+                self.assertFalse([w for w in card.warnings if self.NAMESAKE in w],
+                                 card.warnings)
+
+    def test_namesakes_one_of_whom_played_are_still_players(self):
+        # A set row names people. Either side's is enough, since only one of the
+        # two may have played.
+        rows = {"home": cw.SetRow(6, 0, False, (self.NAMESAKE,), ("Echo Elmsworth",)),
+                "away": cw.SetRow(6, 0, False, ("Bravo Beeching",), (self.NAMESAKE,))}
+        for side, row in rows.items():
+            with self.subTest(played=side):
+                card = self.read(self.with_namesakes(
+                    fill_ins_headings=("", ""),
+                    rows=(cw.SetRow(6, 2, True, HOME_PLAYERS[:2], AWAY_PLAYERS[:2]),
+                          cw.SetRow(6, 3, False, HOME_PLAYERS[:1], AWAY_PLAYERS[:1]),
+                          row,
+                          cw.SetRow(6, 1, True, HOME_PLAYERS[:2], AWAY_PLAYERS[:2]))))
+                self.assertEqual(self.names(card), self.squads())
+                self.assertEqual(card.warnings, ())
+
+    def test_describing_the_card_reads_the_squads_the_reader_does(self):
+        # `describe` is what a club is told to paste when asking for help, and it
+        # reads the block itself: a copy of it that knew no set rows would say two
+        # squads the card was never read as.
+        path = self.write(self.with_namesakes(
+            fill_ins_headings=("", ""),
+            rows=(cw.SetRow(6, 2, True, HOME_PLAYERS[:2], AWAY_PLAYERS[:2]),
+                  cw.SetRow(6, 3, False, HOME_PLAYERS[:1], AWAY_PLAYERS[:1]),
+                  cw.SetRow(6, 0, False, ("Bravo Beeching",), (self.NAMESAKE,)),
+                  cw.SetRow(6, 1, True, HOME_PLAYERS[:2], AWAY_PLAYERS[:2]))))
+        described = scorecard.describe(pdf.extract(path)).splitlines()
+        for side in ("home", "away"):
+            with self.subTest(side=side):
+                line, = [x for x in described if x.startswith(f"{side} roster: ")]
+                self.assertIn(self.NAMESAKE, line)
+        self.assertIn("warnings: none", described)
+
+    def test_rated_namesakes_are_still_players(self):
+        # A heading carries no rating of either kind, and a squad member printed with
+        # one is a squad member.
+        for singles, doubles in ((3.0, 3.0), (3.0, None), (None, 3.0)):
+            with self.subTest(singles=singles, doubles=doubles):
+                card = self.read(self.with_namesakes(rating=(singles, doubles),
+                                                     fill_ins_headings=("", "")))
+                self.assertEqual(self.names(card), self.squads())
+                self.assertEqual(card.warnings, ())
+
+    def test_namesakes_with_a_rated_player_under_either_are_still_players(self):
+        # Under a fill-ins heading only fill-ins are printed, and the template prints
+        # them unrated. A rated line under either copy puts the pair inside a squad.
+        for side in ("home", "away"):
+            with self.subTest(under=side):
+                card = self.read(self.with_namesakes(under=(side,),
+                                                     fill_ins_headings=("", "")))
+                self.assertEqual(self.names(card), self.squads(under=(side,)))
+                self.assertEqual(card.warnings, ())
+
+    def test_namesakes_on_different_lines_are_still_players(self):
+        # The two copies of a heading are one printed line. Two namesakes are only
+        # when they stand at the same place in their squads. Each is then an
+        # unrated line under its squad's rated players with no copy level with it,
+        # which a heading over that squad alone would be too, and the card says so.
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=("", ""),
+            home_roster=cw.CardSpec().home_roster + (cw.RosterRow(self.NAMESAKE),),
+            away_roster=cw.CardSpec().away_roster[:2] + (cw.RosterRow(self.NAMESAKE),)))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS) + [self.NAMESAKE],
+                          list(AWAY_PLAYERS[:2]) + [self.NAMESAKE]))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            f"read '{self.NAMESAKE}' on the home side and '{self.NAMESAKE}' on the "
+            "away side as players"), card.warnings[0])
+        self.assertEqual(card.dropped, ())
+
+    def test_unrated_players_level_at_the_foot_who_differ_are_still_players(self):
+        # Only a line printed the same over both squads can be one heading over both.
+        # Each squad's newest member, unrated and sitting out, is printed level with
+        # the other's as often as not. Each could as well be a heading over its
+        # squad alone, and the card says so of both.
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=("", ""),
+            home_roster=cw.CardSpec().home_roster[:2] + (cw.RosterRow(HOME_PLAYERS[2]),),
+            away_roster=cw.CardSpec().away_roster[:2] + (cw.RosterRow(AWAY_PLAYERS[2]),)))
+        self.assertEqual(self.names(card), (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            f"read '{HOME_PLAYERS[2]}' on the home side and '{AWAY_PLAYERS[2]}' on the "
+            "away side as players"), card.warnings[0])
+
+    def test_namesakes_first_in_both_squads_are_still_players(self):
+        # A heading is printed under a squad. On a card with no ratings every line is
+        # in the unrated run at the foot, the first too, and cutting there leaves the
+        # card no squad at all: measured, both squads empty and two notes for it.
+        squads = ((self.NAMESAKE,) + HOME_PLAYERS[:2], (self.NAMESAKE,) + AWAY_PLAYERS[:2])
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=("", ""),
+            home_roster=tuple(cw.RosterRow(name) for name in squads[0]),
+            away_roster=tuple(cw.RosterRow(name) for name in squads[1])))
+        self.assertEqual(self.names(card), tuple(list(squad) for squad in squads))
+        self.assertEqual(card.warnings, ())
+
+    def test_unrated_namesakes_who_both_sat_out_are_where_it_stops(self):
+        # The cost of the rule, said on the card rather than left to be found: two
+        # people level at the foot of both squads, with no rating and no set, over
+        # nothing this reader knows for a heading but by this rule.
+        for shape, headings in self.ABOVE_NOTHING_IT_KNOWS.items():
+            with self.subTest(under=shape):
+                fill_in = {"home_fill_ins": self.FILL_IN} if headings[0] else {}
+                card = self.read(self.with_namesakes(fill_ins_headings=headings,
+                                                     **fill_in))
+                self.assertEqual(self.names(card),
+                                 (["Alpha Ashford", "Bravo Beeching"],
+                                  ["Delta Dunmore", "Echo Elmsworth"]))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn(f"'{self.NAMESAKE}'", card.warnings[0])
+
+
+class TestAReservesOrSubstitutesHeadingOverEitherSquadEndsBoth(CardCase):
+    """``Reserves`` and ``Substitutes`` are fill-ins headings, over one squad or both.
+
+    The reader knew a fill-ins heading by the word ``Fill-ins`` alone. Anything else
+    had to be caught by one of the three rules above, and a plain heading over one
+    squad only, or a different plain one over each, is caught by none of them: it
+    names no side, holds no bracket, and is not the same line over both. Measured
+    with ``Comments`` still printed and a fill-in under the home or the away column
+    (``/tmp/t6/scratch/m3/probe``): ``Reserves`` over the home squad only read 5 and
+    3 with the fill-in under it, and 4 and 4 with it under the away column;
+    ``Reserves`` over the away squad only 4 and 4, and 3 and 5; ``Substitutes`` over
+    home beside ``Reserves`` over away 5 and 4, and 4 and 5. No warning on any of
+    them. With no ``Comments`` heading, ``Reserves`` over the home squad lost both
+    squads to the unbounded block. And two unrated namesakes at the foot of both
+    squads, over any of those three shapes or over ``Reserves`` printed the same over
+    both, were taken for a heading by the rule above and dropped from both, with a
+    note.
+
+    Now the word ``Reserve`` or ``Substitute`` under ``Players``, singular or plural
+    and the punctuation round it aside, ends the block as a word beginning
+    ``fill-in`` does, on whichever squad it is printed over, alone or with a side
+    named, and the card says nothing, as it says nothing of ``Fill-ins``. It ends
+    both squads, because the template prints its fill-ins headings on one row across
+    the card: a fill-in printed under the other column, with no heading over it, is
+    under that row too.
+
+    Rejected: the plural words alone, which leaves ``Reserve Players`` and a
+    singular ``Substitute`` to the rules above; any word beginning ``reserve`` or
+    ``substitute``, which on a card with no ``Comments`` heading takes a comment's
+    ``reserved`` for the heading (measured: ``Emergencies`` over both then read 4
+    and 4 with no note, where it reads 3 and 3 with the rule above's); a longer
+    list, ``Emergencies`` or ``Spares``, which no template measured prints, and
+    which the rule above still reads over both squads; and knowing the words on
+    their own line and side only, which leaves a fill-in printed under the other
+    column on that squad.
+    """
+
+    FILL_IN = ("Golf Garside",)
+    NAMESAKE = "India Ingleby"
+    SHAPES = {
+        "over the home squad only": ("Reserves", ""),
+        "over the away squad only": ("", "Reserves"),
+        "a different word over each": ("Substitutes", "Reserves"),
+        "the same over both": ("Reserves", "Reserves"),
+        "two words": ("Reserve Players", "Reserve Players"),
+        "the singular words": ("Substitute", "Reserve"),
+        "with a side named after it": ("Reserves (Home Team)", "Reserves (Visitors)"),
+        "with a side named, over one squad": ("", "Substitutes (Visitors)"),
+        "with a side named before it": ("Home Reserves", ""),
+        # Measured with the word taken bare: the colon or the bracket ended the one
+        # squad with a note, and a fill-in under the other column stayed on it.
+        "with a colon, over one squad": ("Reserves:", ""),
+        "in brackets after the side, over one squad": ("", "Bravos (Substitutes)"),
+    }
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def cards(self, **spec):
+        """Each shape, with the fill-in under the home column and then the away."""
+        for shape, headings in self.SHAPES.items():
+            for side in ("home", "away"):
+                yield (shape, side), self.read(cw.CardSpec(
+                    fill_ins_headings=headings, **{f"{side}_fill_ins": self.FILL_IN},
+                    **spec))
+
+    def test_each_heading_ends_both_squads_above_it(self):
+        for (shape, side), card in self.cards():
+            with self.subTest(shape=shape, fill_in=side):
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_the_card_says_nothing_of_a_heading_it_knows(self):
+        # As of `Fill-ins`. Measured before: the heading naming a side after a
+        # bracket was quoted as a line that might be a player.
+        for (shape, side), card in self.cards():
+            with self.subTest(shape=shape, fill_in=side):
+                self.assertEqual(card.warnings, ())
+                self.assertEqual(card.dropped, ())
+
+    def test_it_ends_the_block_with_no_comments_heading_under_it(self):
+        for (shape, side), card in self.cards(comments_heading=""):
+            with self.subTest(shape=shape, fill_in=side):
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                self.assertEqual(card.warnings, ())
+
+    def test_a_word_that_only_begins_like_one_is_not_a_heading(self):
+        # With no `Comments` heading a comment is under the squads too, and only
+        # the whole word is the heading. So `Emergencies` printed over both is left
+        # to the rule above, as it is with no comment.
+        for comment in ("Court reserved until nine",
+                        "Golf Garside substituted in the second set"):
+            with self.subTest(comment=comment):
+                card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies",) * 2,
+                                             comments_heading="", comments=comment))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_namesakes_above_it_are_still_players(self):
+        # The four cards of the namesake table that the rule above dropped from, and
+        # now does not: two unrated people level at the foot, who sat the night out,
+        # over a heading this reader knows.
+        namesake = cw.RosterRow(self.NAMESAKE)
+        home = cw.CardSpec().home_roster[:2] + (namesake,)
+        away = cw.CardSpec().away_roster[:2] + (namesake,)
+        for headings in (("Reserves", "Reserves"), ("Reserves", ""), ("", "Reserves"),
+                         ("Substitutes", "Reserves")):
+            with self.subTest(headings=headings):
+                fill_in = ({"home_fill_ins": self.FILL_IN}
+                           if headings == ("Reserves", "Reserves") else {})
+                card = self.read(cw.CardSpec(fill_ins_headings=headings,
+                                             home_roster=home, away_roster=away,
+                                             **fill_in))
+                self.assertEqual(self.names(card),
+                                 ([e.name for e in home], [e.name for e in away]))
+                self.assertEqual(card.warnings, ())
+
+
+class TestAFillInsWordEndsTheSquadsOnlyOnAHeadingsLine(CardCase):
+    """A fill-ins word ends the roster block only on a line that is a heading.
+
+    The block ended at the topmost word under ``Players`` beginning ``fill-in``, or
+    reading ``Reserve`` or ``Substitute``, whatever line it was on. Measured on the
+    card writer (``/tmp/t7/scratch/R1/probe.py``): with no ``Comments`` heading and
+    ``Emergencies`` or ``Spares`` printed over both squads, a comment reading
+    ``Fill-ins arrived late``, ``Reserves arrived late``, ``Substitutes arrived
+    late``, ``Thanks to both substitutes``, ``Two reserves: Golf Garside`` or ``Golf
+    Garside (substitute) arrived late`` read 4 and 4 with no note, the heading a
+    player in both squads, where the same card with ``Comments`` printed reads 3 and
+    3 with the note of the rule above. So did ``Substitutes: 2``, ``Fill-ins: 0``
+    and ``Reserves used: 1`` (``/tmp/t7/scratch/R1/fixup/rev``),
+    where the same comment with ``Friends`` for the word gives the note that quotes
+    it, or loses both squads to the unbounded block. A fill-in printed as
+    ``Substitute Golf Garside``, ``Reserve Golf Garside`` or ``Fill-in Golf Garside``
+    under ``Emergencies`` over both read 4 and 4 with no note. A rated home player
+    printed third as ``Reserve Quill``, ``Substitute Quill`` or ``Fill-in Quill``
+    read 2 and 2, the away squad's third player lost with him, and one printed
+    fourth as ``Reserve`` or ``Substitute`` alone, 3 and 3.
+
+    Now the word ends the block only on a heading's line: the words printed across
+    the card on its baseline, each of them another such word, a side word, ``Home``,
+    ``Team``, ``Visitors`` or ``Players``, one with a bracket in it, as a side named
+    in brackets is, ``Fill-ins (Alphas)``, or one with no letter or digit in it,
+    except that anything may stand before a heading word in brackets, as in
+    ``Bravos (Substitutes)``. A rating is digits, so a rated line is no heading.
+    Across the card, since the template prints its two headings on one row, and a
+    comment is centred across the divider.
+
+    Rejected: the word alone in its own column or with only a side after it, since
+    each of the three comments starting with the word prints it wholly in the home
+    column, the rest over the divider or beyond it, so the home column's line is the
+    word alone; level copies in both columns, which loses ``Reserves`` over one squad
+    only; any unrated line holding the word, which still ends the block at
+    ``Substitute Golf Garside``; beside the word any word no name could hold, a
+    colon or a digit in it, which takes ``Reserves used: 1`` and ``Substitutes: 2``
+    for headings; no word with a bracket in it either, which reads ``Fill-ins
+    (Alphas)`` over the home squad and ``Fill-ins (Bravos)`` over the away 3 and 3
+    with the note that quotes them, where there was none (measured,
+    ``/tmp/t7/scratch/R1/fixup/final/probe-narrow.txt``); ``home`` and ``away`` as
+    the only side words, which read
+    ``Home Team Fill-ins`` over the home squad as a player, 5 and 3 with the fill-in
+    under it and no note (measured); skipping a word not first on its line, which
+    settles neither, the two words beginning their lines; and any word before a
+    heading word, as a team's name without the brackets, ``Bravos Reserves``, would
+    be, which ends the block at ``Thanks to both substitutes``. So ``Bravos
+    Reserves`` reads as a heading in another word does, and so does ``Fill-ins``
+    beside ``Emergencies`` on one row (both filed): splitting the row at the divider
+    where no word straddles it splits ``Fill-ins welcome`` and ``Fill-ins needed``
+    too (``/tmp/t7/scratch/R1/fixup/split/probe.py``). And a comment that is itself
+    shaped like a heading, ``Golf Garside (substitute)``, ``Reserves (none)``,
+    ``Reserves: -`` or ``Home reserves``, still ends the block (filed).
+    """
+
+    # Each comment, and the same comment with no fill-ins word in it.
+    COMMENTS = {"Fill-ins arrived late": "Friends arrived late",
+                "Reserves arrived late": "Friends arrived late",
+                "Substitutes arrived late": "Friends arrived late",
+                "Thanks to both substitutes": "Thanks to both friends",
+                "Two reserves: Golf Garside": "Two friends: Golf Garside",
+                "Golf Garside (substitute) arrived late":
+                    "Golf Garside (friend) arrived late",
+                "Substitutes: 2": "Friends: 2", "Fill-ins: 0": "Friends: 0",
+                "Reserves used: 1": "Friends used: 1"}
+
+    # A heading naming its side in words, over one squad or both.
+    SIDES = {"Home Team Fill-ins over home": ("Home Team Fill-ins", ""),
+             "Visitors Reserves over away": ("", "Visitors Reserves"),
+             "Away Team Reserves over away": ("", "Away Team Reserves"),
+             "over both": ("Home Team Fill-ins", "Away Team Fill-ins"),
+             "a team's name of two words in brackets": ("",
+                                                        "Example Bravos (Substitutes)"),
+             "a team's name in brackets after the word": ("Fill-ins (Example Alphas)",
+                                                          "Fill-ins (Example Bravos)")}
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def assert_ended_at_emergencies(self, card):
+        self.assertEqual(self.names(card), (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_a_comment_holding_one_is_not_where_the_squads_end(self):
+        # It reads as the comment without the word does, the word itself aside in
+        # the note that quotes it: the plain ones end at `Emergencies` with the rule
+        # above's note, and one with a colon or a bracket in it is a line no name
+        # could be, as any comment holding one is under `Emergencies` (measured,
+        # filed).
+        for comment, plain in self.COMMENTS.items():
+            with self.subTest(comment=comment):
+                card, without = (self.read(cw.CardSpec(
+                    fill_ins_headings=("Emergencies",) * 2, comments_heading="",
+                    comments=text)) for text in (comment, plain))
+                word, twin = next((a, b) for a, b in zip(comment.split(), plain.split())
+                                  if a != b)
+                self.assertEqual(
+                    (self.names(card), tuple(w.replace(word, twin)
+                                             for w in card.warnings)),
+                    (self.names(without), without.warnings))
+                if ":" not in comment and "(" not in comment:
+                    self.assert_ended_at_emergencies(card)
+
+    def test_a_fill_in_printed_with_one_is_under_the_heading(self):
+        for printed in ("Substitute Golf Garside", "Reserve Golf Garside",
+                        "Fill-in Golf Garside"):
+            with self.subTest(printed=printed):
+                self.assert_ended_at_emergencies(self.read(cw.CardSpec(
+                    fill_ins_headings=("Emergencies",) * 2,
+                    home_fill_ins=(printed,))))
+
+    def test_a_rated_player_whose_name_holds_one_is_in_the_squad(self):
+        # Under the template's headings, and under one printed over one squad only,
+        # which nothing but the heading's line ends both squads at.
+        for headings in (("Fill-ins (Home Team)", "Fill-ins (Away Team)"),
+                         ("Reserves", "")):
+            for name in ("Reserve Quill", "Substitute Quill", "Fill-in Quill"):
+                with self.subTest(name=name, headings=headings):
+                    home = (cw.CardSpec().home_roster[:2]
+                            + (cw.RosterRow(name, 3.0, 3.0),))
+                    card = self.read(cw.CardSpec(home_roster=home,
+                                                 fill_ins_headings=headings))
+                    self.assertEqual(self.names(card),
+                                     ([*HOME_PLAYERS[:2], name], list(AWAY_PLAYERS)))
+                    self.assertEqual(card.warnings, ())
+
+    def test_a_rated_line_is_a_players_whatever_it_says(self):
+        # Nothing else on this line is a word a name could hold: its ratings and
+        # their `(S)` and `(D)` hold no letter or a bracket, so only the rating
+        # says it is a squad member's.
+        for name in ("Reserve", "Substitute"):
+            with self.subTest(name=name):
+                home = cw.CardSpec().home_roster + (cw.RosterRow(name, 3.0, 3.0),)
+                card = self.read(cw.CardSpec(home_roster=home))
+                self.assertEqual(self.names(card),
+                                 ([*HOME_PLAYERS, name], list(AWAY_PLAYERS)))
+
+    def test_a_heading_naming_its_side_in_words_ends_both_squads(self):
+        # As `Reserves` over one squad does in the class above, the fill-in under
+        # either column: measured before, `Home Team Fill-ins` over home read 5 and
+        # 3 with the fill-in under it, and `Visitors Reserves` over away 4 and 4.
+        for shape, headings in self.SIDES.items():
+            for side in ("home", "away"):
+                with self.subTest(shape=shape, fill_in=side):
+                    card = self.read(cw.CardSpec(
+                        fill_ins_headings=headings,
+                        **{f"{side}_fill_ins": ("Golf Garside",)}))
+                    self.assertEqual(self.names(card),
+                                     (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                    self.assertEqual(card.warnings, ())
+
+    def test_a_line_is_judged_whole_by_what_stands_beside_the_word(self):
+        for line, heads in (("Fill-ins (Home Team) Fill-ins (Away Team)", True),
+                            ("Reserves:", True), ("Home Reserves", True),
+                            ("Reserve Players Reserve Players", True),
+                            ("Substitutes Reserves", True),
+                            ("Bravos (Substitutes)", True),
+                            ("Example Bravos (Substitutes)", True),
+                            ("Reserves (Home Team) Reserves (Visitors)", True),
+                            ("Home Team Fill-ins Away Team Fill-ins", True),
+                            ("Visitors Reserves", True), ("Host Team Reserves", True),
+                            ("Reserves - Visitors", True),
+                            ("Fill-ins (Alphas) Fill-ins (Bravos)", True),
+                            *((comment, False) for comment in self.COMMENTS),
+                            ("Substitute Golf Garside", False),
+                            ("Reserve Quill 3.00 (S) 3.00 (D)", False),
+                            ("Reserve 3.00 (S) 3.00 (D)", False),
+                            ("EXAMPLE ALPHAS RESERVES DEFEATS EXAMPLE BRAVOS RESERVES",
+                             False),
+                            ("Emergencies", False), ("Comments", False), ("", False)):
+            with self.subTest(line=line):
+                self.assertIs(scorecard._heads_fill_ins(line), heads)
+
+
+class TestADashPrintedUnderAHeadingLeavesTheHeadingOffBothSquads(CardCase):
+    """A line with no letter in it, under a heading, is not where the squads end.
+
+    A squad ends at an unrated line no name could be, and one with no letter in it
+    is such a line. So a ``-`` printed under both copies of a heading ended both
+    squads, and the rule that takes a line printed the same over both squads for a
+    heading is asked only when no squad has ended: it never was, and the heading
+    stayed in both squads. Measured (``/tmp/t6/scratch/m3/probe``,
+    ``/tmp/t6/scratch/m3/fix2``): ``Emergencies`` or ``Fill Ins`` over both squads,
+    with ``-``, ``--``, ``...`` or ``0`` under both copies, read 4 and 4, with one
+    note quoting the two lines as headings; a fill-in under one
+    copy and ``-`` under the other 5 and 4 or 4 and 5, quoting the dash; and ``-``
+    under one copy only, with no ``Comments`` heading, lost both squads to the
+    unbounded block.
+
+    Such a line holds no word, so it heads nothing: it is what a template prints
+    under a fill-ins heading nobody filled in. A squad that ended at one has not
+    ended at a heading, so the rule is asked over the squads as read, and when it
+    finds the heading both squads end there and the note quotes the heading and not
+    the dash. When it finds nothing, the dash ends its squad as before and is
+    quoted.
+
+    The cost, pinned below, is the rule's own: two unrated namesakes level at the
+    foot of both squads, who sat the night out, over a ``-`` under each with no
+    heading this reader knows over it, are where the squads stop, as they are with
+    no ``-``. Rejected: reading past such a line, as a line naming nobody is read
+    past, which leaves a card that the dashes alone bound unbounded; and asking the
+    rule whenever a squad ended at a line no name could be, which drops the
+    namesakes above ``Emergencies (Home Team)`` beside ``Emergencies (Visitors)``,
+    a heading the card has already said it took for one.
+    """
+
+    FILL_IN = ("Golf Garside",)
+    NAMESAKE = "India Ingleby"
+    # Each a line with no letter in it: dashes, dots, and a count of nobody. The
+    # dots and the count are what a rule for dashes alone would leave as headings.
+    NO_LETTER = ("-", "--", "...", "0")
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def with_namesakes(self, **spec) -> cw.CardSpec:
+        namesake = cw.RosterRow(self.NAMESAKE)
+        return cw.CardSpec(home_roster=cw.CardSpec().home_roster[:2] + (namesake,),
+                           away_roster=cw.CardSpec().away_roster[:2] + (namesake,),
+                           **spec)
+
+    def test_the_heading_over_the_dashes_ends_both_squads(self):
+        for heading in ("Emergencies", "Fill Ins"):
+            for dash in self.NO_LETTER:
+                with self.subTest(heading=heading, dash=dash):
+                    card = self.read(cw.CardSpec(fill_ins_headings=(heading, heading),
+                                                 home_fill_ins=(dash,),
+                                                 away_fill_ins=(dash,)))
+                    self.assertEqual(self.names(card),
+                                     (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+
+    def test_the_card_quotes_the_heading_once_and_not_the_dash(self):
+        for heading in ("Emergencies", "Fill Ins"):
+            for dash in self.NO_LETTER:
+                with self.subTest(heading=heading, dash=dash):
+                    card = self.read(cw.CardSpec(fill_ins_headings=(heading, heading),
+                                                 home_fill_ins=(dash,),
+                                                 away_fill_ins=(dash,)))
+                    self.assertEqual(len(card.warnings), 1, card.warnings)
+                    self.assertIn(f"read '{heading}', printed the same on one line "
+                                  "across both squads", card.warnings[0])
+                    self.assertNotIn(f"'{dash}'", card.warnings[0])
+                    self.assertEqual(card.dropped, (heading,))
+
+    def test_a_dash_under_one_copy_leaves_the_heading_off_both_squads(self):
+        # A fill-in under one copy and a dash under the other is the likelier card:
+        # the dash is printed where nobody filled in.
+        heading = ("Emergencies", "Emergencies")
+        for under in (((self.FILL_IN[0],), ("-",)), (("-",), (self.FILL_IN[0],)),
+                      (("-",), ())):
+            with self.subTest(home=under[0], away=under[1]):
+                card = self.read(cw.CardSpec(fill_ins_headings=heading,
+                                             home_fill_ins=under[0],
+                                             away_fill_ins=under[1]))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_it_ends_the_block_with_no_comments_heading_under_it(self):
+        # Measured before, with the dash under one copy only: the other squad had
+        # nothing under it, so neither was read.
+        for under in (("-",), ()):
+            with self.subTest(away=under):
+                card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies",) * 2,
+                                             comments_heading="", home_fill_ins=("-",),
+                                             away_fill_ins=under))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn("'Emergencies'", card.warnings[0])
+
+    def test_a_dash_with_no_heading_over_it_still_ends_the_squads(self):
+        # Nothing printed the same over both squads above it, so nothing else ends
+        # them, and with no `Comments` heading nothing else bounds the block.
+        for comments in ("Comments", ""):
+            with self.subTest(comments=comments):
+                card = self.read(cw.CardSpec(fill_ins_headings=("", ""),
+                                             comments_heading=comments,
+                                             home_fill_ins=("-",),
+                                             away_fill_ins=("-",)))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn("read '-' on the home side and '-' on the away side as "
+                              "headings", card.warnings[0])
+
+    def test_namesakes_above_a_heading_that_ends_the_squads_are_still_players(self):
+        # A heading that names the sides ends the squads at itself, with the dash
+        # under it or not, and what stands above it is in the squads.
+        for headings in (("Emergencies (Home Team)", "Emergencies (Away Team)"),
+                         ("Emergencies (Home Team)", "Emergencies (Visitors)")):
+            with self.subTest(headings=headings):
+                card = self.read(self.with_namesakes(fill_ins_headings=headings,
+                                                     home_fill_ins=("-",),
+                                                     away_fill_ins=("-",)))
+                self.assertEqual(self.names(card),
+                                 (["Alpha Ashford", "Bravo Beeching", self.NAMESAKE],
+                                  ["Delta Dunmore", "Echo Elmsworth", self.NAMESAKE]))
+                self.assertFalse([w for w in card.warnings if self.NAMESAKE in w],
+                                 card.warnings)
+
+    def test_unrated_namesakes_over_the_dashes_are_where_it_stops(self):
+        # The rule's cost, as it is with no dash: measured before, the dash kept
+        # both namesakes, and over `Emergencies` the heading too, on both squads.
+        for headings in (("", ""), ("Emergencies", "Emergencies")):
+            with self.subTest(headings=headings):
+                card = self.read(self.with_namesakes(fill_ins_headings=headings,
+                                                     home_fill_ins=("-",),
+                                                     away_fill_ins=("-",)))
+                self.assertEqual(self.names(card),
+                                 (["Alpha Ashford", "Bravo Beeching"],
+                                  ["Delta Dunmore", "Echo Elmsworth"]))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertIn(f"'{self.NAMESAKE}'", card.warnings[0])
+
+
+class TestAnUnratedLineUnderASquadsRatedPlayersIsReadAsAPlayerAndSaidSo(CardCase):
+    """A heading the reader does not know, over one squad only, is said on the card.
+
+    The reader knows a fill-ins heading by the words ``Fill-ins``, ``Reserves`` and
+    ``Substitutes``, by a bracket, a colon or a word with no letter in it, by two
+    copies that differ only in ``home`` and ``away``, and by one line printed the
+    same over both squads. A heading in another word, over one squad only, is none
+    of those, and was read as a player with no note. Measured with the card writer
+    (``/tmp/t7/scratch/R2/probe.py``): ``Emergencies``, ``Substitutions`` or
+    ``Spares`` over the home squad only, with a fill-in under it, read 5 and 3, the
+    heading and the fill-in in the home squad; with the fill-in under the away
+    column, 4 and 4; ``Emergencies`` over the away squad only 3 and 5; and beside
+    ``Substitutions``, ``Reserves`` or ``Fill-ins`` over the other squad 5 and 4. No
+    note on any of them. On both legs of one fixture, ``Emergencies`` over the home
+    squad gave 8 players where there are 7, ``emergencies`` among them, and 5 or 6
+    warnings where the template gives 3 or 5.
+
+    Nothing on the line tells such a heading from a registered player printed with
+    no rating, and a guess by where it is printed would drop that player: measured,
+    an unrated fourth read 4 and 3 with no note under every heading shape. So the
+    line is still read as a player, and the card says it may be a heading, quoting
+    it. The line is the first in the run of unrated lines at the foot of a squad
+    with somebody rated above it, since a heading is never rated and is printed
+    under the squad; that no set row names, since a heading never plays; and that
+    has no copy level with it in the other squad, since one line printed the same
+    across the card is the rule for a heading over both squads to judge. It is
+    asked where the block does not end at a fill-ins heading, since whatever is
+    printed above one is in the squad, whether it ends at ``Comments`` or at
+    nothing, and of a squad that has not ended at a heading. Each squad's line is in
+    one note, and it is in a squad, so it is not a line the card left out.
+
+    The cost, pinned below: a registered player printed with no rating at the foot
+    of a rated squad, who did not play, over no heading this reader knows, is
+    quoted too. And in a squad that prints nobody's rating nothing sets such a line
+    apart, so a heading over it is read as a player with no note, as it was,
+    whatever the other squad prints.
+
+    Rejected: reading such a line as a heading by where it is printed, which drops a
+    registered player printed with no rating; and a heading word the club names in
+    its config, which the reader does not take (``read(path, *, expect=None)``).
+    """
+
+    FILL_IN = ("Golf Garside",)
+    SHAPES = ("Emergencies", "Substitutions", "Spares")
+    UNRATED = "Sierra Sutcliffe"
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def over(self, side: str, heading: str, **spec) -> cw.CardSpec:
+        """``heading`` over one squad only, and the fill-in under it."""
+        return cw.CardSpec(fill_ins_headings=(heading, "") if side == "home"
+                           else ("", heading),
+                           **{f"{side}_fill_ins": self.FILL_IN}, **spec)
+
+    def with_unrated(self, side: str, *, played: bool = False, **spec) -> cw.CardSpec:
+        """``side``'s squad with a registered player printed fourth with no rating."""
+        squads = {"home_roster": cw.CardSpec().home_roster,
+                  "away_roster": cw.CardSpec().away_roster}
+        squads[f"{side}_roster"] += (cw.RosterRow(self.UNRATED),)
+        if played:
+            third = ((self.UNRATED,), AWAY_PLAYERS[1:2]) if side == "home" else (
+                HOME_PLAYERS[1:2], (self.UNRATED,))
+            spec["rows"] = (cw.SetRow(6, 2, True, HOME_PLAYERS[:2], AWAY_PLAYERS[:2]),
+                            cw.SetRow(6, 3, False, HOME_PLAYERS[:1], AWAY_PLAYERS[:1]),
+                            cw.SetRow(6, 0, False, *third),
+                            cw.SetRow(6, 1, True, HOME_PLAYERS[:2], AWAY_PLAYERS[:2]))
+        return cw.CardSpec(**squads, **spec)
+
+    def test_a_heading_over_one_squad_is_still_read_as_a_player(self):
+        for heading in self.SHAPES:
+            for side in ("home", "away"):
+                with self.subTest(heading=heading, side=side):
+                    card = self.read(self.over(side, heading))
+                    under = [heading, self.FILL_IN[0]]
+                    self.assertEqual(self.names(card), (
+                        list(HOME_PLAYERS) + (under if side == "home" else []),
+                        list(AWAY_PLAYERS) + (under if side == "away" else [])))
+
+    def test_the_card_says_so_once_and_quotes_the_line(self):
+        for heading in self.SHAPES:
+            for side in ("home", "away"):
+                with self.subTest(heading=heading, side=side):
+                    card = self.read(self.over(side, heading))
+                    self.assertEqual(len(card.warnings), 1, card.warnings)
+                    note, = card.warnings
+                    self.assertTrue(note.startswith(
+                        f"read '{heading}' on the {side} side as a player, though it "
+                        "may be a heading printed over that squad alone"), note)
+                    self.assertIn(f"if it is a heading, the {side} squad on this card "
+                                  "wrongly holds it and each line under it", note)
+                    self.assertNotIn(self.FILL_IN[0], note)
+                    self.assertEqual(card.dropped, ())
+
+    def test_each_squads_line_is_in_one_note(self):
+        # A word the reader knows beside one it does not included: the line across
+        # the card is then no heading's (R1's cost), and each is read as a player.
+        for headings in (("Emergencies", "Substitutions"), ("Emergencies", "Reserves"),
+                         ("Fill-ins", "Emergencies")):
+            with self.subTest(headings=headings):
+                card = self.read(cw.CardSpec(fill_ins_headings=headings,
+                                             home_fill_ins=self.FILL_IN))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS) + [headings[0], self.FILL_IN[0]],
+                                  list(AWAY_PLAYERS) + [headings[1]]))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                note, = card.warnings
+                self.assertTrue(note.startswith(
+                    f"read '{headings[0]}' on the home side and '{headings[1]}' on the "
+                    "away side as players, though each may be a heading printed over "
+                    "its squad alone"), note)
+                self.assertIn("if either is a heading, its squad on this card wrongly "
+                              "holds it and each line under it", note)
+
+    def test_the_first_line_nobody_played_is_the_one_quoted(self):
+        # A player printed with no rating who played is a player, so the line to
+        # quote is the heading printed under him, and not the fill-in under that.
+        card = self.read(self.with_unrated(
+            "home", played=True, fill_ins_headings=("Emergencies", ""),
+            home_fill_ins=self.FILL_IN))
+        self.assertEqual(self.names(card)[0], list(HOME_PLAYERS)
+                         + [self.UNRATED, "Emergencies", self.FILL_IN[0]])
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            "read 'Emergencies' on the home side as a player"), card.warnings[0])
+
+    def test_an_unrated_player_a_set_row_names_is_not_quoted(self):
+        for side in ("home", "away"):
+            with self.subTest(side=side):
+                card = self.read(self.with_unrated(side, played=True,
+                                                   fill_ins_headings=("", "")))
+                self.assertEqual(self.names(card), (
+                    list(HOME_PLAYERS) + ([self.UNRATED] if side == "home" else []),
+                    list(AWAY_PLAYERS) + ([self.UNRATED] if side == "away" else [])))
+                self.assertEqual(card.warnings, ())
+
+    def test_nothing_is_said_above_a_fill_ins_heading(self):
+        # Whatever is printed above a heading the reader knows is in the squad.
+        for headings in (("Fill-ins (Home Team)", "Fill-ins (Away Team)"),
+                         ("Reserves", "Reserves"), ("Reserves", ""),
+                         ("", "Substitutes")):
+            with self.subTest(headings=headings):
+                card = self.read(self.with_unrated("home", fill_ins_headings=headings))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS) + [self.UNRATED],
+                                  list(AWAY_PLAYERS)))
+                self.assertEqual(card.warnings, ())
+
+    def test_nothing_is_said_of_a_squad_a_heading_ended(self):
+        # Read to where it stops: what is above that heading is in the squad. One a
+        # bracket ends, a pair naming the sides, and one printed over both, each
+        # with its own note or none.
+        for headings, said in ((("", "Emergencies (Visitors)"), 1),
+                               (("Emergencies (Home Team)",
+                                 "Emergencies (Away Team)"), 0),
+                               (("Emergencies", "Emergencies"), 1)):
+            with self.subTest(headings=headings):
+                card = self.read(self.with_unrated("away", fill_ins_headings=headings))
+                self.assertEqual(self.names(card),
+                                 (list(HOME_PLAYERS),
+                                  list(AWAY_PLAYERS) + [self.UNRATED]))
+                self.assertEqual(len(card.warnings), said, card.warnings)
+                self.assertFalse([w for w in card.warnings if self.UNRATED in w],
+                                 card.warnings)
+
+    def test_nothing_is_said_of_a_squad_nobody_in_is_rated(self):
+        # Every line is then in the unrated run at the foot, so nothing sets one
+        # apart. The cost: a heading over such a squad is a player with no note, as
+        # it was, whether or not the other squad is rated.
+        unrated = {"home_roster": tuple(cw.RosterRow(n) for n in HOME_PLAYERS),
+                   "away_roster": tuple(cw.RosterRow(n) for n in AWAY_PLAYERS)}
+        for away in ("unrated", "rated"):
+            for headings in (("", ""), ("Emergencies", "")):
+                with self.subTest(away=away, headings=headings):
+                    card = self.read(cw.CardSpec(
+                        fill_ins_headings=headings, home_roster=unrated["home_roster"],
+                        **({"away_roster": unrated["away_roster"]}
+                           if away == "unrated" else {})))
+                    self.assertEqual(self.names(card)[0], list(HOME_PLAYERS)
+                                     + (["Emergencies"] if headings[0] else []))
+                    self.assertEqual(card.warnings, ())
+
+    def test_a_line_with_a_rated_copy_level_with_it_is_not_quoted(self):
+        # One line printed the same across the card is the other rule's to judge,
+        # and a heading has no rating on either side, so the pair are namesakes.
+        card = self.read(cw.CardSpec(
+            fill_ins_headings=("", ""),
+            home_roster=cw.CardSpec().home_roster + (cw.RosterRow("India Ingleby"),),
+            away_roster=cw.CardSpec().away_roster
+            + (cw.RosterRow("India Ingleby", 3.0, 3.0),)))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS) + ["India Ingleby"],
+                          list(AWAY_PLAYERS) + ["India Ingleby"]))
+        self.assertEqual(card.warnings, ())
+
+    def test_a_dash_under_it_keeps_its_own_note(self):
+        # The dash ends the squad and is quoted as a heading, as it was. The line
+        # above it is the one that may be the heading, and the card says that too.
+        card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies", ""),
+                                     home_fill_ins=("-",)))
+        self.assertEqual(self.names(card),
+                         (list(HOME_PLAYERS) + ["Emergencies"], list(AWAY_PLAYERS)))
+        self.assertEqual(len(card.warnings), 2, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            "read '-' on the home side as a heading"), card.warnings)
+        self.assertTrue(card.warnings[1].startswith(
+            "read 'Emergencies' on the home side as a player"), card.warnings)
+        self.assertEqual(card.dropped, ("-",))
+
+    def test_a_block_bounded_by_a_dash_under_each_squad_is_asked_too(self):
+        # With neither `Comments` nor a fill-ins heading printed, a dash under each
+        # squad bounds the block, and the line above each dash may be a heading all
+        # the same.
+        card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies", "Spares"),
+                                     home_fill_ins=("-",), away_fill_ins=("-",),
+                                     comments_heading=""))
+        self.assertEqual(self.names(card), (list(HOME_PLAYERS) + ["Emergencies"],
+                                            list(AWAY_PLAYERS) + ["Spares"]))
+        self.assertEqual(len(card.warnings), 2, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            "read '-' on the home side and '-' on the away side as headings"),
+            card.warnings)
+        self.assertTrue(card.warnings[1].startswith(
+            "read 'Emergencies' on the home side and 'Spares' on the away side as "
+            "players"), card.warnings)
+        self.assertEqual(card.dropped, ("-", "-"))
+
+    def test_a_block_nothing_bounds_says_only_that(self):
+        card = self.read(self.over("home", "Emergencies", comments_heading=""))
+        self.assertEqual(self.names(card), ([], []))
+        self.assertEqual(card.warnings, (scorecard.ROSTER_BLOCK_UNBOUNDED,))
+
+    def test_an_unrated_player_who_sat_out_is_quoted_too(self):
+        # The cost, said on the card rather than left to be found.
+        for side in ("home", "away"):
+            with self.subTest(side=side):
+                card = self.read(self.with_unrated(side, fill_ins_headings=("", "")))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertTrue(card.warnings[0].startswith(
+                    f"read '{self.UNRATED}' on the {side} side as a player"),
+                    card.warnings[0])
+
+
+class TestASquadLongerThanTheTemplatesIsReadWhole(CardCase):
+    """A squad of five or more rows is read whole, with the heading under it lower.
+
+    The card writer printed the fill-ins headings where a template of three roster
+    rows prints them, however long the squads. Measured
+    (``/tmp/t7/scratch/R2/probe.py``): a fifth row's baseline at 518.04 and its
+    centre at 515.57, the heading's top at 514.91 and its baseline at 521.65. The
+    band the squads are read from ends a point above the heading's top, at 513.91,
+    so the fifth row was in no band. Squads of 5, 6 and 8 each read 4, on either
+    side, with a fill-in or none, and no note. On both legs of one fixture, the
+    Alphas' squad of 5 gave 7 players where there are 8, and the one warning,
+    ``F8``, said nothing of the fifth.
+
+    The real template prints three rows, so where it puts the heading under a
+    fifth is not measured, and a writer that grows the card to hold a squad prints
+    it under the last row. The headings are now printed one pitch under the longer
+    squad's last row where that is lower than the template's place, and the
+    fill-ins under them follow. Squads of three and four are printed as they were,
+    byte for byte.
+
+    Rejected: widening the reader's band. Measured on copies of the unfixed tree
+    (``/tmp/t7/scratch/R2/widen/probe2.py``): ended a point under the heading's
+    top, the least that holds the fifth, it reads a squad of 6 or 8 as 5, since
+    the rows after the fifth are printed under the heading; ended at the
+    heading's baseline, it reads ``Fill-ins`` over one squad, and ``Comments``,
+    as players.
+    """
+
+    FILL_IN = ("Golf Garside",)
+    MORE = {"home": ("Hotel Hartley", "Juliet Jardine", "Lima Lockhart",
+                     "Mike Merriman", "November Nash"),
+            "away": ("Kilo Kavanagh", "Oscar Ormsby", "Papa Pennington",
+                     "Quebec Quill", "Romeo Rushworth")}
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def squads(self, rows: int, longer: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Each squad's names, ``rows`` long on the ``longer`` side, or on both."""
+        return tuple(names + self.MORE[side][:rows - 3]
+                     if longer in (side, "both") else names
+                     for side, names in (("home", HOME_PLAYERS),
+                                         ("away", AWAY_PLAYERS)))
+
+    def spec(self, rows: int, longer: str, **spec) -> cw.CardSpec:
+        home, away = self.squads(rows, longer)
+        return cw.CardSpec(**{f"{side}_roster": tuple(
+            cw.RosterRow(name, 3.0, 3.0, captain=(k == 0))
+            for k, name in enumerate(names))
+            for side, names in (("home", home), ("away", away))}, **spec)
+
+    def test_each_row_of_a_longer_squad_is_read(self):
+        for rows in (5, 6, 8):
+            for longer in ("home", "away", "both"):
+                for fill_ins in ((), self.FILL_IN):
+                    with self.subTest(rows=rows, longer=longer, fill_ins=fill_ins):
+                        card = self.read(self.spec(rows, longer,
+                                                   home_fill_ins=fill_ins))
+                        self.assertEqual(self.names(card),
+                                         tuple(list(names) for names
+                                               in self.squads(rows, longer)))
+                        self.assertEqual(card.warnings, ())
+
+    def test_the_heading_is_printed_a_pitch_under_the_last_row(self):
+        for rows in (5, 6, 8):
+            for longer in ("home", "away"):
+                with self.subTest(rows=rows, longer=longer):
+                    page = pdf.extract(self.write(self.spec(
+                        rows, longer, home_fill_ins=self.FILL_IN)))
+                    last, = page.find(self.MORE[longer][rows - 4].split()[0])
+                    headings = page.find("Fill-ins")
+                    self.assertEqual(len(headings), 2)
+                    fill_in, = page.find("Golf")
+                    for heading in headings:
+                        self.assertAlmostEqual(heading.baseline - last.baseline,
+                                               10.375, places=2)
+                    self.assertAlmostEqual(fill_in.baseline - headings[0].baseline,
+                                           10.375, places=2)
+
+    def test_squads_of_three_and_four_are_printed_as_they_were(self):
+        # The template's own place: 205.91 under the set table, so 521.65 on a card
+        # of four sets, and the page byte for byte.
+        for rows in (3, 4):
+            for longer in ("home", "away"):
+                with self.subTest(rows=rows, longer=longer):
+                    spec = self.spec(rows, longer, home_fill_ins=self.FILL_IN)
+                    page = pdf.extract(self.write(spec))
+                    for heading in page.find("Fill-ins"):
+                        self.assertAlmostEqual(heading.baseline, 521.65, places=2)
+                    self.assertEqual(
+                        cw.write_card(spec),
+                        cw.write_card(dataclasses.replace(spec, fixed_fill_ins=True)))
+
+
+class TestALinePrintedTooCloseAboveTheHeadingIsLeftOutAndSaid(CardCase):
+    """A roster line printed too close above the heading under it is not lost unsaid.
+
+    The squads are read from a band that ends a point above the top of the heading
+    under them, and a line is in it by its centre, so that the heading itself is not
+    read as a roster line. A line printed closer above the heading than that is in
+    no band, and was dropped with no word. Measured on a card printed as the writer
+    printed them before it moved its headings (``fixed_fill_ins``,
+    ``/tmp/t7/scratch/R2/probe.py``): the fifth row, centre 515.57 under a band
+    ending at 513.91, was left out of a squad of 5, 6 or 8 with no note.
+
+    Now a line under the band and above the heading's line, rated or not, in a squad
+    no heading or dash has ended above it, is left out as before and the card says
+    so, quoting its name without its rating, and the heading, ``Comments`` included,
+    by the word the block ends at, as the doctor names it. That goes on
+    ``dropped``, since it is in neither squad. What is
+    printed on the heading's line, a hair off level included, or under it is not
+    asked about: under a heading is where the fill-ins are, and the fifth's note
+    already says the squad is short. Nor is a line the band holds by its centre,
+    which is in the squad.
+
+    Rejected: widening the band, which holds the fifth and not the sixth, and at
+    the heading's baseline lets headings in as players (the class above); and
+    reading such a line into the squad, which takes a line for a member on no
+    evidence but that it is under the band.
+    """
+
+    MORE = TestASquadLongerThanTheTemplatesIsReadWhole.MORE
+
+    def names(self, card) -> tuple[list[str], list[str]]:
+        return ([e.name for e in card.home_roster],
+                [e.name for e in card.away_roster])
+
+    def fixed(self, home: tuple = (), away: tuple = (), **spec) -> cw.CardSpec:
+        """The headings where the template prints them, ``home`` and ``away`` added."""
+        def squad(names, more):
+            return (tuple(cw.RosterRow(name, 3.0, 3.0, captain=(k == 0))
+                          for k, name in enumerate(names))
+                    + tuple(row if isinstance(row, cw.RosterRow)
+                            else cw.RosterRow(row, 3.0, 3.0) for row in more))
+        return cw.CardSpec(home_roster=squad(HOME_PLAYERS, home),
+                           away_roster=squad(AWAY_PLAYERS, away),
+                           fixed_fill_ins=True, **spec)
+
+    def test_the_line_is_left_out_and_quoted_by_its_name(self):
+        for side in ("home", "away"):
+            with self.subTest(side=side):
+                card = self.read(self.fixed(**{side: self.MORE[side][:2]}))
+                fifth = self.MORE[side][1]
+                self.assertEqual(self.names(card), (
+                    list(HOME_PLAYERS) + (["Hotel Hartley"] if side == "home" else []),
+                    list(AWAY_PLAYERS) + (["Kilo Kavanagh"] if side == "away" else [])))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                note, = card.warnings
+                self.assertTrue(note.startswith(
+                    f"left '{fifth}' on the {side} side out of the squads, since it is "
+                    "printed too close above 'Fill-ins' to be read as a roster line"),
+                    note)
+                self.assertIn(f"if it is a player, the {side} squad is short on this "
+                              "card", note)
+                self.assertNotIn("3.00", note)
+                self.assertEqual(card.dropped, (fifth,))
+
+    def test_a_line_with_no_rating_is_quoted_by_its_name_alone(self):
+        # A player printed there before a rating was given is as unread.
+        card = self.read(self.fixed(home=("Hotel Hartley",
+                                          cw.RosterRow("Juliet Jardine"))))
+        self.assertEqual(self.names(card)[0], list(HOME_PLAYERS) + ["Hotel Hartley"])
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            "left 'Juliet Jardine' on the home side out of the squads, since it is "
+            "printed too close above 'Fill-ins'"), card.warnings[0])
+        self.assertEqual(card.dropped, ("Juliet Jardine",))
+
+    def test_both_sides_are_one_note(self):
+        card = self.read(self.fixed(home=self.MORE["home"][:2],
+                                    away=self.MORE["away"][:2]))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            "left 'Juliet Jardine' on the home side and 'Oscar Ormsby' on the away "
+            "side out of the squads, since they are printed too close above 'Fill-ins' "
+            "to be read as roster lines; if either is a player, its squad is short on "
+            "this card"), card.warnings[0])
+        self.assertEqual(card.dropped, ("Juliet Jardine", "Oscar Ormsby"))
+
+    def test_nothing_on_the_headings_own_line_is_quoted(self):
+        # Its words are under the band too, and `Fill-ins (Home Team)` reads as a
+        # roster line would.
+        for more in ((), self.MORE["home"][:1]):
+            with self.subTest(more=more):
+                card = self.read(self.fixed(home=more))
+                self.assertEqual(self.names(card)[0], list(HOME_PLAYERS + more))
+                self.assertEqual(card.warnings, ())
+
+    def test_a_line_under_the_heading_is_not_quoted(self):
+        card = self.read(self.fixed(home=self.MORE["home"][:3]))
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertNotIn("Lima Lockhart", card.warnings[0])
+        self.assertEqual(card.dropped, ("Juliet Jardine",))
+
+    def test_a_squad_that_ended_above_it_is_not_asked(self):
+        # What is printed under a heading is not the squad's, however close above
+        # the next heading it is, and nor is what is printed under a dash.
+        for end in ("Emergencies (Home Team)", "-"):
+            with self.subTest(end=end):
+                card = self.read(self.fixed(home=(cw.RosterRow(end),
+                                                  "Juliet Jardine")))
+                self.assertEqual(self.names(card)[0], list(HOME_PLAYERS))
+                self.assertEqual(len(card.warnings), 1, card.warnings)
+                self.assertTrue(card.warnings[0].startswith(
+                    f"read '{end}' on the home side as a heading"), card.warnings)
+                self.assertEqual(card.dropped, (end,))
+
+    def test_a_line_naming_nobody_is_not_quoted(self):
+        card = self.read(self.fixed(home=("Hotel Hartley",
+                                          cw.RosterRow("Unspecified Player"))))
+        self.assertEqual(self.names(card)[0], list(HOME_PLAYERS) + ["Hotel Hartley"])
+        self.assertEqual(card.warnings, ())
+
+    def test_the_heading_is_quoted_as_the_doctor_names_it(self):
+        # The word the block ends at, the punctuation round it aside.
+        page = pdf.extract(self.write(self.fixed(
+            home=self.MORE["home"][:2], fill_ins_headings=("Reserves:", "Reserves:"))))
+        note, = scorecard.read_page(page).warnings
+        self.assertIn("printed too close above 'Reserves' to be read", note)
+        self.assertEqual(scorecard.fill_ins_heading(page), "Reserves")
+
+    def test_a_line_too_close_above_comments_is_quoted_too(self):
+        # With no fill-ins heading the block ends at `Comments`, and a line printed
+        # that close above it is as unread. Moved by hand to where the template
+        # prints the fill-ins heading, since the writer prints it under the squads.
+        at = min(pdf.extract(self.write(self.fixed())).find("Fill-ins"),
+                 key=lambda w: w.x0)
+        page = pdf.extract(self.write(self.fixed(home=self.MORE["home"][:2],
+                                                 fill_ins_headings=("", ""))))
+        comments, = page.find("Comments")
+        up = comments.baseline - at.baseline
+        page = dataclasses.replace(page, words=tuple(
+            dataclasses.replace(w, y0=w.y0 - up, y1=w.y1 - up, baseline=w.baseline - up)
+            if w is comments else w for w in page.words))
+        card = scorecard.read_page(page)
+        self.assertEqual(self.names(card)[0], list(HOME_PLAYERS) + ["Hotel Hartley"])
+        self.assertEqual(len(card.warnings), 1, card.warnings)
+        self.assertTrue(card.warnings[0].startswith(
+            "left 'Juliet Jardine' on the home side out of the squads, since it is "
+            "printed too close above 'Comments' to be read as a roster line"),
+            card.warnings[0])
+        self.assertEqual(card.dropped, ("Juliet Jardine",))
+
+    def test_a_line_the_band_holds_by_its_centre_is_not_quoted(self):
+        # A line whose centre is where the band ends is in the band, so in the
+        # squad, and is not also left out of it. Moved there by hand: the band ends
+        # a point above the heading's top.
+        page = pdf.extract(self.write(self.fixed(home=self.MORE["home"][:2])))
+        fifth, = page.find("Juliet")
+        heading = min(page.find("Fill-ins"), key=lambda w: w.x0)
+        end = heading.y0 - 1.0
+        page = dataclasses.replace(page, words=tuple(
+            dataclasses.replace(w, y0=end - 2.0, y1=end + 2.0, baseline=end + 2.0)
+            if abs(w.baseline - fifth.baseline) < 0.01 else w for w in page.words))
+        moved, = page.find("Juliet")
+        self.assertEqual(moved.cy, end)
+        card = scorecard.read_page(page)
+        self.assertEqual(self.names(card)[0],
+                         list(HOME_PLAYERS) + list(self.MORE["home"][:2]))
+        self.assertEqual(card.warnings, ())
+        self.assertEqual(card.dropped, ())
+
+    def test_a_heading_printed_a_hair_off_level_is_not_quoted(self):
+        # Its words are on the heading's line, if not printed exactly level with the
+        # word the block ends at. Moved up by hand, as a template may print them.
+        page = pdf.extract(self.write(self.fixed()))
+        away = max(page.find("Fill-ins"), key=lambda w: w.x0)
+        page = dataclasses.replace(page, words=tuple(
+            dataclasses.replace(w, y0=w.y0 - 0.3, y1=w.y1 - 0.3,
+                                baseline=w.baseline - 0.3)
+            if w.text in ("(Away", "Team)") and w.x0 > away.x0 else w
+            for w in page.words))
+        card = scorecard.read_page(page)
+        self.assertEqual(self.names(card), (list(HOME_PLAYERS), list(AWAY_PLAYERS)))
+        self.assertEqual(card.warnings, ())
+
+
+class TestARosterBlockNothingEndsIsNotRead(CardCase):
+    """With neither heading under it printed, the roster block has no bottom.
+
+    The bound fell back to the foot of the page. Measured with ``Fill-ins`` and
+    ``Comments`` both left off a card that prints one fill-in and the comment ``Rain
+    stopped play at nine``: the home squad came back as its three players, the
+    fill-in and ``Rain stopped``, and the away squad as its three and ``play at
+    nine``, the comment cut in two at the divider and read as two people. No warning.
+
+    Nothing on such a page says where the squads stop, and a bottom taken from the
+    page is a guess. So the block is treated the way a card with no ``Players``
+    heading already is: neither squad is read, and the card says why, once.
+
+    Rejected: reading to the foot of the page with a warning attached, which still
+    registers two people who do not exist; and cutting the block at its last rated
+    line, which drops a squad's unrated players from the end of it.
+    """
+
+    def spec(self) -> cw.CardSpec:
+        # Built when a test asks, not when the class is: a fixture that cannot
+        # print this page fails these tests, and not every test in the module.
+        return cw.CardSpec(fill_ins_headings=("", ""), comments_heading="",
+                           home_fill_ins=("Golf Garside",),
+                           comments="Rain stopped play at nine")
+
+    def test_neither_squad_is_read(self):
+        card = self.read(self.spec())
+        self.assertEqual((card.home_roster, card.away_roster), ((), ()))
+
+    def test_the_card_says_why_in_one_warning(self):
+        card = self.read(self.spec())
+        self.assertEqual(card.warnings, (scorecard.ROSTER_BLOCK_UNBOUNDED,))
+
+    def test_a_heading_under_one_squad_only_leaves_both_unread(self):
+        # Measured before: the heading and the fill-in under it on the home squad.
+        # Rejected: reading the home side, whose end is a line taken for a heading
+        # on the strength of a bracket with nothing on the other side printed in
+        # answer to it, beside an away side that runs to the foot of the page.
+        card = self.read(cw.CardSpec(fill_ins_headings=("Emergencies (Home Team)", ""),
+                                     comments_heading="",
+                                     home_fill_ins=("Golf Garside",)))
+        self.assertEqual((card.home_roster, card.away_roster), ((), ()))
+        self.assertEqual(card.warnings, (scorecard.ROSTER_BLOCK_UNBOUNDED,))
+
+
 class TestADamagedCardIsRefused(CardCase):
     """F5: fail closed. Each of these produced a wrong number in the predecessor."""
 
@@ -457,6 +3453,555 @@ class TestAFontWithNoToUnicodeMapIsStillRead(CardCase):
                 self.assertEqual(getattr(plain, field), getattr(without, field))
 
 
+# A 2 x 2 grey picture, the smallest image a PDF paints: a byte a pixel,
+# uncompressed. What it shows does not matter here, since the reader records
+# where an image is painted and never reads one.
+_GREY = bytes([200, 60, 60, 200])
+
+
+def _with_an_image(content: bytes, *, media: bytes = b"/MediaBox [0 0 595 842]",
+                   form: tuple[bytes, bytes] = ()) -> bytes:
+    """cardwriter's one-page PDF around ``content``, with an image it can ``Do``.
+
+    The image is object 8, named ``/Im1`` in the page's resources, so ``q 200 0 0
+    100 50 60 cm /Im1 Do Q`` in ``content`` paints it into the box 200 wide and
+    100 high whose lower left corner is (50, 60). ``media`` is written in place
+    of the page's ``/MediaBox``, a ``/Rotate`` with it if need be. ``form``, a
+    ``/Matrix`` and a content stream, is a form XObject named ``/Fm1``, object 9,
+    with the image among its own resources. The objects are written again with a
+    cross-reference table of their own, as a producer would write them.
+    """
+    raw = cw._assemble(content, with_to_unicode=True)
+    objects = {int(m[1]): m[2] for m in
+               re.finditer(rb"(\d+) 0 obj\n(.*?)\nendobj\n", raw, re.S)}
+    fonts = b"<< /Font << /F1 4 0 R >> >>"
+    box = b"/MediaBox [0 0 595 842]"
+    assert objects[3].count(fonts) == objects[3].count(box) == 1, objects[3]
+    named = b"/Im1 8 0 R /Fm1 9 0 R" if form else b"/Im1 8 0 R"
+    objects[3] = objects[3].replace(box, media).replace(
+        fonts, b"<< /Font << /F1 4 0 R >> /XObject << " + named + b" >> >>")
+    objects[8] = (b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 "
+                  b"/ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n"
+                  b"stream\n" + _GREY + b"\nendstream")
+    if form:
+        matrix, painted = form
+        objects[9] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 595 842] "
+                      b"/Matrix [" + matrix + b"] /Resources << /XObject << "
+                      b"/Im1 8 0 R >> >> /Length %d >>\nstream\n" % len(painted)
+                      + painted + b"\nendstream")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    for number in sorted(objects):
+        offsets[number] = len(out)
+        out += b"%d 0 obj\n" % number + objects[number] + b"\nendobj\n"
+    xref_at, size = len(out), max(objects) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+    for number in range(1, size):
+        out += b"%010d 00000 %s \n" % (offsets.get(number, 0),
+                                        b"n" if number in offsets else b"f")
+    out += (b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (size, xref_at))
+    return bytes(out)
+
+
+def _inline(data: bytes, box: bytes = b"595 0 0 842 0 0") -> bytes:
+    """An inline image of ``data`` painted into ``box``, a ``cm`` matrix."""
+    return (b"q " + box + b" cm BI /W %d /H 1 /CS /G /BPC 8 ID " % len(data)
+            + data + b" EI Q")
+
+
+def _typed(*lines: tuple[str, float, float]) -> bytes:
+    """The content that prints each ``(text, x, baseline)`` and nothing else."""
+    art = cw._Painter()
+    for text, x, baseline in lines:
+        art.words(text, x, baseline, 8.0)
+    return "\n".join(art.ops).encode("latin-1")
+
+
+class TestAPictureOnThePageIsRecordedAndItsBytesAreNeverReadAsText(CardCase):
+    """An image is recorded where it is painted, and an inline one is not read.
+
+    The reader skipped every image, so nothing it returned could tell a picture
+    of a card from a page that painted nothing, and ``tools/doctor.py`` named a
+    picture from what a page lacked instead. And it had no inline image at all:
+    the bytes between ``ID`` and ``EI`` were tokenised as content, where a ``(``
+    in them opens a literal string that swallows the rest of the stream.
+    Measured (/tmp/t6/scratch/m8/probe.py) on a team list with a small inline
+    image between its heading and its names: 3 words read, of the 9 it prints.
+
+    So a page carries the box each image is painted into, whether an image
+    XObject drawn by ``Do`` or an inline image: the unit square through the
+    current transformation, as a filled rect, since an image paints all of it.
+    That transformation turns with the image's own matrix and the page's
+    ``/Rotate``, and holds the ``/Matrix`` of any form the image is painted in.
+    An inline image's bytes are passed over whole, up to the ``EI`` that ends
+    them (the class after this one says which ``EI`` that is), and one with no
+    ``EI`` is not recorded, since an image that never ends is no evidence of a
+    picture. Nothing reads what a picture shows.
+
+    Rejected: counting images without their boxes, which cannot tell a club's
+    logo from a scan; and finding the end of an inline image by the ``/L`` or
+    ``/Length`` some producers write into its dictionary, which PDF 1.x does not
+    require, so that it cannot be the only way the end is found.
+    """
+
+    HEADING = (("Riverside Rockets 2026", 60.0, 80.0),)
+    NAMES = (("Alex Example", 60.0, 98.0), ("Blair Sample", 60.0, 116.0),
+             ("Casey Test", 60.0, 134.0))
+    # 200 x 100 points with its lower left corner at (50, 60), which the page's
+    # top-left origin puts between 682 and 782 points down.
+    BOX = pdf.Rect(50.0, 682.0, 250.0, 782.0, True)
+
+    def extract(self, raw: bytes) -> pdf.Page:
+        type(self)._counter += 1
+        path = self.tmp / f"page-{type(self)._counter:03d}.pdf"
+        path.write_bytes(raw)
+        return pdf.extract(path)
+
+    def typed(self, content: bytes) -> pdf.Page:
+        return self.extract(cw._assemble(content, with_to_unicode=True))
+
+    def test_an_image_drawn_by_do_is_recorded_as_the_box_it_is_painted_into(self):
+        # The second is the same box drawn upside down, as a producer that
+        # flips its pictures draws one.
+        for matrix in (b"200 0 0 100 50 60", b"200 0 0 -100 50 160"):
+            with self.subTest(matrix=matrix):
+                page = self.extract(_with_an_image(b"q " + matrix
+                                                   + b" cm /Im1 Do Q"))
+                self.assertEqual(page.images, (self.BOX,))
+                self.assertEqual((page.words, page.rects), ((), ()))
+
+    def test_an_image_painted_turned_is_recorded_as_the_box_it_covers(self):
+        # A quarter turn by the image's own matrix, into the same box, and the
+        # box above on a landscape page that /Rotate 90 shows upright, as a
+        # scanner saves a card scanned sideways: 100 wide and 200 high, as shown.
+        turned = self.extract(_with_an_image(b"q 0 100 -200 0 250 60 cm /Im1 Do Q"))
+        self.assertEqual(turned.images, (self.BOX,))
+        sideways = self.extract(_with_an_image(
+            b"q 200 0 0 100 50 60 cm /Im1 Do Q",
+            media=b"/MediaBox [0 0 842 595] /Rotate 90"))
+        self.assertEqual((sideways.width, sideways.height), (595.0, 842.0))
+        self.assertEqual(sideways.images,
+                         (pdf.Rect(60.0, 50.0, 160.0, 250.0, True),))
+
+    def test_an_image_inside_a_form_is_recorded_through_the_forms_matrix(self):
+        # A scan as a producer that wraps a page in a form XObject writes one,
+        # the form's /Matrix halving it into the page's lower left quarter.
+        page = self.extract(_with_an_image(
+            b"q /Fm1 Do Q",
+            form=(b"0.5 0 0 0.5 0 0", b"q 595 0 0 842 0 0 cm /Im1 Do Q")))
+        self.assertEqual(page.images, (pdf.Rect(0.0, 421.0, 297.5, 842.0, True),))
+
+    def test_an_inline_image_is_recorded_as_the_box_it_is_painted_into(self):
+        # The second ends the stream at its EI, as a producer that restores no
+        # state after the last thing it paints writes one.
+        image = _inline(_GREY, b"200 0 0 100 50 60")
+        for content in (image, image[:-len(b" Q")]):
+            with self.subTest(content=content[-8:]):
+                self.assertEqual(self.typed(content).images, (self.BOX,))
+
+    def test_an_inline_images_bytes_are_never_read_as_text(self):
+        # Bytes that read as a string shown by Tj, as two words with an EI in
+        # each, which end nothing, then as a string that never closes: the
+        # page's own words either side are all that is read.
+        heading, names = _typed(*self.HEADING), _typed(*self.NAMES)
+        page = self.typed(heading + b"\n" + _inline(b"(Z) Tj GREI EIGHT ((<(",
+                                                    b"20 0 0 20 400 700")
+                          + b"\n" + names)
+        plain = self.typed(heading + b"\n" + names)
+        self.assertEqual(len(plain.words), 9)
+        self.assertEqual([w.text for w in page.words],
+                         [w.text for w in plain.words])
+        self.assertEqual(len(page.images), 1)
+
+    def test_an_inline_image_that_never_ends_is_not_recorded(self):
+        # With no EI the stream ends inside the image's bytes, so the names
+        # after them are bytes of the image and are not read either.
+        heading, names = _typed(*self.HEADING), _typed(*self.NAMES)
+        page = self.typed(heading + b"\nq 20 0 0 20 400 700 cm BI /W 2 /H 2 "
+                          b"/CS /G /BPC 8 ID " + _GREY + b"\n" + names)
+        self.assertEqual(page.images, ())
+        self.assertEqual([w.text for w in page.words],
+                         [w.text for w in self.typed(heading).words])
+
+
+class TestAnInlineImageWhoseBytesHoldAnEIEndsWhereTheImageEnds(CardCase):
+    r"""An inline image ends at the ``EI`` its length gives, or that what follows allows.
+
+    The reader ended an inline image at the first ``EI`` with white space before it
+    and white space, a delimiter or the stream's end after it, and never read the
+    ``/L`` or ``/Length`` its dictionary may give. An image's bytes are any bytes, so
+    ``\x01 EI (\x02`` among them ended it early, and the ``(`` opened a string that
+    swallowed the rest of the stream. Measured (/tmp/t7/scratch/RF/probe_inline.py)
+    on the team list of the class above with an 8-byte inline image between its
+    heading and its names: 3 words read of the 9 it prints, and the same 3 with
+    ``/L 8`` in the dictionary. With ``\x01 EI Q\x02`` among the bytes: all 9 words,
+    and 2 images, since the rest of the image was read as the end of a second one.
+    Bytes that end in `` EI`` gave 2 images too.
+
+    Now a length the dictionary gives is counted from the byte after ``ID``'s white
+    space, and the image ends there if ``EI`` is next, whatever follows. Without one,
+    or where the length leads to no ``EI``, it ends at the first ``EI`` after which
+    the page reads on as content: operands and then one of the 73 operators of ISO
+    32000-1 Annex A but ``ID`` and ``EI``, which follow only an image's own
+    dictionary and bytes, or the stream's end. What follows is read for 1,024 bytes
+    at most, so that an image full of candidates costs a bounded look at each, and
+    a string its bytes open is not closed by a ``)`` far down the stream.
+    Where no ``EI`` reads on as content, the first whose look ran out before it
+    decided ends the image, and failing that the first, as before. None past the
+    next ``BI`` is tried, since it would end the image that ``BI`` begins.
+
+    Rejected: honouring /L alone, which leaves every image in a PDF 1.x file, which
+    need give no length, ending at the first ``EI`` among its bytes. Also rejected:
+    trying every ``EI`` to the stream's end, as a first try did. With a comment of
+    2,000 bytes after an image's own ``EI``, or a text array of 1,100, it ended the
+    image at the next image's ``EI`` and read 3 words where the reader before it
+    read 9 and 10 (/tmp/t7/scratch/RF/probe_inline2.py). Ending the image at the
+    first ``EI`` the look cannot decide, as a second try did, read ``\x01 EI (\x02``
+    with 2,000 bytes of content after it as 3 words again (probe_long.py there),
+    since a string those bytes open is closed by nothing in content whose strings
+    are closed. And reading on from each ``EI`` as far as it takes, which put 15.1
+    seconds on an image of 1,000 candidates before 260,000 bytes of content, where
+    the 1,024 put 0.065 (probe_cost.py there). What this still gets wrong: after an
+    image's own ``EI`` and more than 1,024 bytes with no operator, an ``EI`` in a
+    comment that reads on as content ends the image, and 3 words are read where the
+    reader before it read 9 (probe_long.py, case I).
+    """
+
+    HEADING = TestAPictureOnThePageIsRecordedAndItsBytesAreNeverReadAsText.HEADING
+    NAMES = TestAPictureOnThePageIsRecordedAndItsBytesAreNeverReadAsText.NAMES
+    BOX = TestAPictureOnThePageIsRecordedAndItsBytesAreNeverReadAsText.BOX
+    extract = TestAPictureOnThePageIsRecordedAndItsBytesAreNeverReadAsText.extract
+    typed = TestAPictureOnThePageIsRecordedAndItsBytesAreNeverReadAsText.typed
+    # A second image, for ``end``: an EI the first image's end passes over to reach
+    # this one's takes the names with it.
+    SECOND = b"\nq 200 0 0 100 50 60 cm BI /W 2 /H 1 /CS /G /BPC 8 ID \x03\x04 EI Q"
+
+    def page(self, data: bytes, given: bytes = b"", after: bytes = b" Q", *,
+             before: bytes = b"", end: bytes = b"") -> pdf.Page:
+        """The team list with an image of ``data`` between its heading and names.
+
+        ``given`` goes at the end of the image's dictionary, ``before`` straight
+        before it, ``after`` straight after its ``EI``, and ``end`` after the names.
+        """
+        image = (before + b"q 200 0 0 100 50 60 cm BI /W %d /H 1 /CS /G /BPC 8%s ID "
+                 % (len(data), given) + data + b" EI" + after)
+        return self.typed(_typed(*self.HEADING) + b"\n" + image + b"\n"
+                          + _typed(*self.NAMES) + end)
+
+    def assert_read_whole(self, page: pdf.Page, images: int = 1) -> None:
+        plain = self.typed(_typed(*self.HEADING) + b"\n" + _typed(*self.NAMES))
+        self.assertEqual(len(plain.words), 9)
+        self.assertEqual([w.text for w in page.words], [w.text for w in plain.words])
+        self.assertEqual(page.images, (self.BOX,) * images)
+
+    def test_the_length_its_dictionary_gives_ends_it(self):
+        # The first EI among these ten bytes is followed by content, Q and a
+        # string, so only the length can say that it is not the end. Eleven counts
+        # the white space before the image's EI as well. And after the EI a length
+        # leads to, an operator from outside the standard, which a BX section
+        # allows, would rule that EI out: the length ends the image there all the
+        # same.
+        for given, before, after in ((b" /L 10", b"", b" Q"),
+                                     (b" /Length 10", b"", b" Q"),
+                                     (b" /L 11", b"", b" Q"),
+                                     (b" /L 10", b"BX ", b" foo EX Q")):
+            with self.subTest(given=given, after=after):
+                self.assert_read_whole(self.page(b"\x01 EI Q (\x02\x03", given,
+                                                 after, before=before))
+
+    def test_a_length_that_is_no_count_or_leads_to_no_ei_is_left_to_the_content(self):
+        # Two falls short of the EI among these ten bytes, eight inside the string
+        # after it, and eighty past the stream's end. Three would lead to that EI,
+        # and 3.5 is no count.
+        for given in (b" /L 2", b" /L 8", b" /L 80", b" /L 3.5"):
+            with self.subTest(given=given):
+                self.assert_read_whole(self.page(b"\x01\x02\x03 EI (\x02\x03", given))
+
+    def test_each_image_is_ended_by_its_own_dictionarys_length(self):
+        # The first image's length, one, would end the second at its first EI.
+        second = (b"q 200 0 0 100 50 60 cm BI /W 4 /H 1 /CS /G /BPC 8 ID "
+                  b"\x01 EI (\x02 EI Q")
+        page = self.page(b"\x07", b" /L 1", after=b" Q\n" + second)
+        plain = self.typed(_typed(*self.HEADING) + b"\n" + _typed(*self.NAMES))
+        self.assertEqual([w.text for w in page.words], [w.text for w in plain.words])
+        self.assertEqual(page.images, (self.BOX, self.BOX))
+
+    def test_without_a_length_an_ei_the_content_after_it_rules_out_is_passed_over(self):
+        # A string that never closes, an operator run into a byte no operator
+        # has, and a word that is no operator.
+        for data in (b"\x01 EI (\x02", b"\x01 EI Q\x02", b"\x01 EI Hello (\x02"):
+            with self.subTest(data=data):
+                self.assert_read_whole(self.page(data))
+
+    def test_an_ei_among_its_bytes_that_its_own_ei_follows_does_not_end_it(self):
+        # Content goes on after an image with anything but ID and EI, which follow
+        # only an image's own dictionary and bytes.
+        for data in (b"\x01 EI", b"\x01 EI 5"):
+            with self.subTest(data=data):
+                self.assert_read_whole(self.page(data))
+
+    def test_the_ei_that_ends_it_may_have_operands_after_it(self):
+        # Numbers for cm, an operator a delimiter ends, and marked-content tags
+        # with a property list, which can hold true, false, null and hex strings.
+        for after in (b" 1 0 0 1 0 0 cm Q", b" q[] 0 d Q Q",
+                      b" /Span << /Alt (x) /Open true /Not false /None null >> BDC"
+                      b" EMC Q",
+                      b" /Span << /ActualText <FEFF0041> >> BDC EMC Q"):
+            with self.subTest(after=after):
+                self.assert_read_whole(self.page(b"\x01 EI (\x02", after=after))
+
+    def test_an_image_that_ends_the_stream_is_recorded_once(self):
+        # Nothing after the last EI but, at most, a comment or the Q that ends
+        # the stream: the stream's end rules nothing out.
+        for end in (b"", b"\n% the end", b" Q"):
+            with self.subTest(end=end):
+                content = (_typed(*self.HEADING) + b"\n" + _typed(*self.NAMES)
+                           + b"\nq 200 0 0 100 50 60 cm BI /W 6 /H 1 /CS /G /BPC 8 ID "
+                           b"\x01 EI Q\x02 EI" + end)
+                self.assert_read_whole(self.typed(content))
+
+    def test_an_ei_the_look_cannot_decide_gives_way_to_a_later_one_content_follows(
+            self):
+        # A card's content goes on for more than the look reads, here a comment
+        # after the names. The string these bytes open closes nowhere in it, since
+        # every string of the card's own is closed, so the look from the EI among
+        # them runs out inside it, and the look from the image's own finds Q.
+        self.assert_read_whole(self.page(b"\x01 EI (\x02", end=b"\n%" + b"-" * 2000))
+
+    def test_where_no_ei_reads_as_content_the_first_the_look_cannot_decide_ends_it(
+            self):
+        # The EI among these bytes is ruled out by the byte after it. After the
+        # image's own, a comment of 2,000 bytes, or a dash array of 1,100 whose
+        # numbers are still waiting for their operator where the look ends. And
+        # after the names, a comment holding an EI the look cannot decide either.
+        comment = b"\n%" + b"-" * 2000 + b"\nQ"
+        for after, end in ((comment, b""), (b" [" + b"1 " * 550 + b"] 0 d Q", b""),
+                           (comment, b"\n% EI" + b" " * 1100)):
+            with self.subTest(after=after[:4] + b"..." + after[-4:], end=end[:5]):
+                self.assert_read_whole(self.page(b"\x01 EI \x02", after=after,
+                                                 end=end))
+
+    def test_a_token_the_look_ends_in_the_middle_of_decides_nothing(self):
+        # After the image's own EI, the look's last byte is the T of Tz, a byte
+        # inside a hex string, or the first > of >>, none of them yet all it is.
+        for after in (b" 100" + b" " * 1019 + b"Tz Q",
+                      b" /Span << /ActualText <FEFF" + b"0041" * 260 + b"> >> BDC EMC Q",
+                      b" /Span <<" + b" " * 1014 + b">> BDC EMC Q"):
+            with self.subTest(after=after[:10] + b"..." + after[-10:]):
+                self.assert_read_whole(self.page(b"\x01 EI \x02", after=after))
+
+    def test_a_string_its_bytes_open_is_not_read_far_down_the_stream(self):
+        # The `(` after the first EI is closed by a `)` in a comment 60,000 bytes
+        # on, with Tj after it, so that the bytes after that EI read as content
+        # only to a look that goes that far.
+        self.assert_read_whole(self.page(
+            b"\x01 EI (\x02", end=b"\n" + b"0 0 m\n" * 10000 + b"% ) Tj\n"))
+
+    def test_where_every_ei_is_ruled_out_the_first_ends_it(self):
+        # After the image's only EI, an operator from outside the standard. And
+        # after the names, a comment holding an EI after which the stream ends in
+        # a string, cuts off a hex string, or ends on a word no operator is.
+        for end in (b"", b"\n% EI (", b"\n% EI <0", b"\n% EI foo"):
+            with self.subTest(end=end):
+                self.assert_read_whole(self.page(b"\x01\x02", after=b" foo Q",
+                                                 end=end))
+
+    def test_no_ei_past_the_next_images_bi_ends_it(self):
+        # After the first image's EI, an operator from outside the standard in the
+        # BX section it opens, or a byte no token begins, as a damaged stream
+        # holds, each of which rules that EI out; or a comment or a dash array
+        # longer than the look, which decide nothing. The second image's EI reads
+        # on as content, and would end the first, with the names between them.
+        for before, after in ((b"BX ", b" foo EX Q"), (b"", b" \x7f Q"),
+                              (b"", b"\n%" + b"-" * 2000 + b"\nQ"),
+                              (b"", b" [" + b"1 " * 550 + b"] 0 d Q")):
+            with self.subTest(after=after[:4] + b"..." + after[-4:]):
+                self.assert_read_whole(self.page(b"\x01\x02", after=after,
+                                                 before=before, end=self.SECOND), 2)
+
+
+class TestARefusalLeavesItsFileAndItsPageToWhoeverPrintsIt(CardCase):
+    """A refusal's detail names neither its file nor any page printed beside it.
+
+    Every refusal ``pdf.py`` made began with the path it was given, and the ones
+    about a page numbered it from 0: ``<path>: page 0 has no /Contents``. Everything
+    that prints one prints the path beside it already, and a page numbered from 1.
+    Measured (/tmp/t7/scratch/RF/probe_pages.py) on thirteen fictional cards, each
+    changed one way: every detail ``scorecard.read`` returned held the file's
+    absolute path, and ``tools/doctor.py`` printed ``page 1 of 1`` over ``This page
+    cannot be read: data/no-contents.pdf: page 0 has no /Contents``. A file the
+    reader may not open said ``cannot read ([Errno 13] Permission denied:
+    '<path>')``, the path twice in one detail, and a folder it may not list gave
+    ``[Errno 13] Permission denied: '<folder>'`` beside the folder
+    (/tmp/t7/scratch/RF/probe_folder.py).
+
+    So the reader says what is wrong and leaves the file and the page to whoever
+    prints it: ``the page has no /Contents``, ``not a PDF``, ``cannot read:
+    Permission denied``. A page the document does not have is still named by the
+    number it was asked for, since that number is the question. And a first page
+    among others is named in the detail ``scorecard.read`` gives it, ``page 1: the
+    page has no /Contents``, since everything that prints a refusal takes page 0 for
+    the whole file and names no page.
+
+    Rejected: numbering every page from 1 in the detail, which prints it twice beside
+    the ``page 2`` a refusal of a later page is given already. Also rejected: taking
+    the path off in each reader, three readers undoing what one writer did.
+    """
+
+    def card(self) -> dict[int, bytes]:
+        """cardwriter's card as its objects: page 3, its content 6, the tree 2."""
+        found = {int(number): body for number, body in re.findall(
+            rb"(?s)(\d+) 0 obj\n(.*?)\nendobj\n", cw.write_card(cw.CardSpec()))}
+        self.assertIn(b"/Type /Page /Parent 2 0 R", found[3])
+        self.assertIn(b"/Contents 6 0 R", found[3])
+        return found
+
+    def written(self, name: str, objects: dict[int, bytes], trailer: bytes = b"",
+                *, table: bool = True) -> Path:
+        """``objects`` as a PDF named ``name``, with a cross-reference table if
+        ``table``, and ``trailer`` in its trailer."""
+        out = bytearray(b"%PDF-1.4\n")
+        offsets: dict[int, int] = {}
+        for number in sorted(objects):
+            offsets[number] = len(out)
+            out += b"%d 0 obj\n" % number + objects[number] + b"\nendobj\n"
+        xref_at, size = len(out), max(objects) + 1
+        if table:
+            out += b"xref\n0 %d\n0000000000 65535 f \n" % size
+            for number in range(1, size):
+                out += b"%010d 00000 %s \n" % (offsets.get(number, 0),
+                                               b"n" if number in offsets else b"f")
+            out += b"trailer\n<< /Size %d /Root 1 0 R%s >>\n" % (size, trailer)
+        out += b"startxref\n%d\n%%%%EOF\n" % xref_at
+        path = self.tmp / name
+        path.write_bytes(bytes(out))
+        return path
+
+    def with_a_second_page(self, page: bytes) -> dict[int, bytes]:
+        """The card, and ``page`` after it as object 20."""
+        objects = self.card()
+        objects[20] = page
+        objects[2] = b"<< /Type /Pages /Kids [ 3 0 R 20 0 R ] /Count 2 >>"
+        return objects
+
+    def refused(self, path: Path):
+        cards, rejected = scorecard.read(path)
+        self.assertEqual((cards, len(rejected)), ([], 1), rejected)
+        return rejected[0]
+
+    def test_no_refusal_of_a_file_or_of_a_page_names_the_file(self):
+        rotated, bare, empty, hidden, packed, streamed = (self.card()
+                                                          for _ in range(6))
+        rotated[3] = rotated[3].replace(b"/Type /Page ", b"/Type /Page /Rotate 45 ")
+        bare[3] = bare[3].replace(b"/Contents 6 0 R", b"")
+        empty[3] = empty[3].replace(b"/Contents 6 0 R", b"/Contents []")
+        hidden[3] = hidden[3].replace(b"/Type /Page ", b"/Type /Leaf ")
+        hidden[2] = hidden[2].replace(b"/Type /Pages", b"/Type /Tree")
+        packed[21] = b"<< /Type /ObjStm /N 0 /First 0 /Length 0 >>\nstream\n\nendstream"
+        streamed[21] = (b"<< /Type /XRef /Size 22 /W [1 2 1] /Length 0 >>\n"
+                        b"stream\n\nendstream")
+        minutes = self.tmp / "minutes.pdf"
+        minutes.write_text("Minutes of the committee meeting\n", encoding="utf-8")
+        undecodable = self.tmp / "undecodable.pdf"
+        undecodable.write_bytes(cw._assemble(b"BT /F1 12 Tf 60 60 Td <0102> Tj ET",
+                                             with_to_unicode=False))
+        for path, begins in (
+                (minutes, "not a PDF"),
+                (self.written("encrypted.pdf", self.card(),
+                              b" /Encrypt << /Filter /Standard >>"),
+                 "the file is encrypted (/Encrypt in the trailer); "),
+                (self.written("packed.pdf", packed),
+                 "objects are packed into a compressed object stream "),
+                (self.written("streamed.pdf", streamed, table=False),
+                 "the cross-reference is a stream (/Type /XRef) "),
+                (self.written("hidden.pdf", hidden), "no page object found"),
+                (self.written("bare.pdf", bare), "the page has no /Contents"),
+                (self.written("empty.pdf", empty),
+                 "the page's /Contents resolved to no streams"),
+                (self.written("rotated.pdf", rotated),
+                 "the page has /Rotate 45, which is not a multiple of 90; "),
+                (undecodable, "the page draws text but not one glyph could be ")):
+            with self.subTest(path=path.name):
+                detail = self.refused(path).detail
+                self.assertTrue(detail.startswith(begins), detail)
+                self.assertNotIn(path.name, detail)
+                self.assertNotIn(self.tmp.name, detail)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0,
+                     "needs a file its owner cannot read, which root can")
+    def test_a_file_it_may_not_open_is_refused_for_the_reason_alone(self):
+        locked = self.tmp / "locked.pdf"
+        locked.write_bytes(cw.write_card(cw.CardSpec()))
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o644)
+        refusal = self.refused(locked)
+        self.assertEqual((refusal.reason, refusal.detail),
+                         ("not a readable PDF", "cannot read: Permission denied"))
+
+    def test_a_file_that_goes_while_it_is_counted_is_refused_for_the_reason_alone(self):
+        path = self.written("gone.pdf", self.card())
+        with mock.patch.object(scorecard.pdf, "page_count", side_effect=PermissionError(
+                13, "Permission denied", str(path))):
+            refusal = self.refused(path)
+        self.assertEqual((refusal.reason, refusal.detail),
+                         ("could not be opened", "Permission denied"))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0,
+                     "a mode this account cannot list needs POSIX and a user not root")
+    def test_a_folder_it_may_not_list_is_refused_for_the_reason_alone(self):
+        folder = self.tmp / "cards"
+        folder.mkdir()
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+        cards, rejected = scorecard.read_tree(folder)
+        self.assertEqual([(r.path, r.reason, r.detail) for r in rejected], [
+            (str(folder), "the directory could not be listed", "Permission denied")])
+
+    def test_a_file_none_of_whose_pages_can_be_read_gives_the_first_pages_reason(self):
+        both = self.with_a_second_page(self.card()[3].replace(b"/Contents 6 0 R", b""))
+        both[3] = both[3].replace(b"/Contents 6 0 R", b"")
+        self.assertEqual(self.refused(self.written("both.pdf", both)).detail,
+                         "2 pages, none of them a scorecard; page 1: the page has no "
+                         "/Contents")
+
+    def test_a_first_page_among_others_that_cannot_be_read_is_named_in_its_detail(self):
+        # Page 0 is the whole file to everything that prints a refusal, so the
+        # detail is the one place to say it is the first of two. A refusal with no
+        # detail of its own is given the page alone.
+        objects = self.with_a_second_page(self.card()[3])
+        objects[3] = objects[3].replace(b"/Contents 6 0 R", b"")
+        cards, rejected = scorecard.read(self.written("first.pdf", objects))
+        self.assertEqual(len(cards), 1)
+        self.assertEqual([(r.page, r.reason, r.detail) for r in rejected], [
+            (0, "the page could not be extracted", "page 1: the page has no /Contents")])
+        card = scorecard.read(self.written("one.pdf", self.card()))[0][0]
+        reason = "nothing is printed above the set table"
+        with mock.patch.object(scorecard, "read_page",
+                               side_effect=[CardError(reason), card]):
+            cards, rejected = scorecard.read(self.written(
+                "two.pdf", self.with_a_second_page(self.card()[3])))
+        self.assertEqual(len(cards), 1)
+        self.assertEqual([(r.page, r.reason, r.detail) for r in rejected],
+                         [(0, reason, "page 1")])
+
+    def test_a_second_page_that_cannot_be_placed_is_refused_as_that_page(self):
+        path = self.written("second.pdf", self.with_a_second_page(
+            self.card()[3].replace(b"/Type /Page ", b"/Type /Page /Rotate 45 ")))
+        cards, rejected = scorecard.read(path)
+        self.assertEqual(len(cards), 1)
+        self.assertEqual([(r.page, r.reason, r.detail) for r in rejected], [
+            (1, "the page could not be extracted", "the page has /Rotate 45, which "
+             "is not a multiple of 90; the page geometry cannot be placed")])
+
+    def test_a_page_the_document_does_not_have_is_named_by_the_number_asked_for(self):
+        path = self.written("one.pdf", self.card())
+        with self.assertRaises(pdf.PdfError) as caught:
+            pdf.extract(path, page=3)
+        self.assertEqual(str(caught.exception),
+                         "no page 3; the document has 1 page(s), numbered from 0")
+
+
 class TestAContradictoryTickIsReportedNotResolved(CardCase):
     """F6: a cross-check that disagrees is an *error*, not a refusal.
 
@@ -496,6 +4041,575 @@ class TestAContradictoryTickIsReportedNotResolved(CardCase):
                                      rows=rows((6, 2), (3, 6), (6, 4), (1, 6))))
         self.assertEqual([(s.home_games, s.away_games) for s in card.sets],
                          [(6, 2), (3, 6), (6, 4), (1, 6)])
+
+
+class TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick(CardCase):
+    """A card with Match Forfeited ticked and its set rows left 0-0 and unticked.
+
+    That is what a whole-match forfeit looks like. Nobody came, so no rubber was
+    played and nothing was written on the rows. Measured by
+    /tmp/t4/scratch/d433/matrix.py on the tree before this, with the box ticked
+    against the away side, ``DEFEATS`` and the home Match Winner tick: the verb and
+    winner-tick cross-checks both disagreed, each with "the set rows give games 0-0
+    (level) and at most 0-0 sets (level)". So the build exited 1 on two F6 errors
+    about a card that says everything a forfeit card can say. Rows that give no
+    result neither confirm one nor contradict one. The box says who won, and it is
+    what the card is scored on. So on such a card the verb and the tick are held to
+    the box. One for the side that turned up restates it, and agrees. One for the
+    side the box says forfeited disagrees with it, and a verb doing that is
+    reported by validate's ``verb-mismatch``, which holds every forfeit's verb to
+    the box. The check says so in ``reported_by`` rather than disagreeing a second
+    time, and a tick naming the same side as that verb says the same.
+
+    A card that contradicts itself is still reported, once. Rows that give the
+    match to the side the box says forfeited are reported by the verb, and so are
+    rows that give it the sets on level games; a tick for the side that turned up
+    restates the verb and says the verb reports it. Measured before this, the same
+    contradiction was two F6 errors. A tick beside a verb it does not restate is
+    held to the rows as any tick is. A card without the box ticked is read as it
+    always was, and rows filled in for the side that turned up still agree.
+
+    Rejected: standing both checks down on every forfeit card. Then a card whose
+    rows give the match to the forfeiter, printing no verb, would reach the page
+    with nothing on it reporting the contradiction. Rejected as well, twice:
+    marking the checks that restate the box as not printed, and then marking only
+    the ones another check reports for as not printed. Measured with
+    /tmp/t4/scratch/d433/adjacent.py and /tmp/t4/scratch/d433/fix/probe.py, the
+    filed card without its TOTAL row, and then that card printing ``LOSES TO`` and
+    no tick, was warned that it prints no TOTAL row, result verb or winner tick, on
+    a card that prints the verb, and the doctor called a ticked Match Winner box
+    "not printed". A check another reports for is printed and disagrees.
+    """
+
+    EMPTY = rows((0, 0), (0, 0), (0, 0), (0, 0))
+    TO_AWAY = rows((2, 6), (3, 6), (4, 6), (1, 6))
+    TO_HOME = rows((6, 2), (6, 3), (6, 4), (6, 1))
+    BY_VERB_MISMATCH = "reported by verb-mismatch"
+    BY_THE_VERB = "reported by the verb cross-check"
+
+    def states(self, card) -> dict[str, str]:
+        return {check.name: ("n/a" if not check.available
+                             else "agrees" if check.agrees
+                             else f"reported by {check.reported_by}"
+                             if check.reported_by else "DISAGREES")
+                for check in card.checks}
+
+    def doctor(self, spec: cw.CardSpec) -> str:
+        done = subprocess.run((sys.executable, str(ROOT / "tools" / "doctor.py"),
+                               str(self.write(spec))),
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.stderr, "")
+        return done.stdout
+
+    def test_the_filed_card_has_no_cross_check_disagreeing(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away"))
+        # The premise: the card is the filed one, its verb and tick to home.
+        self.assertEqual((card.forfeited_by, card.verb, card.winner_tick),
+                         ("away", "DEFEATS", "home"))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "agrees",
+                                             "winner-tick": "agrees"})
+        self.assertTrue(card.confirmed)
+        for check in card.checks[1:]:
+            with self.subTest(check=check.name):
+                self.assertIn("Match Forfeited", check.detail)
+                self.assertIn("give no result", check.detail)
+                self.assertIn("restates", check.detail)
+
+    def test_a_tick_for_the_side_that_forfeited_is_held_to_the_box(self):
+        # DEFEATS restates the box and the away tick does not. The rows say
+        # nothing, so the detail names the box, which is what the tick contradicts.
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                     winner="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "agrees",
+                                             "winner-tick": "DISAGREES"})
+        detail = card.checks[2].detail
+        self.assertIn("the away Match Forfeited box is ticked, giving the match to "
+                      "home", detail)
+        self.assertNotIn("games 0-0", detail)
+
+    def test_a_verb_for_the_side_that_forfeited_is_reported_by_verb_mismatch(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                     verb="LOSES TO"))
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": self.BY_VERB_MISMATCH,
+                                             "winner-tick": "agrees"})
+        self.assertIn("names the side that forfeited", card.checks[1].detail)
+        # Printed, so counted as printed; disagreeing, so the card is not
+        # confirmed; and reported by another check, so not a failure of its own.
+        self.assertEqual(len(card.cross_checks_available), 3)
+        self.assertFalse(card.confirmed)
+        self.assertEqual(card.cross_checks_failed, ())
+
+    def test_a_tick_naming_the_forfeiter_as_its_verb_does_is_reported_with_it(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                     verb="LOSES TO", winner="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": self.BY_VERB_MISMATCH,
+                                             "winner-tick": self.BY_VERB_MISMATCH})
+        self.assertIn("'LOSES TO'", card.checks[2].detail)
+
+    def test_a_card_printing_only_a_verb_for_the_forfeiter_is_not_called_thin(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                     verb="LOSES TO", winner=cw.NO_TICK,
+                                     omit_totals=True))
+        self.assertEqual([c.name for c in card.cross_checks_available], ["verb"])
+        self.assertFalse(card.confirmed)
+        self.assertFalse([w for w in card.warnings if "prints no TOTAL row" in w],
+                         card.warnings)
+
+    def test_rows_giving_the_match_to_the_forfeiter_are_reported_once_by_the_verb(self):
+        card = self.read(cw.CardSpec(rows=self.TO_AWAY, forfeited_by="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": "DISAGREES",
+                                             "winner-tick": self.BY_THE_VERB})
+        tick = card.checks[2]
+        self.assertIn("'DEFEATS'", tick.detail)
+        self.assertIn("verb", tick.detail)
+        self.assertEqual([c.name for c in card.cross_checks_failed], ["verb"])
+
+    def test_the_forfeiters_sets_on_level_games_are_reported_once_by_the_verb(self):
+        # 18-18 in games, 1-3 in sets: rows that give a result on one basis are
+        # not rows left blank, so they are held to the verb as any rows are, and
+        # the tick restating the verb leaves the verb to report them.
+        level = rows((6, 0), (4, 6), (4, 6), (4, 6))
+        card = self.read(cw.CardSpec(rows=level, forfeited_by="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": "DISAGREES",
+                                             "winner-tick": self.BY_THE_VERB})
+
+    def test_rows_level_on_games_and_on_sets_give_no_result_either(self):
+        # Two rubbers played, one each at 10-10 in games, and the rest left empty:
+        # a forfeit given up part way, which the rows leave to the box as surely as
+        # rows nobody played. Asking whether every row is 0-0 would miss it.
+        card = self.read(cw.CardSpec(rows=rows((6, 4), (4, 6), (0, 0), (0, 0)),
+                                     forfeited_by="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "agrees",
+                                             "winner-tick": "agrees"})
+
+    def test_rows_forfeited_against_the_side_that_turned_up_are_not_left_blank(self):
+        # Every row 0-0 with its Forfeit box ticked against home: the rows give
+        # away every set, which the box ticked against away contradicts. Asking
+        # whether every row is 0-0 would call these rows blank and say nothing.
+        against_home = tuple(dataclasses.replace(row, status=SetStatus.FORFEIT,
+                                                 status_side="home")
+                             for row in self.EMPTY)
+        card = self.read(cw.CardSpec(rows=against_home, forfeited_by="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": "DISAGREES",
+                                             "winner-tick": self.BY_THE_VERB})
+
+    def test_a_tick_beside_a_verb_it_does_not_restate_is_held_to_the_rows(self):
+        # The verb agreeing with the rows reports nothing, and a draw verb names no
+        # side, so in neither case is the tick's disagreement reported by the verb.
+        for verb, verb_state in (("LOSES TO", "agrees"), ("DRAWS WITH", "DISAGREES")):
+            with self.subTest(verb=verb):
+                card = self.read(cw.CardSpec(rows=self.TO_AWAY, forfeited_by="away",
+                                             verb=verb))
+                self.assertEqual(self.states(card), {"totals": "agrees",
+                                                     "verb": verb_state,
+                                                     "winner-tick": "DISAGREES"})
+
+    def test_a_tick_for_the_forfeiter_is_held_to_rows_its_verb_disagrees_with(self):
+        # Rows for the side that turned up, and a verb and a tick for the side that
+        # forfeited. The tick restates the verb and not the box, so it is held to
+        # the rows, as the same tick beside the same verb is on a played card.
+        card = self.read(cw.CardSpec(rows=self.TO_HOME, forfeited_by="away",
+                                     verb="LOSES TO", winner="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": "DISAGREES",
+                                             "winner-tick": "DISAGREES"})
+
+    def test_with_no_verb_printed_the_tick_says_it_instead(self):
+        card = self.read(cw.CardSpec(rows=self.TO_AWAY, forfeited_by="away",
+                                     omit_verb=True))
+        self.assertEqual([c.name for c in card.cross_checks_failed], ["winner-tick"])
+
+    def test_rows_filled_in_for_the_side_that_turned_up_still_agree(self):
+        card = self.read(cw.CardSpec(rows=self.TO_HOME, forfeited_by="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "agrees",
+                                             "winner-tick": "agrees"})
+
+    def test_the_same_rows_without_the_box_ticked_still_disagree(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, verb="DEFEATS",
+                                     winner="home"))
+        self.assertIsNone(card.forfeited_by)
+        self.assertEqual(self.states(card), {"totals": "agrees",
+                                             "verb": "DISAGREES",
+                                             "winner-tick": "DISAGREES"})
+
+    def test_the_reader_and_describe_ask_the_model_who_the_forfeit_went_to(self):
+        # A spy rather than a card: a copy of the rule that agrees today cannot be
+        # told apart from the rule by any card.
+        spec = cw.CardSpec(rows=self.EMPTY, forfeited_by="away")
+        path = self.write(spec)
+        for run in (lambda: scorecard.read_page(pdf.extract(path)),
+                    lambda: scorecard.describe(pdf.extract(path))):
+            with mock.patch.object(scorecard, "forfeit_match_winner",
+                                   wraps=forfeit_match_winner) as rule:
+                run()
+            self.assertIn(mock.call("away"), rule.call_args_list)
+
+    def test_describe_says_what_the_filed_card_says_as_the_reader_reads_it(self):
+        # `describe` runs the three checks on its own, for a page that may not
+        # parse, so it is told about the box on its own as well.
+        path = self.write(cw.CardSpec(rows=self.EMPTY, forfeited_by="away"))
+        text = scorecard.describe(pdf.extract(path))
+        self.assertNotIn("DISAGREES", text)
+        self.assertEqual(text.count("give no result"), 2, text)
+
+    def test_describe_says_rows_given_to_the_forfeiter_disagree_once(self):
+        path = self.write(cw.CardSpec(rows=self.TO_AWAY, forfeited_by="away"))
+        text = scorecard.describe(pdf.extract(path))
+        lines = [line for line in text.splitlines() if "DISAGREES" in line]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith("cross-check verb: "), lines)
+        self.assertIn("cross-check winner-tick: disagrees, reported by the verb "
+                      "cross-check - ", text)
+        self.assertNotIn("not printed", text)
+
+    def test_describe_never_calls_a_verb_for_the_forfeiter_not_printed(self):
+        path = self.write(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                      verb="LOSES TO", winner=cw.NO_TICK,
+                                      omit_totals=True))
+        text = scorecard.describe(pdf.extract(path))
+        self.assertIn("cross-check verb: disagrees, reported by verb-mismatch - ",
+                      text)
+
+    def test_describe_leaves_both_boxes_ticked_to_the_readers_own_warning(self):
+        # The doctor prints the reader's warnings beside what describe found, so
+        # describe noting that both Match Forfeited boxes are ticked, which it reads
+        # only for the two checks, would put the one finding on the report twice.
+        spec = cw.CardSpec(rows=self.EMPTY, forfeited_by="both")
+        self.assertIn("warnings: none",
+                      scorecard.describe(pdf.extract(self.write(spec))))
+        report = self.doctor(spec)
+        self.assertEqual(report.count("both sides' 'Match Forfeited' boxes are "
+                                      "ticked"), 1, report)
+
+    def test_the_doctor_counts_a_check_another_reports_for_as_printed(self):
+        report = self.doctor(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                         verb="LOSES TO", winner=cw.NO_TICK,
+                                         omit_totals=True))
+        self.assertIn("cross-checks  1 available, 0 disagreeing, 1 reported by "
+                      "another check\n", report)
+        self.assertIn("verb          disagrees, reported by verb-mismatch  ", report)
+        self.assertIn("build.py reports that once, as verb-mismatch.", report)
+        self.assertNotIn("No independent cross-check", report)
+
+    def test_the_doctor_counts_the_filed_card_in_the_words_it_always_used(self):
+        report = self.doctor(cw.CardSpec(rows=self.EMPTY, forfeited_by="away"))
+        self.assertIn("cross-checks  3 available, 0 disagreeing\n", report)
+        self.assertNotIn("reported by", report)
+
+
+class TestOnRowsGivingNoResultAForfeitCheckHandsItsReportToACheckThatMakesIt(
+        CardCase):
+    """On rows giving no result a check stands down only for one that reports it.
+
+    On a whole-match forfeit whose rows give no result, the verb check leaves a
+    verb for the side that forfeited to ``verb-mismatch``, and a tick naming the
+    same side goes with it. Row 4.33 did that while the reader read a verb by
+    the marks inside it, `` to`` meaning a loss, and validate read it whole, so
+    the hand-off was made to depend on the two readings agreeing. Measured by
+    /tmp/t7/scratch/V1/probe/verbs.py on the tree before one table: the filed
+    card printing ``BOWS TO`` was F6 on the verb and ``verb-unknown`` beside it,
+    one word read as a loss and as no verb and reported twice; and ``DEF.BY`` on
+    a card forfeited by home was F6, the marks reading it as a win for home,
+    where validate reads the loss that restates the box.
+
+    Now there is one table of whole verbs, ``card.verb_side``, and the reader
+    asks it as validate does. A word it does not hold leaves the verb check
+    unavailable and is ``verb-unknown``, a word to learn reported once, not a
+    result guessed from its letters. ``DEF.BY`` is ``def by``, a loss. So a verb
+    the check reads as naming the side that forfeited is one ``verb-mismatch``
+    reads so, and the hand-off needs no second reading to ask.
+
+    Rejected: keeping the two readings and the bridge between them, which is two
+    rules for one question; validate taking the marks, which read any verb
+    ending in `` to`` as a loss and ``DEF.BY`` as a win; and dropping
+    ``reported_by``, which reports the card twice again.
+
+    Every card here leaves its rows blank, which no set rule or scoring reads
+    as a result, so what this pins holds under every club's rules: every
+    hand-off here is to ``verb-mismatch``, which reads the verb by the same
+    table and reports it under any. Over rows the reader reads as the
+    forfeiter's, the verb cross-check a tick is handed to reports only where the
+    club's rules do not read them against the box, and ``forfeit-contradicted``
+    where they do (4.134), which test_pipeline's
+    TestEveryHandOffIsOneReportByTheCheckNamedOrByForfeitContradicted holds.
+    """
+
+    EMPTY = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.EMPTY
+    states = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.states
+    doctor = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.doctor
+    BOWS_TO = cw.CardSpec(rows=EMPTY, forfeited_by="away", verb="BOWS TO")
+
+    def test_bows_to_on_the_filed_card_is_a_word_to_learn_not_a_result(self):
+        card = self.read(self.BOWS_TO)
+        self.assertEqual((card.forfeited_by, card.winner_tick), ("away", "home"))
+        # The home tick restates the box, as on the filed card, and still agrees.
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "n/a",
+                                             "winner-tick": "agrees"})
+        self.assertEqual(card.checks[1].detail,
+                         "the verb 'BOWS TO' is not one this reader recognises")
+        self.assertEqual(card.cross_checks_failed, ())
+
+    def test_a_tick_for_the_forfeiter_beside_bows_to_reports_itself(self):
+        # No verb it knows restates the tick, so nothing else reports it.
+        card = self.read(dataclasses.replace(self.BOWS_TO, winner="away"))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "n/a",
+                                             "winner-tick": "DISAGREES"})
+        self.assertEqual([c.name for c in card.cross_checks_failed], ["winner-tick"])
+        self.assertIn("giving the match to home", card.checks[2].detail)
+
+    def test_def_by_run_together_is_the_loss_validate_reads(self):
+        # DEF.BY with the box against home: a loss for home, so a win for away,
+        # the side that turned up, which restates the box.
+        spec = cw.CardSpec(rows=self.EMPTY, forfeited_by="home", verb="DEF.BY",
+                           winner="away")
+        card = self.read(spec)
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "agrees",
+                                             "winner-tick": "agrees"})
+        self.assertIn("'DEF.BY' is held to the box rather than to the rows, and "
+                      "restates it", card.checks[1].detail)
+        # And the home tick beside it is the one result against the box.
+        card = self.read(dataclasses.replace(spec, winner="home"))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "agrees",
+                                             "winner-tick": "DISAGREES"})
+
+    def test_a_verb_for_the_forfeiter_is_handed_to_verb_mismatch(self):
+        for verb, box in (("LOSES TO", "away"), ("DEF. BY", "away"),
+                          ("LOST TO", "away"), ("DEFEATED BY", "away"),
+                          ("DEF.BY", "away"), ("LOSES.TO", "away"),
+                          ("DEFEATS", "home"), ("WON", "home"), ("BEAT", "home")):
+            for tick, by in (("home" if box == "away" else "away", "agrees"),
+                             (box, "reported by verb-mismatch")):
+                with self.subTest(verb=verb, box=box, tick=tick):
+                    card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by=box,
+                                                 verb=verb, winner=tick))
+                    self.assertEqual(self.states(card), {
+                        "totals": "agrees", "verb": "reported by verb-mismatch",
+                        "winner-tick": by})
+                    self.assertEqual(card.cross_checks_failed, ())
+
+    def test_the_reader_hands_off_through_the_one_whole_verb_reading(self):
+        # A spy rather than a card: a copy of validate's table that agrees today
+        # cannot be told apart from the reading by any card.
+        self.assertIs(scorecard.verb_side, card_mod.verb_side)
+        path = self.write(dataclasses.replace(self.BOWS_TO, verb="LOSES TO",
+                                              winner="away"))
+        for run in (lambda: scorecard.read_page(pdf.extract(path)),
+                    lambda: scorecard.describe(pdf.extract(path))):
+            with mock.patch.object(scorecard, "verb_side",
+                                   wraps=card_mod.verb_side) as reading:
+                run()
+            self.assertEqual(reading.call_args_list.count(mock.call("LOSES TO")), 2,
+                             reading.call_args_list)
+
+    def test_the_verb_and_the_tick_follow_that_reading_together(self):
+        # Told the verb is no verb, the reader reads none: the verb check is not
+        # available, and the tick, which no verb restates, reports itself.
+        path = self.write(dataclasses.replace(self.BOWS_TO, verb="LOSES TO",
+                                              winner="away"))
+        with mock.patch.object(scorecard, "verb_side", return_value=None):
+            card = scorecard.read_page(pdf.extract(path))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "n/a",
+                                             "winner-tick": "DISAGREES"})
+
+    def test_describe_says_bows_to_is_a_word_this_reader_does_not_know(self):
+        text = scorecard.describe(pdf.extract(self.write(self.BOWS_TO)))
+        self.assertNotIn("reported by", text)
+        self.assertNotIn("DISAGREES", text)
+        self.assertIn("cross-check verb: printed, not usable - the verb 'BOWS TO' "
+                      "is not one this reader recognises", text)
+        self.assertIn("cross-check winner-tick: agrees - ", text)
+
+    def test_the_doctor_says_bows_to_is_a_word_this_reader_does_not_know(self):
+        report = self.doctor(self.BOWS_TO)
+        self.assertNotIn("reported by", report)
+        self.assertNotIn("build.py reports", " ".join(report.split()))
+        self.assertIn("cross-checks  2 available, 0 disagreeing\n", report)
+        self.assertIn("the verb 'BOWS TO' is not one this reader recognises",
+                      " ".join(report.split()))
+        self.assertNotIn("DISAGREES", report)
+
+    def test_a_tick_beside_a_verb_run_together_with_a_mark_goes_with_the_verb(self):
+        # Read whole, with the stop or the hyphen for a space, each verb is a win
+        # for away, the side that forfeited, and verb-mismatch reports the verb and
+        # the tick. The hyphen, which no card is known to print, pins that every
+        # mark is a space, and not the stop alone.
+        for verb in ("DEF.BY", "LOSES.TO", "DEF-BY", "LOSES-TO"):
+            with self.subTest(verb=verb):
+                card = self.read(dataclasses.replace(self.BOWS_TO, verb=verb,
+                                                     winner="away"))
+                self.assertEqual(self.states(card), {
+                    "totals": "agrees", "verb": "reported by verb-mismatch",
+                    "winner-tick": "reported by verb-mismatch"})
+                self.assertEqual(card.cross_checks_failed, ())
+
+    def test_the_doctor_says_verb_mismatch_reports_the_tick_beside_def_by(self):
+        report = self.doctor(dataclasses.replace(self.BOWS_TO, verb="DEF.BY",
+                                                 winner="away"))
+        words = " ".join(report.split())
+        self.assertIn("cross-checks 3 available, 0 disagreeing, 2 reported by "
+                      "another check", words)
+        self.assertIn("verb disagrees, reported by verb-mismatch", words)
+        self.assertIn("winner-tick disagrees, reported by verb-mismatch", words)
+        self.assertIn("build.py reports that once, as verb-mismatch.", words)
+        self.assertNotIn("DISAGREES", report)
+
+
+class TestAVerbIsAWordTheOneTableHoldsOrNoVerbAtAll(CardCase):
+    """The reader reads a verb as the one table does, and guesses at no other.
+
+    Row 4.137. The reader read a verb by the marks inside it: ``draw``, ``tie``,
+    ``level`` or ``halved`` anywhere for a draw, then `` by`` or `` to`` anywhere
+    for a loss, then ``def``, ``beat``, ``won``, ``win`` or ``d.`` at the start for
+    a win. Validate read it whole, through ``card.verb_side``. So one card could
+    be read two ways: measured by /tmp/t7/scratch/V1/probe/verbs.py on the tree
+    before this, ``BOWS TO`` was a loss to the reader and no verb to validate,
+    and ``DREW``, ``LEVEL`` and ``HALVED`` were a draw to the reader and no verb
+    to validate. Now the reader asks the table, and the words the marks were
+    written for that a card could print whole, ``drew``, ``level``, ``halved``
+    and ``beat``, are in it, as ``won`` already was. A word only the marks
+    matched, such as ``WIN``, ``D.`` or ``FELL BY``, is not one this reader
+    recognises, and validate says so once.
+
+    The separator is one rule as well. The reader called ``VS`` a separator by
+    its words with any stops at the ends taken off, and validate by the table's
+    key, so a card printing ``VS:`` was measured to be "not one this reader
+    recognises" to the reader and ``verb-absent`` to validate, by
+    /tmp/t7/scratch/V1/probe/sep.py and sepval.py. Now both ask
+    ``card.states_no_result``.
+
+    Rejected: adding ``win`` and the forms the marks matched by their letters,
+    such as ``drew with``, which no card or template is known to print; a word
+    the table does not hold is reported, and guessing it is how ``BOWS TO`` came
+    to be a result.
+    """
+
+    TO_HOME = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.TO_HOME
+    states = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.states
+
+    def test_the_words_the_marks_were_written_for_are_verbs_of_the_table(self):
+        self.assertEqual({verb: card_mod.verb_side(verb)
+                          for verb in ("DREW", "LEVEL", "HALVED", "BEAT", "WON")},
+                         {"DREW": "draw", "LEVEL": "draw", "HALVED": "draw",
+                          "BEAT": "home", "WON": "home"})
+
+    def test_a_word_the_table_does_not_hold_is_not_guessed_from_its_letters(self):
+        for verb in ("WIN", "D.", "BOWS TO", "FELL BY", "WON BY", "BEATEN BY",
+                     "WINS AGAINST", "DREW WITH"):
+            with self.subTest(verb=verb):
+                self.assertIsNone(card_mod.verb_side(verb))
+                card = self.read(cw.CardSpec(rows=self.TO_HOME, verb=verb))
+                self.assertEqual(self.states(card)["verb"], "n/a")
+                self.assertEqual(card.checks[1].detail,
+                                 f"the verb {verb!r} is not one this reader "
+                                 "recognises")
+
+    def test_a_separator_with_a_colon_brackets_or_dashes_is_still_a_separator(self):
+        # The dashes, which no card is known to print, pin that every mark is a
+        # space, and not the stops, colons and brackets alone.
+        for verb in ("VS:", "(VS)", "-V-"):
+            with self.subTest(verb=verb):
+                card = self.read(cw.CardSpec(rows=self.TO_HOME, verb=verb,
+                                             winner=cw.NO_TICK))
+                self.assertEqual(card.checks[1].detail,
+                                 f"the card prints {verb!r} between the team "
+                                 "names, which states no result to check against")
+
+    def test_the_reader_and_describe_ask_the_one_separator_rule(self):
+        # A spy rather than a card: a copy of the rule that agrees today cannot be
+        # told apart from the rule by any card.
+        self.assertIs(scorecard.states_no_result, card_mod.states_no_result)
+        path = self.write(cw.CardSpec(rows=self.TO_HOME, verb="VS",
+                                      winner=cw.NO_TICK))
+        for run in (lambda: scorecard.read_page(pdf.extract(path)),
+                    lambda: scorecard.describe(pdf.extract(path))):
+            with mock.patch.object(scorecard, "states_no_result",
+                                   wraps=card_mod.states_no_result) as rule:
+                run()
+            self.assertIn(mock.call("VS"), rule.call_args_list)
+
+
+class TestADrawVerbOnAForfeitNobodyPlayedIsHeldToTheBox(CardCase):
+    """A draw verb on a whole-match forfeit whose rows give no result.
+
+    Row 4.153. Row 4.33 held a verb on such a card to the Match Forfeited box,
+    but asked the rows first, and rows level at 0-0, or at a rubber each with the
+    rest left empty, support a draw. Measured by /tmp/t7/scratch/V1/probe/verbs.py
+    on the tree before this, the box ticked against away, the rows 0-0 and the
+    home tick: ``DREW``, ``LEVEL`` and ``HALVED`` each had the verb check say it
+    "agrees with the set rows", and the build said only ``verb-unknown`` and
+    exited 0. ``DRAWS WITH``, which validate read, had the same check agreeing
+    beside a ``verb-mismatch`` error. Of 3,520 cards swept by
+    /tmp/t7/scratch/V1/probe/probe3520.py and count.py, 72 forfeits were
+    reported fewer times than they state a result against the box, 24 for each
+    of the three.
+
+    Level rows nobody played are the absence of a result, not a draw. So on such
+    a card the box is asked before the rows, for a draw as for a side. The draw
+    contradicts the box; ``verb-mismatch``, which holds every forfeit's verb to
+    the box and reads the three words now the one table holds them, reports it;
+    and the check names that report rather than make a second.
+
+    Rejected: keeping 4.33's rows-first order for a draw, which records rows
+    nobody played as evidence of one; and adding the words to the table alone,
+    which leaves the check agreeing with the rows beside the error, as it did
+    for ``DRAWS WITH``.
+    """
+
+    EMPTY = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.EMPTY
+    EACH = rows((6, 4), (4, 6), (0, 0), (0, 0))
+    TO_HOME = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.TO_HOME
+    states = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.states
+    doctor = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.doctor
+    DREW = cw.CardSpec(rows=EMPTY, forfeited_by="away", verb="DREW")
+
+    def test_each_draw_verb_is_reported_by_verb_mismatch(self):
+        for verb in ("DREW", "LEVEL", "HALVED", "DRAWS WITH", "TIED", "DRAWN"):
+            for box in ("away", "home"):
+                for name, shape in (("left blank", self.EMPTY),
+                                    ("a rubber each", self.EACH)):
+                    with self.subTest(verb=verb, box=box, rows=name):
+                        card = self.read(cw.CardSpec(rows=shape, forfeited_by=box,
+                                                     verb=verb))
+                        self.assertEqual(self.states(card), {
+                            "totals": "agrees", "verb": "reported by verb-mismatch",
+                            "winner-tick": "agrees"})
+                        self.assertFalse(card.confirmed)
+                        self.assertEqual(card.cross_checks_failed, ())
+
+    def test_the_check_says_the_verb_is_held_to_the_box_and_why(self):
+        detail = self.read(self.DREW).checks[1].detail
+        self.assertEqual(detail, "the away Match Forfeited box is ticked and the set "
+                                 "rows give no result, which is how a whole-match "
+                                 "forfeit is written, so 'DREW' is held to the box "
+                                 "rather than to the rows, and makes the match a "
+                                 "draw")
+
+    def test_a_draw_verb_on_rows_that_give_a_result_is_held_to_them(self):
+        # Rows filled in for the side that turned up are evidence, and a draw verb
+        # beside them is held to them, as on a card with no box ticked. So F6
+        # reports it, and verb-mismatch again against the box: the one mistake
+        # reported twice that row 4.131 records, which DREW, LEVEL and HALVED now
+        # reach as DRAWS WITH did, and which is left to 4.131 here.
+        card = self.read(dataclasses.replace(self.DREW, rows=self.TO_HOME))
+        self.assertEqual(self.states(card), {"totals": "agrees", "verb": "DISAGREES",
+                                             "winner-tick": "agrees"})
+        self.assertIn("making the match a draw, but the set rows give games 24-10",
+                      card.checks[1].detail)
+
+    def test_describe_and_the_doctor_say_verb_mismatch_reports_it(self):
+        text = scorecard.describe(pdf.extract(self.write(self.DREW)))
+        self.assertIn("cross-check verb: disagrees, reported by verb-mismatch - ",
+                      text)
+        self.assertNotIn("agrees with the set rows", text)
+        words = " ".join(self.doctor(self.DREW).split())
+        self.assertIn("cross-checks 3 available, 0 disagreeing, 1 reported by "
+                      "another check", words)
+        self.assertIn("build.py reports that once, as verb-mismatch.", words)
 
 
 class TestAThinCardIsReadButNotTrusted(CardCase):
@@ -608,6 +4722,203 @@ class TestVSIsASeparatorNotAnUnknownVerb(CardCase):
         card = self.read(self.spec())
         self.assertEqual([c.name for c in card.cross_checks_available], ["totals"])
         self.assertTrue(card.confirmed)
+
+
+class TestAVerbTheCardPrintsIsNeverCalledNotPrinted(CardCase):
+    """A verb printed and unusable is said as what it is, and still confirms nothing.
+
+    Row 4.133. Measured by /tmp/t7/scratch/V3/probe/probe.py on the tree before
+    this, a card with four rows to home, no TOTAL row and no Match Winner tick:
+    printing ``VS`` or ``TROUNCES`` between the team names, the reader warned that
+    "the card prints no TOTAL row, no result verb and no Match Winner tick", and
+    describe and the doctor called its verb check "not printed", on a card that
+    prints its verb. So did ``BOWS TO`` and ``(VS)``, and ``TROUNCES`` on a forfeit.
+    The verb check now says, as a clause about the card, what the card prints in
+    the verb's place, and the warning and each state say that instead: printed,
+    and not usable. ``VS`` stays a separator, worded as ``verb-absent`` words it,
+    and a word nobody reads is worded as ``verb-unknown`` words it. A card that
+    prints no verb is told so, in the words it always was.
+
+    Rejected: counting a printed verb this program cannot use as available. It
+    confirms nothing, and the warning would fall silent on a card nothing on it
+    confirms.
+    """
+
+    TO_HOME = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.TO_HOME
+    BARE = dict(omit_totals=True, winner=cw.NO_TICK)
+    NOTHING = ", so nothing on it confirms the set rows were read correctly"
+
+    def thin(self, **fields) -> list[str]:
+        card = self.read(cw.CardSpec(rows=self.TO_HOME, **self.BARE, **fields))
+        return [w for w in card.warnings if w.endswith(self.NOTHING)]
+
+    def verb(self, **fields):
+        check, = [c for c in self.read(cw.CardSpec(rows=self.TO_HOME, **self.BARE,
+                                                   **fields)).checks
+                  if c.name == "verb"]
+        return check
+
+    def test_a_card_printing_vs_is_told_it_prints_a_separator(self):
+        self.assertEqual(self.thin(verb="VS"), [
+            "the card prints no TOTAL row and no Match Winner tick, and it prints "
+            "'VS' between the team names instead of a result" + self.NOTHING])
+
+    def test_a_card_printing_a_word_nobody_reads_is_told_which_word(self):
+        self.assertEqual(self.thin(verb="TROUNCES"), [
+            "the card prints no TOTAL row and no Match Winner tick, and its result "
+            "verb 'TROUNCES' is not one this program recognises" + self.NOTHING])
+
+    def test_a_card_printing_no_verb_is_told_so_as_it_always_was(self):
+        self.assertEqual(self.thin(omit_verb=True), [
+            "the card prints no TOTAL row, no result verb and no Match Winner tick"
+            + self.NOTHING])
+
+    def test_a_verb_nobody_can_use_still_confirms_nothing(self):
+        for verb in ("VS", "TROUNCES", "BOWS TO"):
+            with self.subTest(verb=verb):
+                card = self.read(cw.CardSpec(rows=self.TO_HOME, verb=verb,
+                                             **self.BARE))
+                self.assertEqual(card.cross_checks_available, ())
+                self.assertFalse(card.confirmed)
+                check = card.checks[1]
+                self.assertFalse(check.available)
+                self.assertIn(repr(verb), check.unusable)
+
+    def test_a_verb_left_out_is_not_printed_and_nothing_more(self):
+        check = self.verb(omit_verb=True)
+        self.assertEqual((check.available, check.unusable), (False, ""))
+
+    def test_every_separator_is_said_as_the_card_prints_it(self):
+        for verb in ("VS:", "(VS)", "-V-", "vs", "Vs."):
+            with self.subTest(verb=verb):
+                self.assertEqual(self.verb(verb=verb).unusable,
+                                 f"it prints {verb!r} between the team names "
+                                 "instead of a result")
+
+    def test_a_forfeits_unreadable_verb_is_said_as_the_card_prints_it(self):
+        # The verb is not held to the box when it cannot be read at all.
+        card = self.read(cw.CardSpec(rows=rows((0, 0), (0, 0), (0, 0), (0, 0)),
+                                     forfeited_by="away", verb="TROUNCES",
+                                     **self.BARE))
+        self.assertIn("the card prints no TOTAL row and no Match Winner tick, and its "
+                      "result verb 'TROUNCES' is not one this program recognises"
+                      + self.NOTHING, card.warnings)
+
+    def test_a_card_something_confirms_is_not_warned(self):
+        card = self.read(cw.CardSpec(rows=self.TO_HOME, verb="VS",
+                                     winner=cw.NO_TICK))
+        self.assertEqual([w for w in card.warnings if w.endswith(self.NOTHING)], [])
+
+    def test_describe_says_the_verb_is_printed_and_not_usable(self):
+        for verb, detail in (
+                ("VS", "the card prints 'VS' between the team names, which states "
+                       "no result to check against"),
+                ("TROUNCES", "the verb 'TROUNCES' is not one this reader "
+                             "recognises")):
+            with self.subTest(verb=verb):
+                text = scorecard.describe(pdf.extract(self.write(cw.CardSpec(
+                    rows=self.TO_HOME, verb=verb, **self.BARE))))
+                self.assertIn(f"cross-check verb: printed, not usable - {detail}\n",
+                              text)
+                self.assertIn("cross-check totals: not printed - the card prints "
+                              "no TOTAL row\n", text)
+                self.assertIn("cross-check winner-tick: not printed - neither "
+                              "Match Winner box is ticked\n", text)
+
+    def test_describe_says_a_verb_left_out_is_not_printed(self):
+        text = scorecard.describe(pdf.extract(self.write(cw.CardSpec(
+            rows=self.TO_HOME, omit_verb=True, **self.BARE))))
+        self.assertIn("cross-check verb: not printed - the card prints no result "
+                      "verb\n", text)
+        self.assertNotIn("not usable", text)
+
+
+class TestACrossCheckRecordsWhatItWasHeldTo(CardCase):
+    """Each check says whether it held the card to its rows or to its forfeit box.
+
+    Row 4.152. On a whole-match forfeit whose rows give no result, row 4.33 held
+    the verb and the tick to the Match Forfeited box, but a check did not record
+    it, so the report of one that disagreed could not say so. Measured by
+    /tmp/t7/scratch/V3/probe/probe.py on the tree before this, the box ticked
+    against away, four 0-0 rows and the away tick: F6 said "the winner-tick
+    cross-check disagrees with the set rows", which give no result to disagree
+    with, over a detail naming the box, and the doctor "A cross-check disagrees
+    with the set rows". Now each check records what it was held to, the set rows
+    unless it was held to the box instead, and the report is taken from the check.
+    A TOTAL row that totals the rows is held to them, and one on such a card that
+    totals neither them nor the award is held to the box, as ``totals-mismatch``
+    words it. On a forfeit whose rows give a result, every check is held to them.
+
+    Rejected: one wording for both, "disagrees with the card", which says less and
+    changes every played card's report.
+    """
+
+    EMPTY = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.EMPTY
+    TO_AWAY = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.TO_AWAY
+    TO_HOME = TestAWholeMatchForfeitsEmptyRowsContradictNeitherItsVerbNorItsTick.TO_HOME
+    ROWS = "the set rows"
+    AWAY_BOX = "the away Match Forfeited box"
+
+    def held(self, **fields) -> dict[str, tuple[bool, str]]:
+        card = self.read(cw.CardSpec(**fields))
+        return {c.name: (c.agrees, c.held_to) for c in card.checks if c.available}
+
+    def test_a_played_card_is_held_to_its_set_rows(self):
+        self.assertEqual(self.held(rows=self.TO_HOME, winner="away"),
+                         {"totals": (True, self.ROWS), "verb": (True, self.ROWS),
+                          "winner-tick": (False, self.ROWS)})
+
+    def test_the_filed_forfeit_holds_its_verb_and_tick_to_the_box(self):
+        # Its TOTAL row, printed 0-0, totals the rows, and is held to them.
+        self.assertEqual(self.held(rows=self.EMPTY, forfeited_by="away"),
+                         {"totals": (True, self.ROWS), "verb": (True, self.AWAY_BOX),
+                          "winner-tick": (True, self.AWAY_BOX)})
+
+    def test_a_tick_for_the_side_that_forfeited_is_held_to_the_box(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                     winner="away", omit_verb=True))
+        failed, = card.cross_checks_failed
+        self.assertEqual((failed.name, failed.held_to),
+                         ("winner-tick", self.AWAY_BOX))
+
+    def test_checks_verb_mismatch_reports_are_held_to_the_box(self):
+        card = self.read(cw.CardSpec(rows=self.EMPTY, forfeited_by="away",
+                                     verb="LOSES TO", winner="away"))
+        self.assertEqual({c.name: (c.reported_by, c.held_to) for c in card.checks},
+                         {"totals": ("", self.ROWS),
+                          "verb": ("verb-mismatch", self.AWAY_BOX),
+                          "winner-tick": ("verb-mismatch", self.AWAY_BOX)})
+
+    def test_the_box_is_named_for_the_side_that_forfeited(self):
+        self.assertEqual(self.held(rows=self.EMPTY, forfeited_by="home",
+                                   winner="home", omit_verb=True),
+                         {"totals": (True, self.ROWS),
+                          "winner-tick": (False, "the home Match Forfeited box")})
+
+    def test_a_total_row_that_totals_the_award_is_held_to_the_box(self):
+        self.assertEqual(self.held(rows=self.EMPTY, forfeited_by="away",
+                                   totals=(4, 24, 0, 0))["totals"],
+                         (True, self.AWAY_BOX))
+
+    def test_a_total_row_that_totals_neither_is_held_to_the_box(self):
+        self.assertEqual(self.held(rows=self.EMPTY, forfeited_by="away",
+                                   totals=(0, 0, 24, 4))["totals"],
+                         (False, self.AWAY_BOX))
+
+    def test_a_forfeit_whose_rows_give_a_result_is_held_to_them(self):
+        card = self.read(cw.CardSpec(rows=self.TO_AWAY, forfeited_by="away"))
+        self.assertEqual({c.name: c.held_to for c in card.checks},
+                         {"totals": self.ROWS, "verb": self.ROWS,
+                          "winner-tick": self.ROWS})
+        self.assertEqual([c.name for c in card.cross_checks_failed], ["verb"])
+
+    def test_a_tick_and_total_row_a_forfeits_rows_contradict_are_held_to_them(self):
+        # The rows give home the match, as the box does, and the TOTAL row prints
+        # home games 20 against 24 in them: nothing here is held to the box.
+        self.assertEqual(self.held(rows=self.TO_HOME, forfeited_by="away",
+                                   winner="away", totals=(4, 20, 10, 0)),
+                         {"totals": (False, self.ROWS), "verb": (True, self.ROWS),
+                          "winner-tick": (False, self.ROWS)})
 
 
 class TestTheFixtureCardHasTheShapeOfARealOne(CardCase):
@@ -845,7 +5156,7 @@ class TestReadingIsDeterministic(CardCase):
         self.assertEqual([c.round for c in cards], ["1", "2"])
 
     def test_every_pdf_found_is_either_a_card_or_a_rejection(self):
-        # F11 in one assertion: nothing may be skipped in silence. A scorecard
+        # F4 in one assertion: nothing may be skipped in silence. A scorecard
         # that vanishes leaves a plausible ladder with a team short a match.
         tree = self.tmp / "mixed"
         tree.mkdir(parents=True, exist_ok=True)
@@ -855,6 +5166,139 @@ class TestReadingIsDeterministic(CardCase):
         cards, rejected = scorecard.read_tree(tree)
         self.assertEqual(len(cards) + len(rejected), 3)
         self.assertEqual(len(cards), 1)
+
+
+class TestWhatElseIsInTheFolder(CardCase):
+    """`data/` holds more than cards, and the reader owes an account of the rest.
+
+    Everything that is not a `*.pdf` used to be dropped without a word, which is right
+    for a `.DS_Store` and wrong for the two cases that matter. A browser writes a
+    download into a temporary name and renames it only when the transfer finishes, so
+    `card.pdf.crdownload` is a card the club believes it has: the dashboard is a fixture
+    short and nothing says so, which is the failure this project treats as the worst
+    there is. And a club that saved the page instead of exporting it has a `.html` or a
+    `.png` in the folder and a run that read nothing from it, with no line connecting the
+    two.
+
+    So the unfinished download is refused by name -- it is a missing card, and it counts
+    in the exit status like any other -- while everything else is listed once as
+    something the reader was never offered. The second is a note rather than a refusal
+    because a club is entitled to keep its draw spreadsheet in there, and a run that
+    exits 1 over a spreadsheet is a run whose exit status stops meaning anything.
+    """
+
+    def tree(self, name: str) -> Path:
+        path = self.tmp / name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_a_download_that_never_finished_is_a_missing_card_not_silence(self):
+        tree = self.tree("partial")
+        (tree / "RiversideRockets-Aces.pdf.crdownload").write_bytes(b"%PDF-1.4\n")
+        cards, rejected = scorecard.read_tree(tree)
+        self.assertEqual(cards, [])
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("crdownload", rejected[0].path)
+        self.assertIn("download", rejected[0].reason)
+
+    def test_every_browsers_name_for_a_part_downloaded_file_is_known(self):
+        # Chrome, Opera, Edge, Safari, Firefox. A club is not going to be told its
+        # card is missing on Chrome and nothing at all on Firefox.
+        tree = self.tree("browsers")
+        for name in ("a.pdf.crdownload", "b.pdf.opdownload", "c.pdf.partial",
+                     "d.pdf.download", "e.pdf.part"):
+            (tree / name).write_bytes(b"%PDF-1.4\n")
+        _, rejected = scorecard.read_tree(tree)
+        self.assertEqual(len(rejected), 5)
+
+    def test_chromes_unnamed_partial_is_recognised_by_its_suffix_alone(self):
+        # Chrome names a download in progress "Unconfirmed 123456.crdownload" --
+        # the file it will become is nowhere in the name. A rule that insisted on
+        # seeing ".pdf" would miss the commonest case of all.
+        tree = self.tree("unconfirmed")
+        (tree / "Unconfirmed 402631.crdownload").write_bytes(b"%PDF-1.4\n")
+        _, rejected = scorecard.read_tree(tree)
+        self.assertEqual(len(rejected), 1)
+
+    def test_a_stray_temporary_file_is_not_called_a_missing_card(self):
+        # ".tmp" and ".part" belong to half the world, so those two need the rest of
+        # the name as evidence. Refusing every .tmp would put a fault in the exit
+        # status that nothing in the folder supports.
+        tree = self.tree("temporary")
+        (tree / "notes.tmp").write_bytes(b"scratch")
+        (tree / "sheet.part").write_bytes(b"scratch")
+        cards, rejected = scorecard.read_tree(tree)
+        self.assertEqual((cards, rejected), ([], []))
+
+    def test_the_refusal_says_what_to_do_about_it(self):
+        tree = self.tree("advice")
+        (tree / "card.pdf.crdownload").write_bytes(b"%PDF-1.4\n")
+        _, rejected = scorecard.read_tree(tree)
+        self.assertIn("matchcentre.tennis.com.au", rejected[0].detail)
+
+    def test_a_real_card_beside_the_wreckage_is_still_read(self):
+        tree = self.tree("mixed-strays")
+        cw.write_card_file(tree / "good.pdf", cw.CardSpec())
+        (tree / "good.pdf.crdownload").write_bytes(b"%PDF-1.4\n")
+        (tree / "draw.xlsx").write_bytes(b"not a pdf")
+        cards, rejected = scorecard.read_tree(tree)
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(len(rejected), 1)
+
+    def test_the_files_the_reader_was_never_offered_can_be_listed(self):
+        tree = self.tree("survey")
+        cw.write_card_file(tree / "good.pdf", cw.CardSpec())
+        (tree / "good.pdf.crdownload").write_bytes(b"%PDF-1.4\n")
+        for name in ("draw.xlsx", "scorecard.html", ".DS_Store"):
+            (tree / name).write_bytes(b"not a pdf")
+        listed = [p.name for p in scorecard.unread_files(tree)]
+        # The card is read and the part-download is refused by name; only what is
+        # neither is left, in path order so the line does not shuffle between runs.
+        self.assertEqual(listed, [".DS_Store", "draw.xlsx", "scorecard.html"])
+
+    def test_a_folder_of_nothing_but_cards_has_nothing_to_list(self):
+        tree = self.tree("clean")
+        cw.write_card_file(tree / "good.PDF", cw.CardSpec())
+        self.assertEqual(scorecard.unread_files(tree), [])
+
+    def test_a_folder_that_is_not_there_is_not_an_exception(self):
+        self.assertEqual(scorecard.unread_files(self.tmp / "nowhere"), [])
+
+    def test_the_cards_in_a_folder_can_be_counted_without_reading_one(self):
+        """`build.py` asks this of a folder nobody asked it to read.
+
+        A run that found nothing where it was told to look says so, and where the
+        project has a folder of its own with cards in it, names that instead. The
+        question is only how many are waiting, so they are counted and not read:
+        opening a club's whole season to print one number would cost more than the
+        build being declined, and an unreadable card is still a card waiting.
+
+        Counted by the same two rules the reader uses, which is the point of it
+        living here. A club whose browser saves exports as `.PDF` has cards that
+        `read_tree` reads, and a count of its own would have called that folder
+        empty and sent them back to Match Centre for files they already had.
+        """
+        tree = self.tree("waiting")
+        cw.write_card_file(tree / "one.pdf", cw.CardSpec())
+        cw.write_card_file(tree / "Round2" / "two.PDF", cw.CardSpec())
+        (tree / "junk.pdf").write_bytes(b"not a pdf at all")
+        for name in ("draw.xlsx", ".DS_Store"):
+            (tree / name).write_bytes(b"not a pdf")
+        self.assertEqual(scorecard.cards_waiting(tree), 3)
+
+    def test_a_download_still_running_is_not_yet_a_card_waiting(self):
+        # The one place this count and the reader part company, and deliberately: a
+        # folder holding nothing but half-written files has no card in it yet, and
+        # the sentence the count feeds would claim one for as long as the browser
+        # keeps writing. Refused by name once it finishes, like any other.
+        tree = self.tree("still-downloading")
+        (tree / "card.pdf.crdownload").write_bytes(b"%PDF-1.4\n")
+        self.assertEqual(scorecard.cards_waiting(tree), 0)
+
+    def test_a_folder_that_is_not_there_has_nothing_waiting_in_it(self):
+        # Not an exception and not -1: the caller's next line is "and it holds N",
+        # so the answer that makes it say nothing at all is zero.
+        self.assertEqual(scorecard.cards_waiting(self.tmp / "nowhere"), 0)
 
 
 if __name__ == "__main__":

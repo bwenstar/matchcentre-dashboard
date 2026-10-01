@@ -59,7 +59,8 @@ data/
 
 Name the folders so they sort sensibly — `2026-winter`, not `winter-2026` — and
 give each one a readable label under `[seasons]` in `config.toml`. Each season
-keeps its own ladder; seasons are never added together.
+keeps its own ladder, and ladders are never added together; the one thing added
+across seasons is each player's record, on the site's careers page.
 
 In multi-season mode a card sitting loose in `data/`, outside any season folder,
 is filed under the year on its own date, and the run says so.

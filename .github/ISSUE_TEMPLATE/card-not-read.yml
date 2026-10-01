@@ -19,15 +19,19 @@ body:
         its shape — `Priya Halloran` becomes `<2 words, 15 chars>` — and keeps
         every measurement, score, count and structural fact. That is the half a
         maintainer needs and the half that identifies nobody. Read it before you
-        paste it; if anything in there still looks identifying, say so in the issue
-        instead of pasting it, because that is a bug in the redactor and a more
-        urgent one than yours.
+        paste it.
+
+        **If anything in there is still a real name, do not paste it here at all.**
+        That is a bug in the redactor and a more urgent one than yours, and
+        `SECURITY.md` has a private route for it — reporting it in public is the
+        one thing that cannot be undone afterwards.
 
   - type: textarea
     id: doctor
     attributes:
       label: The redacted doctor report
-      description: The whole thing, including the `verdict` line at the end.
+      description: >
+        The whole thing, including the `verdict` block and the note under it.
       render: text
     validations:
       required: true

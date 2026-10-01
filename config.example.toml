@@ -44,8 +44,10 @@ strip_team_prefix = "Willowbank"
 # "multi"   the first folder level under data/ is the season, so
 #           data/2026-winter/round-3/card.pdf is season "2026-winter".
 #           Output goes to site/<season>/<competition>/ and the site gains a
-#           season picker. Each season keeps its own ladder, teams and player
-#           pages; nothing is totalled across seasons.
+#           season picker and a careers page, site/careers.html, adding each
+#           player's seasons up (none in a build that withholds players' names:
+#           see players below). Each season keeps its own ladder, teams and
+#           player pages; no ladder is ever totalled across seasons.
 # Switching to "multi" changes competition ids: they gain the season key as a
 # prefix, so any [competitions.*] section you have written needs its name and
 # its season_key updated to match.
@@ -53,6 +55,17 @@ seasons = "single"
 
 # The heading on the front page, the one that lists your competitions.
 title = "Willowbank Tennis Club season dashboards"
+
+# Whether the dashboards print the players' names.
+#   "names"     as the cards spell them. The default.
+#   "numbered"  each player as their team and a number: Brindle Magpies #3.
+#   "initials"  each player as their initials, P.H., numbered where two
+#               players share them.
+# Either of the last two keeps every player's full name out of every file
+# under site/, the front page included, and the build checks that it did
+# before it writes anything. Read "Publishing without names" in README.md
+# before you put a dashboard where anybody can open it.
+players = "names"
 
 
 # --------------------------------------------------------------------------
@@ -72,7 +85,8 @@ title = "Willowbank Tennis Club season dashboards"
 #                 matches is not punished for it. The default.
 #   sets-first    win 2, draw 1, loss 0; a match is decided on sets won, with
 #                 games as the tiebreak. The common pennant scheme.
-#   rubbers       a team's points are simply the number of sets it won.
+#   rubbers       a team's points are simply the number of sets it won. A match
+#                 forfeited whole pays the side that turned up every rubber.
 #   simple        win 3, draw 1, loss 0; decided on sets, then games.
 scoring = "games-bonus"
 
@@ -102,19 +116,38 @@ sets = "first-to-6"
 #
 # This changes the points column of every team that has had a week off, and it
 # never changes the ladder order: crediting a team its own average cannot move
-# its average, and the average is what the ladder is sorted on. So if your totals
-# are lower than your association's sheet but the teams are in the right order,
-# and the teams that differ are the ones that have had a bye or a washout, this is
-# the line to try.
+# its average, and the average is what the ladder is sorted on. So if your
+# totals are lower than your association's sheet but the teams are in the right
+# order, and the teams that differ are the ones that have had a bye or a
+# washout, this is the line to try.
 # unplayed = "average"
+
+# draws — can a night end level at all? true or false, TOML's own booleans, not
+# "true" in quotes. Every preset above says yes, because most schemes have a
+# points value for a draw, and that is only a default.
+#
+# Many associations decide every match: a tiebreak, a countback, a by-law about
+# games or sets. Say draws = false and this program stops treating a level card
+# as a draw and starts treating it as a card with something missing. The night
+# is named in the run's data health list, marked "ended level" on the team page,
+# and left out of every ladder figure — played, points, percentage — until the
+# card is fixed. The rubbers on it still count in every player's record, because
+# they were played.
+#
+# Leave it out if a level night is a real outcome in your grade, whatever it is
+# worth. What this setting is for is the opposite case: it turns a scoreline
+# your rules say cannot happen into something you get told about, instead of a
+# silently-scored draw in a competition that has no D column.
+# draws = false
 
 # format — the shape of a match: how many sets, and which are doubles.
 # This *is* read off your cards, from the marker column beside each set row, so
 # you do not need to set it. Declare it only if you would rather a card that
 # lost a row be refused than believed. When a declared format and a card
 # disagree the run stops and names the card; neither reading wins quietly.
-# One of: doubles-2, doubles-3, doubles-4, doubles-singles-doubles, mixed-3,
-# mixed-5, singles-3, singles-4, singles-6, singles-doubles.
+# It takes "doubles-2", "doubles-3", "doubles-4", "doubles-singles-doubles",
+# "mixed-3", "mixed-5", "singles-3", "singles-4", "singles-6" or
+# "singles-doubles".
 # format = "doubles-singles-doubles"
 
 # slots — the same thing spelled out, for a format with no preset name. Each
@@ -124,7 +157,8 @@ sets = "first-to-6"
 
 # min_sets_for_result — how many sets must be finished before the match counts
 # for the ladder. Defaults to three quarters of the sets, rounded up: 3 of 4,
-# 5 of 6. No card states it.
+# 5 of 6. No card states it, so when a match is played and decides nothing the
+# build's review list asks about it, once for the competition. 1 or more.
 # min_sets_for_result = 3
 
 
@@ -132,12 +166,23 @@ sets = "first-to-6"
 # [seasons] — readable names for the folders under data/
 # --------------------------------------------------------------------------
 # Only used when [build] seasons = "multi". The key is the folder name directly
-# under data/; the value is what the season picker shows. Any folder without an
-# entry here is shown by its folder name.
+# under data/; the value is what the season picker shows. A competition's season
+# is named by its own section's season =, else by its season's line here, else
+# by the season its cards print, else by its folder's name made readable:
+# "2026 Winter" of 2026-winter. A section no card has reached yet is named the
+# same way, and each night on the front page is headed by the name of its first
+# competition. A key is read as the folder's name is, so capitals, spaces and
+# punctuation in it do not matter, and the run reports a key naming no season
+# with a card, a folder or a section.
+#
+# This table is not what turns seasons on: that is seasons = "multi" under
+# [build], above. The two lines look alike and do different jobs, so labels left
+# here while [build] still says "single" are labels nothing reads — the run says
+# so rather than letting them sit.
 
 [seasons]
-"2026-summer" = "2026 Summer Season"
-"2026-winter" = "2026 Winter Season"
+# "2026-summer" = "2026 Summer Season"
+# "2026-winter" = "2026 Winter Season"
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +191,10 @@ sets = "first-to-6"
 # Cards shout team names, so the tool un-shouts them and marks the result as a
 # guess. Correct any that read wrongly and the guess marker goes away.
 # The key is the team's id: its name, lower-cased, punctuation turned into
-# hyphens, with strip_team_prefix removed. A first run fills these in for you.
+# hyphens, with strip_team_prefix removed. A first run writes each guess in for
+# you with a # in front, and a line counts once you remove the #.
+# A key no card prints and no teams = [...] list declares names nobody, and the
+# run says so, with the key to use where the cards give one.
 
 [team_names]
 falcons = "Falcons"
@@ -157,23 +205,44 @@ nightjars = "Nightjars"
 silvereyes = "Silvereyes"
 # All-caps words of three letters or fewer are taken for abbreviations and left
 # alone, so a team printed "WILLOWBANK RTC" comes out as "RTC" already and needs
-# no line here.
+# no line here. A longer word is capitalised at its first letter, and past a
+# one-letter prefix: "O'Brien", but "King's", "North-West" and "(Womens)". An A
+# before TEAM(S), GRADE, RESERVE(S), SIDE or SQUAD is a team's letter, as a B
+# is, unless a small word such as OF comes before it: "Part of a Team".
 
 
 # --------------------------------------------------------------------------
 # [player_names] — how you write a person's name
 # --------------------------------------------------------------------------
 # Normally empty. Player names are printed in mixed case on the roster block of
-# every card, so they are taken as printed. Add a line to correct a spelling the
-# association has wrong, or to write out a name the cards abbreviate.
+# every card, so they are taken as printed. A card that prints one wholly in
+# capitals has it un-shouted whole, BO NAKAMA as "Bo Nakama", with no short word
+# kept as an abbreviation, so TJ NAKAMA reads "Tj Nakama" and wants a line
+# here. Add a line to correct a spelling the association has wrong, or to write
+# out a name the cards abbreviate.
 # The key is the printed name, lower-cased with hyphens in place of spaces and
 # punctuation; the value is what you want shown.
+# A name split under [namesakes] below is one player per team, and each is
+# keyed on the name and the team. A line under the name alone is given to none
+# of them, and the run says so.
+# A line whose key no card prints reaches nobody, and the run says that too,
+# with the key to use where the cards give one: the nearest name a player has,
+# or the one [aliases] folds it into, since a name is looked up after its
+# alias. A fill-in the set rows name and no roster block registers is
+# corrected here as well.
+# A card that misspells a registered player wants a line under [aliases], and
+# not one here. A line here names one player and joins nobody, so one giving a
+# misspelling the name the right spelling already shows leaves two players
+# under that one name. The run says so, with the [aliases] line that joins them
+# where the cards say which spelling is right.
 
 [player_names]
 # Printed as "E MacAlister" on the cards; written out in full on the dashboard.
 "e-macalister" = "Eilidh MacAlister"
 # The association's record has no accent on it. This puts it back.
 "siobhan-mcgrath" = "Siobhán McGrath"
+# One of the two M Kellys split under [namesakes] below: the one at Nightjars.
+"m-kelly-nightjars" = "Mara Kelly"
 
 
 # --------------------------------------------------------------------------
@@ -183,13 +252,52 @@ silvereyes = "Silvereyes"
 # their statistics add up instead of appearing twice at half strength.
 # Both sides are ids, not printed names. The dashboard lists anyone who appears
 # only once or twice under "players to check", which is where you will spot
-# these.
+# these. A team's misspelt banner is joined to the team the same way, by ids.
+# A line applies to every competition, so the run offers none for a banner that
+# is also a team of another one; correct that card in Match Centre instead.
+# An alias says who a spelling is, and not how to spell them: a player every
+# card spells the way a line here calls wrong is still shown that way, and the
+# run names the [player_names] key to write the name under.
 
 [aliases]
 # One card printed the surname as two words.
 "eilidh-mac-alister" = "e-macalister"
 # And one round was entered with an initial instead of the first name.
 "s-mcgrath" = "siobhan-mcgrath"
+
+
+# --------------------------------------------------------------------------
+# [namesakes] — two people, one printed name
+# --------------------------------------------------------------------------
+# The exact inverse of [aliases] above. Each team named here gets a player of
+# its own, told apart by the team whose roster block the name is printed in.
+# Without this the two share one record: one rating, one team, one win rate,
+# and a rubber count that can exceed the number of rounds in the season.
+#
+# The run finds these for you. A name in two teams' roster blocks is reported,
+# and written into your own config.toml commented out, ready to uncomment.
+#
+# Leave the entry off if it is one person who changed teams mid-season. That is
+# indistinguishable from two people on the cards, and it is why nothing is split
+# for you: splitting a transfer would invent somebody who does not exist.
+#
+# The teams in an entry are usually teams of the *same* competition. Each grade
+# gets a dashboard of its own, so on those dashboards one name in two grades is
+# already two players. The exception is the careers page in multi-season mode,
+# which joins one name across grades and seasons: if those are two people, one
+# entry naming a team of each gives each a career of their own. If a name is
+# merged in two grades, one entry names all four teams -- the entry is keyed on
+# the name, so there can only be one of them.
+#
+# The key is the player's id. The teams may be written either as their ids or as
+# the banner the cards print, as below. Each player it makes is then known by
+# the name and the team -- "m-kelly-nightjars" -- which is the key
+# [player_names] takes for them, as above. A team no card prints the name under
+# adds nothing to the entry, and the run says so on every build.
+
+[namesakes]
+# Two unrelated M Kellys, in two squads of the one grade below.
+"m-kelly" = ["Currawongs", "Nightjars"]
 
 
 # --------------------------------------------------------------------------
@@ -203,23 +311,34 @@ silvereyes = "Silvereyes"
 # `division` fields, not by the section name, so both must be filled in for the
 # section to take effect. In multi-season mode `season_key` must match too.
 # If nothing matches a section, the run says so rather than letting its settings
-# quietly do nothing.
+# quietly do nothing. And two sections filling in the same day and division are
+# refused outright: only one of them could ever get the cards, and the other's
+# team list, byes and round dates would stop taking effect with nothing on the
+# page to say so. If you want to keep two seasons of one division, keep both
+# sections and tell them apart with `season_key` below.
 
 [competitions.wednesday-division-3]
 # What the dashboard calls this competition.
 label = "Wednesday Division 3"
 
-# The night it is played, and the division as printed on the cards. These two
-# are how cards find this section. The day is otherwise taken from the weekday
-# of each card's own date.
+# The night it is played, and the division as printed on the cards, without the
+# word "Division" in front of it. These two are how cards find this section; the
+# day is otherwise taken from the weekday of each card's own date, or from the
+# weekday printed beside it when the date cannot be read. A card headed
+# `Division 3 Grade B` is division "3 Grade B" -- the grade is half of the name,
+# and the two grades of one section are two competitions; a `C Grade` card is
+# division "C". If nothing is filed
+# under this section, the run says so and prints the id it would have used,
+# which tells you what the cards actually say.
 day = "Wednesday"
 division = "3"
 
 # What your association calls this season. Cards do not reliably print it.
 season = "2026 Season 2"
 
-# Which folder under data/ these cards are in. Only needed, and only used, when
-# [build] seasons = "multi".
+# Which folder under data/ these cards are in; capitals and spaces do not
+# matter. Only needed, and only used, when [build] seasons = "multi" -- and in
+# that mode --discover writes it into every section for you.
 # season_key = "2026-winter"
 
 # Rounds in the full season, finals excluded. Without it the dashboard says
@@ -242,13 +361,17 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 # scoring = "sets-first"
 # sets = "fast4"
 # unplayed = "average"
+# draws = false
 # format = "singles-4"
 # slots = ["singles", "singles", "singles", "singles"]
+# min_sets_for_result here is what the review list suggests when the
+# competitions in one run need different numbers.
 # min_sets_for_result = 3
 
 # Captains, keyed by team name or team id. Read from the (C) marks on the cards
-# when you leave this out. Declaring one settles the case where two players on
-# one team have a (C) against them on different cards.
+# when you leave this out, and a first run writes those marks here with a # in
+# front. Declaring one settles the case where two players on one team have a (C)
+# against them on different cards.
 [competitions.wednesday-division-3.captains]
 "Falcons" = "Siobhán McGrath"
 "Herons" = "Eilidh MacAlister"
@@ -283,10 +406,10 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 #
 # You only have to enter the byes this program cannot see for itself. A round
 # that has cards with exactly one team missing is already worked out from the
-# `teams` list above, and a first run writes those here commented out, so you can
-# check them rather than type them again. What no card can show is a week nobody
-# played at all — a long weekend, a washed-out round, a bye week for the whole
-# grade — because a round with no cards leaves nothing behind to read.
+# `teams` list above, and a first run writes those here commented out, so you
+# can check them rather than type them again. What no card can show is a week
+# nobody played at all — a long weekend, a washed-out round, a bye week for the
+# whole grade — because a round with no cards leaves nothing behind to read.
 #
 # Rounds are written as they are printed on the cards, so [1, 6] and ["SF"] are
 # both fine, and one round needs no brackets: "Falcons" = 6.
@@ -311,22 +434,61 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 "Nightjars" = [6]
 "Silvereyes" = [6]
 
+# Your association's published sheet, typed in so that every build checks this
+# dashboard against it and names any team that disagrees, with both figures.
+# Optional, and nothing in it changes a figure on the page.
+#
+#   after_round  the last regular round the sheet covers, as a whole number.
+#                Required: only rounds up to it are compared, so the check
+#                stays right as later cards arrive.
+#   points       the sheet's points, compared to as many decimal places as
+#                you type.
+#   played       the sheet's matches played: P, or what its average divides
+#                by, as your association prints it.
+#
+# Keyed by team name or team id, like the tables above. Leave a team out, or
+# one of its figures, and only what is here is checked. Type the sheet's own
+# figures: a table copied off this dashboard agrees with it and checks nothing.
+[competitions.wednesday-division-3.expected]
+after_round = 5
+"Falcons" = { points = 31.4, played = 5 }
+"Herons" = { points = 27.2, played = 5 }
+"Currawongs" = { points = 24.6 }
+
 # Your published draw, one block per round. Optional, and worth typing in for
-# two reasons: the dashboard can then show fixtures that have not been played
-# yet, and a bye can be credited to the team that actually had the week off.
-# A draw read off the cards is a history, not a schedule, and cannot do either.
+# four reasons: the dashboard can then show fixtures that have not been played
+# yet, a bye can be credited to the team that actually had the week off, a
+# fixture the season has gone past with no scorecard is named instead of sitting
+# there reading "scheduled" for the rest of the year, and a competition with no
+# scorecards yet gives its first dated round on the front page. A draw read off
+# the cards is a history, not a schedule, and cannot do any of the four.
 #
 #   number    the round label as printed on the cards. A string, so "1" and
-#             "SF" and "GF" are all valid.
+#             "SF" and "GF" are all valid. Rounds run by number, then any
+#             other name, then the finals labels listed under finals below, as
+#             a series runs (QF, SF, PF, then GF or F), whatever their dates.
+#             A name not on that list that you set finals = true on runs
+#             after the latest of those labels above it in this draw,
+#             finals = true or not, and before the next; with none of
+#             them above it, ahead of them all.
 #   date      the day it is played, yyyy-mm-dd. Optional.
 #   fixtures  a list of [home, away] pairs, using the names in `teams`.
 #   byes      the teams resting this round, if any. One name or a list; `bye`
-#             spelled singular is read the same way. Usually easier to put in the
-#             byes table above, which does not need the draw typed in as well.
+#             spelled singular is read the same way. Usually easier to put in
+#             the byes table above, which does not need the draw typed in too.
 #   finals    true for a finals round. A finals round never contributes ladder
-#             points. A round whose label is not a number is treated as finals
-#             whether or not you say so.
-#   note      a free line shown against the round, for a washout or a rescheduling.
+#             points. A round labelled as a final is treated as finals unless
+#             you say otherwise. Those labels are QF, Quarter Final, Quarters,
+#             Qualifying Final, E, EF, Elim, Elimination Final, SF, Semi, Semi
+#             Final, Semis, PF, Prelim Final, Preliminary Final, GF, Grand
+#             Final, F and Final, in any case, spaced, hyphenated or run
+#             together, with Finals for Final (Grand Finals), and with a number
+#             after (SF1). Any other name is scored as a regular round, with a
+#             warning, unless you set finals = true to make it a finals round,
+#             or finals = false to keep it regular without the warning. Set it
+#             false, too, to score a round labelled as a final as a regular one.
+#   note      a free line shown against the round, for a washout or a
+#             rescheduled night.
 
 [[competitions.wednesday-division-3.rounds]]
 number = "1"

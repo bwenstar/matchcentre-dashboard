@@ -39,8 +39,12 @@ competition a club runs, built from the club's own exported scorecards.">
   Also written beside this page, and only because this template asks for it by
   name: picker-data.js, assigning window.PICKER_DATA. It carries the same records
   the list above was rendered from, which is what lets the season navigation be
-  built without re-reading the markup. Everything that page needs to *say* is
-  already in the HTML; the script only adds navigation.
+  built without re-reading the markup. And build-status.js, assigning
+  window.BUILD_STATUS: whether the last build failed, which is the one thing
+  that page has to say that is not already in the HTML -- a failed build has no
+  seasons to render this page again from, so it changes that file and nothing
+  else. Everything else the page needs to *say* is already in the HTML; the
+  script only adds navigation and puts that one sentence in place.
 
   SINGLE SEASON VERSUS MANY. One template, two shapes, and the difference is
   entirely in the data:
@@ -66,6 +70,7 @@ competition a club runs, built from the club's own exported scorecards.">
 </header>
 
 <main id="competitions" tabindex="-1">
+<p id="build-status" class="build-status" hidden></p>
 
 <!-- Empty, hidden, and filled only when the data says there is more than one
      season. In single-season mode nothing fills it and nothing is shown. -->
@@ -104,8 +109,9 @@ competition a club runs, built from the club's own exported scorecards.">
 <footer class="meta"><!--FOOTER--></footer>
 
 <script src="picker-data.js"></script>
+<script src="build-status.js"></script>
 <script>
-/* Three small jobs, in plain ES5 so this opens in whatever browser is on the
+/* Four small jobs, in plain ES5 so this opens in whatever browser is on the
    clubhouse laptop, and each one guarded so that a missing or empty
    picker-data.js costs nothing: the page is already complete without this
    script. It renders as a list of links with scripting switched off. */
@@ -147,6 +153,21 @@ competition a club runs, built from the club's own exported scorecards.">
      picker-data.js is absent: no card on the page means nothing was found. */
   var panel = document.querySelector('.first-run');
   if (panel && !document.querySelector('.pick')) panel.removeAttribute('hidden');
+
+  /* --- build status ------------------------------------------------------ */
+  /* The one sentence on this page that a failed build can change without
+     rebuilding it, which is why it arrives in a file of its own. The words
+     are site.py's; this only puts them in place, and shows nothing when the
+     file carries none -- which is what a build that worked writes. */
+  var status = window.BUILD_STATUS || {};
+  var statusLine = document.getElementById('build-status');
+  var LEVELS = { ok: true, fail: true };
+  if (statusLine && typeof status.text === 'string' &&
+      Object.prototype.hasOwnProperty.call(LEVELS, status.level)) {
+    statusLine.textContent = status.text;
+    statusLine.className = 'build-status build-status-' + status.level;
+    statusLine.removeAttribute('hidden');
+  }
 
   /* --- seasons ----------------------------------------------------------- */
   var nav = document.getElementById('season-picker');
@@ -197,10 +218,18 @@ competition a club runs, built from the club's own exported scorecards.">
   /* Which season a card belongs to is read off its own link, never off the
      heading above it: the link begins with the season key, which is unique,
      while a heading begins with the label, which is not. Getting this wrong
-     would hide a competition and let the page imply it does not exist. */
+     would hide a competition and let the page imply it does not exist.
+
+     A card with no dashboard behind it has no link to read, so site.py writes the
+     key onto the card as data-season and that is read instead. Only as a fallback:
+     a linked card has one spelling of its season and two would be able to
+     disagree. */
   function seasonOfCard(node) {
     var href = node.getAttribute ? node.getAttribute('href') : null;
-    if (!href) return null;
+    if (!href) {
+      var declared = node.getAttribute ? node.getAttribute('data-season') : null;
+      return declared || null;
+    }
     for (var s = 0; s < seasons.length; s++) {
       if (href.indexOf(seasons[s].key + '/') === 0) return seasons[s].key;
     }
@@ -231,10 +260,11 @@ competition a club runs, built from the club's own exported scorecards.">
       var shown = 0;
       for (var c2 = 0; c2 < groups[g].cards.length; c2++) {
         var card = groups[g].cards[c2];
-        /* A competition with no results yet has no link and so no season on the
-           page. It stays visible in every view: showing a reader something they
-           did not ask for is the lesser fault, and hiding it on a guess is the
-           kind of invention this tool exists to avoid. */
+        /* A card whose season is unknown stays visible in every view: showing a
+           reader something they did not ask for is the lesser fault, and hiding it
+           on a guess is the kind of invention this tool exists to avoid. That is a
+           competition with no results and no declared season -- one with a declared
+           season filters like any other, from data-season. */
         var hide = !!key && !!card.season && card.season !== key;
         if (hide) {
           card.node.setAttribute('hidden', 'hidden');

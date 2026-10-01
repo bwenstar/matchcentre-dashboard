@@ -26,6 +26,25 @@
 # publishing to GitHub Pages from the repo is a legitimate reason to.
 /site/
 
+# What tools/scheduled.py keeps between runs. A report names every player.
+/reports/
+
+# The copy without names that README.md builds into public/, the public.toml it
+# builds from, and the reports-public/ its scheduled line keeps. public/ is
+# rebuilt from data/, as site/ is, and the other two name players, as
+# config.toml and reports/ do, so none of it is committed by default. Delete the
+# /public/ line if you want that copy in git: publishing to GitHub Pages from
+# the repo is a legitimate reason to.
+/public/
+/public.toml
+/reports-public/
+
+# What `python3 tools/demo.py --seasons multi` writes beside build.py: two
+# fictional seasons, and the config that builds them. Nothing to commit, as the
+# plain demo's season in data/ is not.
+/demo-seasons/
+/demo-seasons.toml
+
 # Design and development notes. Working documents, not part of the product.
 /notes/
 

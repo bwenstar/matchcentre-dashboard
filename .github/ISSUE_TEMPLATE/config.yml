@@ -3,3 +3,12 @@
 # documentation sentence that is wrong, a question about config.toml, a scoring
 # scheme no preset covers -- should not have to pick the closest wrong form.
 blank_issues_enabled: true
+
+# There is deliberately no `contact_links:` entry for the security policy, even
+# though a leak in `--redact` is the one report that must not arrive here. A
+# contact link needs an absolute URL, and an absolute URL contains an owner and a
+# repository name: written here it would travel into every fork and send a club's
+# leak to the wrong maintainer. SECURITY.md is reachable from the Security tab of
+# whichever copy the reporter is looking at, from the README's "Reporting a
+# problem" section, and from the end of every redacted report -- which is where
+# somebody who has just spotted a name is actually standing.

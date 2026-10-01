@@ -24,8 +24,11 @@ one competition, built from a club's own exported scorecards.">
   Load order matters and is checked by the test suite: season-data.js assigns
   window.SEASON_DATA, then app.js reads it. A browser refuses to fetch() a
   sibling file over file://, so that script tag is the only way data reaches a
-  page opened by double-click, which is how a club opens it. app.js may still
-  prefer a fetched season.json when the folder happens to be served over http.
+  page opened by double-click, which is how a club opens it. It is also the copy
+  app.js prefers, because by the time app.js runs it is already in memory:
+  fetching season.json as well cost a second copy of the same document over http,
+  which on a full season was 415KB of a 1,033KB page. season.json is fetched only
+  when no island arrives, and the footer names whichever one was read.
 
   Hooks app.js and this page have agreed on. Each one exists to carry a caveat
   rather than a number, so a missing one is silent and costly:
@@ -34,6 +37,7 @@ one competition, built from a club's own exported scorecards.">
     #rules-banner            which scoring rules, set rule and format were used
     #season-picker           other seasons; stays hidden unless multi-season
     #entity-picker           jump to a team or player
+    #entity-go               takes the jump the list has chosen
     #theme-toggle            light/dark/system
     #health                  data-health summary
     #rejected                cards seen and not scored (F4)
@@ -42,10 +46,16 @@ one competition, built from a club's own exported scorecards.">
     .provenance-flag         marks a value that was worked out, not declared (F7)
     .ladder-note             says on what basis the ladder is ordered (F10)
 
-  #rules-banner, #rejected and #season-picker ship *empty*, and styles.css hides
-  an empty one. That way they appear exactly when app.js has something to put in
-  them, and no step can be forgotten: there is no `hidden` attribute for the
-  script to remember to remove.
+  #rules-banner, #health, #rejected and #season-picker ship *empty*, and
+  styles.css hides an empty one. That way they appear exactly when app.js has
+  something to put in them, and no step can be forgotten: there is no `hidden`
+  attribute for the script to remember to remove.
+
+  The first three of those are also the page's only caveats on its own numbers,
+  and each is a named <section> so that it is a landmark a screen reader's
+  rotor offers. They cannot be reached any other way: there is no heading above
+  the content, the views are the page's only navigation, and the skip link steps
+  over all three on its way to #view, which is what a skip link is for.
 -->
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -81,33 +91,77 @@ one competition, built from a club's own exported scorecards.">
     <select id="entity-picker">
       <option value="">Jump to a team or player&hellip;</option>
     </select>
+    <!-- The list chooses and this button goes. Navigating on the list's own change
+         event meant a keyboard reader arrowing towards the twentieth player was
+         taken to the nineteen before it on the way, since a closed <select> fires
+         change on every keypress; and WCAG 3.2.2 rules it out for every reader,
+         not just that one. Disabled until the list says somewhere to go, and
+         straight after the list in the tab order, which is where a reader who has
+         just chosen goes looking for it. -->
+    <button class="btn" id="entity-go" type="button" disabled>Go</button>
     <button class="btn" id="theme-toggle" type="button">Theme: system</button>
   </div>
 </header>
 
 <!-- Quiet, permanent context: which scoring preset, which set rule, which match
      format produced every number below. A club running the wrong preset has to
-     be able to see that without reading code. -->
-<div id="rules-banner" class="rules-banner"></div>
+     be able to see that without reading code.
 
-<div class="health" id="health" aria-label="Data health"></div>
+     A <section> with a name, not a <div>: a named section is role `region`, which
+     is a landmark, and a landmark is the only way a screen reader is offered
+     something that has no heading. The name is authored rather than borrowed from
+     the page, because there is nothing on the page to borrow -- and a visible
+     heading here would spend a line of the space above the fold that the sticky
+     bar has only just given back. "Rules in force" is the project's own phrase
+     for this content (README.md, and build.py's own report heading), so the page
+     introduces no new vocabulary; it is deliberately not pinned to either, since
+     coupling an accessible name to a terminal report's wording would fail an
+     accessibility test the first time somebody rewords the report. -->
+<section id="rules-banner" class="rules-banner" aria-label="Rules in force"></section>
+
+<!-- The same shape, for the same reason. The name it already carried was written
+     on a <div>, which is role `generic` -- the one role ARIA 1.2 lists aria-label
+     as prohibited on -- so the name reached nobody and the strip was in no list
+     anything could jump to. `role="status"` and `role="group"` are both nameable
+     and neither is a landmark, so neither answers this; status would also read the
+     whole summary aloud over whatever the reader was doing, once per load, for
+     content that is never news. The words are the prefix of the disclosure this
+     strip prints for everyone else, "Data health detail (...)", and the suite pins
+     the two together so what is announced is what a sighted reader beside them is
+     looking at. -->
+<section class="health" id="health" aria-label="Data health"></section>
 
 <!-- Cards that were seen and not scored. Loud on purpose, and above the fold:
      an unread scorecard is missing data, not a zero, and every number on the
      page is provisional until it is dealt with. -->
 <section id="rejected" aria-label="Scorecards that could not be read"></section>
 
-<noscript>
-  <div class="health">
+<!-- The mount point, and the one thing in it that ships. Every number on this page
+     arrives from the script, so with scripting off the note below is not a caveat on
+     the content: it is the content, and it belongs where the content goes. It used to
+     sit above this element, which is to say in no landmark at all -- Chrome reports
+     the note's own box role=none ignored, so a reader going top to bottom found it and
+     a reader navigating by region was offered a `main` holding nothing, as was anybody
+     pressing this page's own "Skip to content". In here it is both. render() empties
+     this element on the first route, which costs nothing: by then a script is running
+     and a <noscript> renders nothing anyway.
+
+     Dressed as a `card` rather than as the `health` strips above, because that is what
+     it now is -- a block of content inside a centred, padded <main>, which is what the
+     script builds in here too. `.health` is a full-bleed band with a bottom border and
+     no sides; in here it would reach neither edge and read as a rule across the middle
+     of the page. `role="alert"` was the other candidate and is worse: it announces
+     itself once over whatever the reader is doing and leaves nothing in any list to
+     navigate back to. -->
+<main id="view" tabindex="-1"><noscript>
+  <div class="card">
     <p class="note critical"><span class="ico" aria-hidden="true">&#10007;</span>
     <span>This dashboard builds the season in the browser from
     <code>season.json</code>, so it needs JavaScript enabled. The scorecards it
     was built from, and <code>season.json</code> itself, are plain files in this
     same folder and can be read without it.</span></p>
   </div>
-</noscript>
-
-<main id="view" tabindex="-1"></main>
+</noscript></main>
 
 <footer class="meta"><span id="foot-note"></span></footer>
 

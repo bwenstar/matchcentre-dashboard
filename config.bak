@@ -1,0 +1,158 @@
+# matchcentre-dashboard
+#
+# Written for you from the scorecards in data/. Everything here is optional: the
+# dashboard already works. Filling it in makes the dashboard say what you know
+# instead of what this program could work out on its own.
+#
+# Nothing in this file can change a score. Results only ever come from the
+# scorecards. This file supplies names, captains, season labels, the list of
+# teams, the draw, and which scoring scheme your competition uses.
+#
+# Edit it, then run `python3 build.py` again.
+
+[club]
+name = "THE UNIVERSITY OF QUEENSLAND TENNIS CLUB INC"
+# Every team of yours printed with the same prefix? Put it here
+# and it stops cluttering the dashboard, e.g. "Riverside".
+# strip_team_prefix = ""
+
+[build]
+# "single" if data/ holds one season, "multi" if you keep past
+# seasons in their own folders under data/ (data/2026-winter/...).
+seasons = "single"
+title = "THE UNIVERSITY OF QUEENSLAND TENNIS CLUB INC season dashboards"
+
+[rules]
+# How your competition turns sets into ladder points. Getting this
+# wrong reorders the ladder, so it is printed on every run and
+# shown on the dashboard. Options:
+#   games-bonus  win 4, draw 3, loss 2, 0.1 per game; decided on games then sets
+#   rubbers      points = sets won; decided on sets then games
+#   sets-first   win 2, draw 1, loss 0; decided on sets then games
+#   simple       win 3, draw 1, loss 0; decided on sets then games
+scoring = "games-bonus"
+# When a set is finished. No scorecard can tell us this — 6-3 looks
+# the same whether the set was played to 6 or to 8. Options:
+#   advantage-6        first to 6, advantage set
+#   fast4              first to 4
+#   first-to-6         first to 6
+#   pro-10             first to 10
+#   pro-8              first to 8
+#   pro-8-tiebreak     first to 8, tiebreak at 8-all
+#   short-sets-4       first to 4, advantage set
+#   six-game-tiebreak  first to 6, tiebreak at 6-all
+sets = "first-to-6"
+# The shape of a match is read from your scorecards, so you only
+# need these to pin it down or to override what was read.
+# format = "doubles-singles-doubles"   # doubles-2, doubles-3, doubles-4, doubles-singles-doubles, mixed-3, mixed-5, singles-3, singles-4, singles-6, singles-doubles
+# slots = ["doubles", "singles", "singles", "doubles"]
+# min_sets_for_result = 3   # sets that must finish before a result counts
+
+[team_names]
+# Scorecards shout team names, so these are this program's best
+# guess at how you write them. Fix any that read wrongly.
+uq-challengers = "UQ Challengers"
+uq-drop-shots = "UQ Drop Shots"
+uq-gnats = "UQ Gnats"
+uq-icbc = "UQ Icbc"
+uq-iguanas = "UQ Iguanas"
+uq-lakers = "UQ Lakers"
+uq-only-aces = "UQ Only Aces"
+uq-tempests = "UQ Tempests"
+uq-tigers = "UQ Tigers"
+uq-triple-a-batteries = "UQ Triple a Batteries"
+uq-unforced-errors = "UQ Unforced Errors"
+
+[player_names]
+# Player names come off the scorecards as printed, so this is
+# normally empty. Add a line to correct a spelling.
+# "j-smith" = "Jo Smith"
+
+[aliases]
+# One person, two spellings across cards. Left slug becomes right.
+# The dashboard lists anyone who appears only once or twice under
+# 'players to check', which is where you will spot these.
+# "a-fernandez" = "ana-fernandez"
+
+[competitions.monday-division-b2]
+label = "Monday Division B2"
+day = "Monday"
+division = "B2"
+# What your association calls this season. Scorecards do not
+# reliably print it, so the dashboard leaves it out until you
+# say. Remove the # to use it.
+# season = "Season 2"
+# Rounds in the full season. Without it the dashboard says
+# "5 rounds played" and shows no percentage, rather
+# than implying the season is over. Remove the # to use it.
+rounds_total = 10
+# The full list of teams in this competition, as read from
+# the cards. Check it, then remove the # — that tells the
+# program the list is complete, which lets it handle byes and
+# flag a misspelt team instead of inventing a new one.
+teams = ["UQ Challengers", "UQ Drop Shots", "UQ Gnats", "UQ Lakers", "UQ Tigers"]
+
+[competitions.monday-division-b2.captains]
+# Read from the (C) marks on the scorecards. Correct as needed.
+"UQ Challengers" = "Nick Hendricks"
+"UQ Drop Shots" = "Samuel Muller"
+"UQ Gnats" = "Jun Kim"
+"UQ Lakers" = "Gordon Chen"
+"UQ Tigers" = "Aidan Beutel"
+
+[competitions.monday-division-b2.courts]
+# Each team's home court, if your club plays on numbered courts.
+# "UQ Challengers" = 1
+
+# Your published draw, if you have one. Declaring it lets the
+# dashboard show fixtures that have not been played yet, and is
+# the only way byes can be credited correctly.
+# [[competitions.monday-division-b2.rounds]]
+# number = "1"
+# date = "2026-08-18"
+# fixtures = [["UQ Challengers", "UQ Drop Shots"]]
+# bye = ""
+# finals = false
+
+[competitions.tuesday-division-c]
+label = "Tuesday Division C"
+day = "Tuesday"
+division = "C"
+# What your association calls this season. Scorecards do not
+# reliably print it, so the dashboard leaves it out until you
+# say. Remove the # to use it.
+# season = "Season 2"
+# Rounds in the full season. Without it the dashboard says
+# "4 rounds played" and shows no percentage, rather
+# than implying the season is over. Remove the # to use it.
+rounds_total = 10
+# The full list of teams in this competition, as read from
+# the cards. Check it, then remove the # — that tells the
+# program the list is complete, which lets it handle byes and
+# flag a misspelt team instead of inventing a new one.
+teams = ["UQ Icbc", "UQ Iguanas", "UQ Only Aces", "UQ Tempests", "UQ Triple a Batteries", "UQ Unforced Errors"]
+
+[competitions.tuesday-division-c.captains]
+# Read from the (C) marks on the scorecards. Correct as needed.
+"UQ Icbc" = "Zixuan Yang"
+"UQ Iguanas" = "Jonathan Ellis"
+"UQ Only Aces" = "Heath Coggan"
+"UQ Tempests" = "Ewan Mackenzie"
+"UQ Triple a Batteries" = "Alyssa Mills"
+"UQ Unforced Errors" = "Alex Freire"
+
+[competitions.tuesday-division-c.courts]
+# Each team's home court, if your club plays on numbered courts.
+# "UQ Icbc" = 1
+
+# Your published draw, if you have one. Declaring it lets the
+# dashboard show fixtures that have not been played yet, and is
+# the only way byes can be credited correctly.
+# [[competitions.tuesday-division-c.rounds]]
+# number = "1"
+# date = "2026-08-18"
+# fixtures = [["UQ Icbc", "UQ Iguanas"]]
+# bye = ""
+# finals = false
+
+# Written from 22 scorecards in data/.
