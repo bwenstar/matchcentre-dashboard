@@ -26,10 +26,10 @@ anyway: two names read as one cell shows up in the character count.
 
 What ``--redact`` deliberately keeps, because none of it names a person and all of
 it is the diagnosis: every measurement, every count, every score, the result verb,
-the tick labels, the grade, round and court numbers, the weekday, and the
-producer line out of the file's metadata. What it removes: names, teams, the club,
-the venue, the season label, dates, times, the Match Centre match id, ratings, and
-the file's own name and path.
+the box each tick is read as, by its label, row and side, the grade, round and
+court numbers, the weekday, and the producer line out of the file's metadata.
+What it removes: names, teams, the club, the venue, the season label, dates,
+times, the Match Centre match id, ratings, and the file's own name and path.
 
 A redacted run ends by saying the other half of that out loud: if a name survived
 it, the fault is in this flag rather than in the card, and ``SECURITY.md`` has a
@@ -72,6 +72,7 @@ from matchcentre import discover, pdf, redact, scorecard, version_line  # noqa: 
 from matchcentre.card import (Card, CardError, CrossCheck, verb_side,  # noqa: E402
                               weekday_of)
 from matchcentre.cli import WIDTH, Parser, fill                 # noqa: E402
+from matchcentre.config import DEFAULT_PATH, Config             # noqa: E402
 from matchcentre.format import SET_RULES, from_rows             # noqa: E402
 from matchcentre.model import forfeit_match_winner              # noqa: E402
 from matchcentre.scope import in_words                          # noqa: E402
@@ -106,7 +107,10 @@ KNOWN_ENCODINGS = ("WinAnsiEncoding", "MacRomanEncoding", "MacExpertEncoding",
 # doctor found a date and the reader did not" can be said at all. One pattern for
 # the header field below and for the redaction of a date, because a date this
 # report can quote and --redact cannot see is a date published: the reader's own
-# warnings quote a date it could not use, and ``08-18-2026`` went out whole.
+# warnings quote a date it could not use, and ``08-18-2026`` went out whole. And a
+# range of days printed in place of a date with no year, ``29/09 - Sun 04/10``,
+# which the reader dates by its competition line's year; one with a year at its
+# close is found as that end, as it was.
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 DATE_SHAPE = (
     r"(?i)(?<![\d.])("
@@ -114,6 +118,7 @@ DATE_SHAPE = (
     r"|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}"
     r"|\d{1,2}(?:st|nd|rd|th)?[\s-]+(?:of\s+)?" + _MONTH + r"[\s,-]+\d{2,4}"
     r"|" + _MONTH + r"\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4}"
+    r"|\d{1,2}/\d{1,2}\s*[-\u2013]\s*[^\W\d_]+\.?,?\s+\d{1,2}/\d{1,2}(?!/)"
     r")(?!\d|\.\d)")
 
 # Header fields, each with a pattern deliberately more tolerant than the reader's.
@@ -125,9 +130,9 @@ HEADER_FIELDS: tuple[tuple[str, str], ...] = (
     ("division", r"\b(?:Division|Grade|Section)\s+([A-Za-z0-9][-A-Za-z0-9]*)"),
     ("round", r"\bRound\s+([A-Za-z0-9][-A-Za-z0-9]*)"),
     ("match id", r"#\s*(\d{3,})"),
-    # Digits required: the real template prints the "Court:" label whether or not a
-    # court was entered, and a label with nothing after it is not a found field.
-    ("court", r"\bCourt:?\s*(\d+)\b"),
+    # No pattern: the court is the one the reader reads, off the venue's line, and
+    # not a "Court 3" in the comments (PAGE_RULES, 4.466).
+    ("court", ""),
     # No pattern: a verb is one the one table reads (READER_RULES, below).
     ("result verb", ""),
     ("games header", r"\b(Games)\b"),
@@ -1030,10 +1035,12 @@ def _checkboxes(page: pdf.Page, bands: list[tuple[float, float]]) -> None:
             _row("", "a box count that does not match the row count means a flag "
                      "was missed or invented, so the per-set status read off this "
                      "card cannot be trusted", indent=INDENT)
-    for fill in sorted(ticks, key=lambda r: (round(r.cy, 1), r.cx)):
-        label = _label_right_of(page, fill)
-        _row("", f"ticked at x {fill.cx:7.2f} y {fill.cy:7.2f}  "
-                 f"{label or '(no label to its right)'}", indent=INDENT)
+    # Each named by the box the reader reads it from, in the reader's words, and
+    # not by the words beside it, which are a neighbour's label as often (4.467).
+    in_order = sorted(ticks, key=lambda r: (round(r.cy, 1), r.cx))
+    for fill, place in zip(in_order, scorecard.tick_places(page, in_order)):
+        _row("", f"ticked at x {fill.cx:7.2f} y {fill.cy:7.2f}  {place}",
+             indent=INDENT)
 
 
 def _outlines(page: pdf.Page) -> list[tuple[float, float, float, float]]:
@@ -1057,21 +1064,6 @@ def _outlines(page: pdf.Page) -> list[tuple[float, float, float, float]]:
         side = max(r.h, max(corners[key]))
         boxes.append((r.x0, r.y0, r.x0 + side, r.y0 + side))
     return boxes
-
-
-def _label_right_of(page: pdf.Page, fill: pdf.Rect,
-                    gap: float = 40.0) -> str:
-    """The nearest word to a tick's right on the same line, which is its label."""
-    candidates = [w for w in page.words
-                  if abs(w.cy - fill.cy) <= max(4.0, fill.h)
-                  and fill.x1 <= w.x0 <= fill.x1 + gap]
-    if not candidates:
-        return ""
-    nearest = min(candidates, key=lambda w: w.x0)
-    row = [w.text for w in page.words
-           if abs(w.cy - nearest.cy) <= 2.0
-           and nearest.x0 <= w.x0 <= nearest.x0 + gap * 2]
-    return " ".join(row[:3])
 
 
 def _result_verb_in(line: str, *, short: bool = False) -> str:
@@ -1103,10 +1095,18 @@ def _fill_ins_heading(page: pdf.Page) -> str:
     return scorecard.fill_ins_heading(page)
 
 
+def _court(page: pdf.Page) -> str:
+    """The court the reader reads off the page (:func:`scorecard.court_in`), or
+    "" where it reads none, looked up when it is asked."""
+    court = scorecard.court_in(page)
+    return "" if court is None else str(court)
+
+
 # A field the reader finds on the page and not on a line: the fill-ins heading is
 # the one under `Players` it ends the roster block at, and not a line above that
-# reads like one, as a team's name in brackets in the result line can.
-PAGE_RULES = {"fill-ins": _fill_ins_heading}
+# reads like one, as a team's name in brackets in the result line can; and the
+# court is the one it reads by its label, off the venue's line (4.466).
+PAGE_RULES = {"fill-ins": _fill_ins_heading, "court": _court}
 
 
 def _as_read(name: str, text: str) -> str:
@@ -1200,23 +1200,32 @@ def _rotation(raw: bytes) -> str:
 
 
 def _date_fact(card: Card) -> str:
-    """The date the reader read with its weekday, and the one printed if they differ.
+    """The date the reader read with its weekday, and what files the card if not that.
 
     The card's weekday used to be the date's own, so the two could not disagree
     here; it is now what the card prints, and a card dated a Tuesday that prints
     ``Wed`` is the question this tool is asked most. So both are named, with which
-    of them files the card. That and the disagreement are asked of
-    :mod:`matchcentre.discover`, whose rule they are, so that the verdict cannot
-    say one night while the build files the card under another.
+    of them files the card -- or the night its competition line names, which
+    files it before either, and is named wherever the date's weekday is not it.
+    Where it is, the date is what files the card, as the build's note says of it.
+    That and the disagreement are asked of :mod:`matchcentre.discover`, whose rule
+    they are, so that the verdict cannot say one night while the build files the
+    card under another.
     """
     dated, day = weekday_of(card.date), discover.filing_day(card)
-    files = ("the date is what files it" if dated and day == dated
-             else f"filed by the {day} it prints")
+    if card.night and day == card.night and day != dated:
+        files = f"filed by the {day} its competition line names"
+    elif dated and day == dated:
+        files = "the date is what files it"
+    else:
+        files = f"filed by the {day} it prints"
     if not dated:
         return f"(none read; {files})" if day else "(none read)"
     disputed = discover.disputed_weekday(card)
     if disputed:
         return f"{card.date} {dated} (the card prints {disputed}; {files})"
+    if day != dated:
+        return f"{card.date} {dated} ({files})"
     return f"{card.date} {dated}"
 
 
@@ -1283,6 +1292,25 @@ def _taken(page: pdf.Page) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]
                 taken[name, scoring] = validate.restating_box(
                     card, from_rows(card.doubles_flags, rule=rule))
     return taken
+
+
+def _records_nothing(card: Card) -> bool:
+    """Whether build.py tells *card* its ``no-result`` alone (4.424).
+
+    The build's own question, :func:`~matchcentre.validate.records_nothing`,
+    asked of the match the build makes of the card. It is made under the
+    default rules, which is enough: rows that are all 0-0 finish no set under
+    any set rule and decide no match under any scoring, and a card whose rows
+    hold games, or one the build gives a forfeit, is not one whatever the rules.
+    Rejected: a sentence worded from the card's rows, which would say the build
+    stood a finding down that the build had not.
+    """
+    config = Config(path=Path(DEFAULT_PATH))
+    match = discover._build_match(
+        discover._Sided(card=card, home="home", away="away"), comp_id="",
+        fmt=from_rows(card.doubles_flags), rules=config.ruleset_for(),
+        config=config, unknown={})
+    return validate.records_nothing(match, card)
 
 
 def _verdict(page: pdf.Page, *, path: Path, index: int,
@@ -1355,14 +1383,29 @@ def _verdict(page: pdf.Page, *, path: Path, index: int,
     for warning in card.warnings:
         _flow(f"{INDENT}    ", f"warning     {warning}", f"{INDENT}    " + " " * 12)
     claims = validate.winner_claims(card) if discover.called_off(card) else []
-    if claims:
-        # The one finding the build makes of it is an error, and the verdict says
-        # so in the words the report names the claims by.
+    if card.walkover_by:
+        # Ticked Cancelled and counted: what makes it a walkover, in the words its
+        # checks are held to it by, and what the build does with it (4.418).
+        print(f"{INDENT}  {scorecard._walkover_text(card.walkover_by)}. So build.py "
+              f"scores the match as a forfeit by {card.walkover_by}, as it would a "
+              f"card ticking the {card.walkover_by} Match Forfeited box, and holds "
+              f"what the card prints to the walkover rather than to the set rows.")
+        # Under the rules its rows are not against it by, as forfeit-contradicted
+        # holds them (below), the build says once that they hold play, where they
+        # hold play the TOTAL row leaves out, as validate asks it.
+        rest = combos - set(taken)
+        if validate.uncounted_play(card) and rest:
+            its = "Its" if rest == combos else f"Where {_rules_where(rest)}, its"
+            print(f"{INDENT}  {its} set rows hold games {card.home_games}-"
+                  f"{card.away_games} that the TOTAL row does not count: build.py "
+                  f"says so once, as walkover-rows-played, a warning.")
+    elif claims:
+        # The one finding the build makes of it is a warning, and the verdict says
+        # so in the words the report names the claims by (4.419).
         print(f"{INDENT}  Match Cancelled is ticked, so build.py counts nothing on "
-              f"this card and holds nothing it prints to the set rows. But "
-              f"{in_words(claims)}, and a match called off has no winner, so the "
-              f"card contradicts itself: build.py reports the match once, as "
-              f"cancelled, and as an error, which fails the run.")
+              f"this card and holds nothing it prints to the set rows. "
+              f"{validate.overruled(claims)}, so build.py reports the match once, "
+              f"as cancelled, in a warning that says so.")
     elif discover.called_off(card):
         print(f"{INDENT}  Match Cancelled is ticked, so build.py counts nothing on "
               f"this card")
@@ -1371,25 +1414,39 @@ def _verdict(page: pdf.Page, *, path: Path, index: int,
         print(f"{INDENT}  once, as cancelled.")
     elif not available:
         # Beside a table line saying a verb is printed, not that none is (4.133).
-        first = ("Nothing this card prints can serve as a cross-check, so its numbers"
+        first = ("Nothing this card prints can serve as a cross-check"
                  if any(check.unusable for check in card.checks) else
-                 "No independent cross-check is printed on this card, so its numbers")
-        print(f"{INDENT}  {first}")
-        print(f"{INDENT}  rest on the set rows alone (F6 warns rather than "
-              f"refuses).")
+                 "No independent cross-check is printed on this card")
+        if _records_nothing(card):
+            # Its one finding, as the build makes it, in the build's words: no
+            # figure rests on rows that read 0-0, so neither the report nor the
+            # page says what the reader's warnings above say of it (4.424).
+            print(f"{INDENT}  {first}, and every set row reads 0-0: there is "
+                  f"nothing for one to confirm, so build.py reports the match as "
+                  f"no-result, a warning, and nowhere says a cross-check is "
+                  f"missing, in its report or on its page.")
+        else:
+            print(f"{INDENT}  {first}, so its numbers")
+            print(f"{INDENT}  rest on the set rows alone (F6 warns rather than "
+                  f"refuses).")
     elif failed and not others:
         # forfeit-contradicted names every one, under every rule (4.134).
         pass
     elif failed:
-        # What each was held to, from the check: a played card's reads as it
-        # always did, word for word (4.152), laid out to the width as every
-        # line is (4.186), and where only under some rules, the rules (4.134).
+        # What each was held to, from the check (4.152), laid out to the width
+        # as every line is (4.186), and where only under some rules, the rules
+        # (4.134); and what the build does with it, which is to fail the run and
+        # still record the match as its rows or its box give it, a result or none
+        # (4.426).
         held = in_words(sorted({check.held_to for check in failed}))
-        where = "" if others == combos else f"where {_rules_where(others)}, "
+        where = "" if others == combos else f"Where {_rules_where(others)}, "
         print(f"{INDENT}  A cross-check disagrees with {held}. The card states its "
-              "result more than once and the readings differ, so something was "
-              f"misread; {where}build.py reports this as an error rather than "
-              "scoring it.")
+              "result more than once and the readings differ: something was "
+              "misread or misprinted, or the card counts its rows by a rule the "
+              f"cross-check does not. {where}build.py reports this as an error, "
+              "which fails the run, and still records the match as its set rows "
+              "give it under the club's rules, or as its Match Forfeited box gives "
+              "it if one is ticked.")
     elif reported:
         print(f"{INDENT}  A cross-check disagrees with what the card is scored on, "
               f"and")
@@ -1402,8 +1459,8 @@ def _verdict(page: pdf.Page, *, path: Path, index: int,
         by_words.setdefault(tuple(what for _, what in named), set()).add(combo)
     for words, under in by_words.items():
         print(f"{INDENT}  Where {_rules_where(under)}, the set rows give the match "
-              f"to {card.forfeited_by}, and {scorecard._box(card.forfeited_by)} "
-              f"gives it to {forfeit_match_winner(card.forfeited_by)}"
+              f"to {card.forfeit_side}, and {scorecard._given_up(card)} "
+              f"gives it to {forfeit_match_winner(card.forfeit_side)}"
               f"{validate.as_restating(words)}: build.py reports that once, as "
               "forfeit-contradicted, an error, which fails the run.")
     return 0

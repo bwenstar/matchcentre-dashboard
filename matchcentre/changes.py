@@ -37,6 +37,7 @@ from typing import NamedTuple
 
 from .competition import Round, fixture_sort_key
 from .discover import inside
+from .stats import ladder_state_of
 
 # The order the kinds are printed in, and the order they happened in as far as a
 # club is concerned: what arrived, what moved, what went, and what that did to the
@@ -153,6 +154,18 @@ def _names_a_file(source: object) -> bool:
 # --- fixtures ---------------------------------------------------------------
 
 
+def fixture_of(row: Mapping) -> tuple[str, str, str]:
+    """The three things that identify a document row's fixture: round, home, away.
+
+    The teams by id and as the card printed them, home first. One rule for the
+    comparison below and for both sides of the report's search for where the
+    cards of a dashboard left behind were filed this run (4.457): the stale
+    copy's matches and this run's.
+    """
+    return (str(row.get("round", "")), str(row.get("home", "")),
+            str(row.get("away", "")))
+
+
 def _by_fixture(document: Mapping) -> dict[tuple[str, str, str], Mapping]:
     """Every match in *document*, by the three things that identify a fixture.
 
@@ -164,9 +177,7 @@ def _by_fixture(document: Mapping) -> dict[tuple[str, str, str], Mapping]:
     rows = document.get("matches")
     if not isinstance(rows, (list, tuple)):
         return {}
-    return {(str(row.get("round", "")), str(row.get("home", "")),
-             str(row.get("away", ""))): row
-            for row in rows if isinstance(row, Mapping)}
+    return {fixture_of(row): row for row in rows if isinstance(row, Mapping)}
 
 
 def _subject(row: Mapping) -> str:
@@ -244,7 +255,14 @@ def _places(old: Mapping, new: Mapping) -> list[Change]:
 
     Highest first because that is the order of the table it describes, and because
     a club reading two lines wants the top of the ladder in the first one.
+
+    None out of a ladder that had not started (4.428), whose places were no places:
+    a document this release writes gives such a ladder none, and one release 0.1.0
+    wrote placed its teams by name, so "Riverside Rockets 4th -> 1st" was the
+    alphabet and not a move.
     """
+    if _had_not_started(old):
+        return []
     before, after = _positions(old), _positions(new)
     said = []
     for slug, (place, name) in sorted(after.items(), key=lambda item: item[1][0]):
@@ -254,6 +272,26 @@ def _places(old: Mapping, new: Mapping) -> list[Change]:
         said.append(Change("ladder",
                            f"{name} {_ordinal(was[0])} -> {_ordinal(place)}"))
     return said
+
+
+def _had_not_started(document: Mapping) -> bool:
+    """Whether *document*'s ladder had not started: its ``meta.ladder_state``, or
+    without one, as 0.1.0 wrote none, every team's ``counted`` at nought.
+
+    By :func:`stats.ladder_state_of`, the rule the state is written by. A document
+    that says neither, a team row without a count among them, is taken at its places.
+    """
+    meta = document.get("meta")
+    said = meta.get("ladder_state") if isinstance(meta, Mapping) else None
+    if isinstance(said, str):
+        return said == "empty"
+    rows = document.get("teams")
+    if not isinstance(rows, (list, tuple)) or not all(
+            isinstance(row, Mapping) and isinstance(row.get("counted"), int)
+            for row in rows):
+        return False
+    return ladder_state_of({str(row.get("slug")): row["counted"]
+                            for row in rows}) == "empty"
 
 
 def _positions(document: Mapping) -> dict[str, tuple[int, str]]:

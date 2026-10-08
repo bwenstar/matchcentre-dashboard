@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from matchcentre import format as format_mod                         # noqa: E402
 import matchcentre                                                   # noqa: E402
 from matchcentre import pasteable                                    # noqa: E402
+from matchcentre import pdf                                          # noqa: E402
 from matchcentre import scorecard                                    # noqa: E402
 from matchcentre.cardwriter import NO_TICK                           # noqa: E402
 from matchcentre.model import SetStatus                              # noqa: E402
@@ -671,6 +672,191 @@ class TestTheWashoutTheDemoWritesIsTheOneWorthShipping(unittest.TestCase):
                                flavour=demo.WASHOUT, match_id="4200012",
                                season=demo.SEASON_LABEL)
         return demo.build_card(fixture, self.FMT, "3", "Wednesday", rng)
+
+
+class TestTheDemosNightTheClockStoppedIsLevelOnGamesAndWonOnItsSets(unittest.TestCase):
+    """The seventh special: a last rubber the clock stopped, with no box ticked.
+
+    Row 4.425. A club whose play stops at a fixed hour leaves its last rubber where
+    it stood, 5-4 or 4-2, ticks nothing, and gives a night level on games to the
+    side with more finished sets. The reader failed that card, F6 on the verb and
+    F6 on the tick, and the demo never wrote one, so no demo build showed it. Of
+    24000 cards over 1600 seasons, every format, 2 to 9 teams and seeds 0 to 19
+    (/tmp/mcf/scratch/F6/probe/demo_sweep.py on the tree before this), 0 had a
+    played rubber neither level nor finished: the demo's stopped rubbers were the
+    retired set, its box ticked, and the washout's, ticked Incomplete.
+
+    So the demo writes one. The last rubber is left at ``unfinished_pair`` with no
+    box, the home side leading it, and the finished rubbers go one more to the away
+    side, closest margins first, so the games are level and the card is the away
+    side's on sets: on the plain demo, round 2's second card, 5-6, 6-5, 5-6 and 5-4.
+    Its rows are drawn as an ordinary card's are and then set aside, so every card
+    after it is the card it was.
+
+    Rejected: rows drawn from the generator, which vary with the seed and change
+    every later card of the season, and the README samples with them. Rejected: an
+    ordinary card with its last rubber left unfinished, the retired set without its
+    box, whose games mostly back the side its rows favour, so it would not be the
+    card the reader failed.
+    """
+
+    FMT = format_mod.match_format(demo.DEFAULT_FORMAT)
+
+    def card(self, fmt=None):
+        """One such card's spec, built the way the demo builds it."""
+        rng = random.Random(20260910)
+        teams = demo.make_teams(2, rng)
+        fixture = demo.Fixture(round_index=1, round_label="2",
+                               date=datetime.date(2026, 2, 11), court=2,
+                               home=teams[0], away=teams[1],
+                               flavour=demo.OUT_OF_TIME, match_id="4200004",
+                               season=demo.SEASON_LABEL)
+        return demo.build_card(fixture, fmt or self.FMT, "3", "Wednesday", rng)
+
+    @staticmethod
+    def games(pairs) -> tuple[int, int]:
+        return sum(h for h, _ in pairs), sum(a for _, a in pairs)
+
+    def test_its_last_rubber_stops_where_the_clock_stopped_it_with_no_box_ticked(self):
+        spec, _ = self.card()
+        rule = self.FMT.set_rule
+        *finished, last = spec.rows
+        self.assertEqual((last.home_games, last.away_games), demo.unfinished_pair(rule))
+        self.assertIs(last.status, SetStatus.PLAYED)
+        self.assertFalse(format_mod.completed(last.home_games, last.away_games, rule))
+        for row in finished:
+            self.assertIs(row.status, SetStatus.PLAYED)
+            self.assertTrue(format_mod.completed(row.home_games, row.away_games, rule))
+
+    def test_its_games_are_level_and_its_finished_sets_the_away_sides(self):
+        spec, notes = self.card()
+        pairs = [(row.home_games, row.away_games) for row in spec.rows]
+        self.assertEqual(pairs, [(5, 6), (6, 5), (5, 6), (5, 4)])
+        self.assertEqual(self.games(pairs), (21, 21))
+        self.assertEqual(notes, "Doubles 2 ran out of court time at 5-4 with no box "
+                                "ticked, leaving the games level at 21-21 and the "
+                                "finished sets 1-2")
+        # Three finished rubbers are enough to decide it, so the writer prints the
+        # verb and ticks the side it decides for.
+        self.assertEqual((spec.verb, spec.winner), (demo.AUTO, demo.AUTO))
+
+    def test_the_card_it_writes_reads_back_agreeing_with_itself(self):
+        spec, _ = self.card()
+        with tempfile.TemporaryDirectory() as folder:
+            path = demo.write_card_file(Path(folder) / "card.pdf", spec)
+            card = scorecard.read_page(pdf.extract(path))
+        self.assertEqual((card.verb, card.winner_tick), ("LOSES TO", "away"))
+        self.assertEqual({check.name: check.agrees for check in card.checks},
+                         {"totals": True, "verb": True, "winner-tick": True})
+
+    def test_under_every_set_rule_the_card_reads_back_agreeing_with_itself(self):
+        # Each rule's card is level on games and the away side's on its finished
+        # sets, and the reader, which knows no rule, asks every rule: a reader
+        # asking first-to-6 alone, or the rules of six games, failed the others.
+        for name, rule in sorted(format_mod.SET_RULES.items()):
+            with self.subTest(rule=name):
+                spec, _ = self.card(format_mod.match_format(demo.DEFAULT_FORMAT,
+                                                            rule=rule))
+                pairs = [(row.home_games, row.away_games) for row in spec.rows]
+                home, away = self.games(pairs)
+                self.assertEqual(home, away, pairs)
+                with tempfile.TemporaryDirectory() as folder:
+                    path = demo.write_card_file(Path(folder) / "card.pdf", spec)
+                    card = scorecard.read_page(pdf.extract(path))
+                self.assertEqual((card.verb, card.winner_tick), ("LOSES TO", "away"))
+                self.assertEqual(
+                    {check.name: (check.agrees, check.held_to)
+                     for check in card.checks},
+                    {check: (True, "the set rows")
+                     for check in ("totals", "verb", "winner-tick")})
+
+    def test_every_format_stops_its_last_rubber_and_levels_the_games_where_it_can(self):
+        # Three rubbers of first to 6, two finished, cannot make up the leader's
+        # game, so those formats keep an ordinary card's finished rows.
+        uneven = set()
+        for name in sorted(demo.FORMATS):
+            with self.subTest(format=name):
+                fmt = format_mod.match_format(name)
+                spec, notes = self.card(fmt)
+                rule = fmt.set_rule
+                pairs = [(row.home_games, row.away_games) for row in spec.rows]
+                self.assertEqual(pairs[-1], demo.unfinished_pair(rule))
+                self.assertTrue(all(format_mod.plausible(h, a, rule)
+                                    for h, a in pairs), pairs)
+                self.assertTrue(all(format_mod.completed(h, a, rule)
+                                    for h, a in pairs[:-1]), pairs)
+                self.assertTrue(all(row.status is SetStatus.PLAYED
+                                    for row in spec.rows))
+                home, away = self.games(pairs)
+                if home != away:
+                    uneven.add(name)
+                    self.assertNotIn("level", notes)
+                else:
+                    self.assertGreater(sum(a > h for h, a in pairs[:-1]),
+                                       sum(h > a for h, a in pairs[:-1]), pairs)
+        self.assertEqual(uneven, {"doubles-3", "mixed-3", "singles-3"})
+
+    def test_the_cards_after_it_are_the_cards_they_were(self):
+        drawn = {}
+        for flavour in (demo.NORMAL, demo.OUT_OF_TIME):
+            rng = random.Random(20260818)
+            demo.score_rows(flavour, self.FMT, rng)
+            drawn[flavour] = rng.getstate()
+        self.assertEqual(drawn[demo.OUT_OF_TIME], drawn[demo.NORMAL])
+
+    def test_the_plain_demo_writes_it_once_as_round_2s_second_card(self):
+        rng = random.Random(demo.DEFAULT_SEED)
+        teams = demo.make_teams(6, rng)
+        fixtures, _ = demo.build_fixtures(teams, len(demo.round_robin(6)), "Wednesday")
+        found = [(f.round_label, f.court, f.home.slug, f.away.slug)
+                 for f in fixtures if f.flavour == demo.OUT_OF_TIME]
+        self.assertEqual(found, [("2", 2, "wombats", "bunyips")])
+
+
+class TestTheDemosRetiredSetCardSaysWhoWonTheNightTheRetirementDecides(
+        unittest.TestCase):
+    """The retired-set card prints a verb and ticks a winner where it has a result.
+
+    4.422: a set one side retired from is the other side's, so the demo's card
+    with the away side retiring in the last rubber has every rubber decided. Its
+    ``decided`` counted the retired row unfinished, which was the model's count
+    and is no longer, so on a format whose result needs every rubber the card left
+    its verb and tick blank over a night the build scores. Measured on
+    ``--format doubles-3`` through ``build.py`` (/tmp/mcf/scratch/RUBBER/demo3/,
+    base and mine): quolls v magpies, 2-6 1-6 5-4 with the away side retiring,
+    was ``no-result`` on the base and is now counted to magpies on sets 2-1, under
+    a card that says nothing of who won. Now ``decided`` counts a row one side
+    retired from as finished, as ``SetResult.completed`` does. Rejected: retiring
+    the home side instead, which would only move the night the card is silent on.
+    """
+
+    def card(self, name: str):
+        fmt = format_mod.match_format(name)
+        rng = random.Random(20260910)
+        teams = demo.make_teams(2, rng)
+        fixture = demo.Fixture(round_index=3, round_label="4",
+                               date=datetime.date(2026, 2, 25), court=1,
+                               home=teams[0], away=teams[1],
+                               flavour=demo.RETIRED, match_id="4200013",
+                               season=demo.SEASON_LABEL)
+        spec, _ = demo.build_card(fixture, fmt, "3", "Wednesday", rng)
+        return spec
+
+    def test_every_formats_retired_card_prints_a_verb_and_ticks_a_winner(self):
+        for name in sorted(demo.FORMATS):
+            with self.subTest(format=name):
+                spec = self.card(name)
+                self.assertEqual(spec.rows[-1].status, SetStatus.RETIRED)
+                self.assertEqual((spec.verb, spec.winner), (demo.AUTO, demo.AUTO))
+
+    def test_the_card_it_writes_reads_back_with_every_check_agreeing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            demo.write_card_file(Path(tmp) / "retired.pdf", self.card("doubles-3"))
+            (card,), _ = scorecard.read_tree(tmp)
+        self.assertEqual([(c.name, c.available, c.agrees) for c in card.checks],
+                         [("totals", True, True), ("verb", True, True),
+                          ("winner-tick", True, True)],
+                         [c.detail for c in card.checks])
 
 
 # --- two seasons, for the careers page --------------------------------------

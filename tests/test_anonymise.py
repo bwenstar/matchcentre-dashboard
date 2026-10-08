@@ -1444,6 +1444,20 @@ class TestEveryFieldOfTheSeasonDocumentHasAClass(unittest.TestCase):
         self.assertIn("rounds[].numbered", leaves)
         self.assertEqual(anonymise.classify("rounds[].numbered"), anonymise.PROGRAM)
 
+    def test_a_round_s_count_of_cards_played_is_the_programs(self):
+        """``rounds[].cards_played`` is a count of the round's own cards, as ``cards`` is.
+
+        How many of them count as played, by ``Match.counts_as_played``, which a
+        withheld build keeps as it is, as it keeps ``rounds[].cards``
+        (TestARoundEveryCardOfWhichWasCalledOffSaysNoneOfItsCardsWasPlayed, 4.452).
+        Rejected: free text, which is what an unclassed field is read as, and a
+        count is no text to check.
+        """
+        leaves = set().union(*(_leaf_patterns(doc) for doc in
+                               documents(demo() / "named") + documents(edge() / "named")))
+        self.assertIn("rounds[].cards_played", leaves)
+        self.assertEqual(anonymise.classify("rounds[].cards_played"), anonymise.PROGRAM)
+
     def test_a_team_s_win_rate_is_the_programs(self):
         """``teams[].win_pct`` is ``set_win_pct`` of the row's own sets, as a player's is.
 
@@ -2803,7 +2817,10 @@ class TestAPlayersLineTheBuildCannotHonourStopsTheBuild(CliCase):
                 (self.cwd / "config.toml").write_text(
                     f'[build]\n{build}\n\n[club]\nplayers = "names"\n',
                     encoding="utf-8")
-                done = self.build()
+                # Moved by 4.430: exit 1, since the first build printed names and
+                # wrote careers.html, which a run withholding names lists as left
+                # behind until it is pruned.
+                done = self.build(expect=1)
                 said = " ".join(done.out.split())
                 self.assertIn("[club] players is not a setting this program "
                               "understands and was ignored.", said)
@@ -2847,7 +2864,9 @@ class TestThePlayersFlagWinsForOneRunAndIsNeverSaved(CliCase):
 
     def test_discover_does_not_save_it(self):
         self.build()
-        self.build("--discover", "--force", "--players", "numbered")
+        # Moved by 4.430: exit 1, since the names build wrote careers.html, which
+        # a run withholding names lists as left behind until it is pruned.
+        self.build("--discover", "--force", "--players", "numbered", expect=1)
         self.assertEqual(config_mod.load(self.cwd / "config.toml").players_mode,
                          "names")
 
@@ -2914,7 +2933,8 @@ class TestANamesBuildReportsWhatItAlwaysDid(CliCase):
     def test_no_players_line_and_the_same_rules(self):
         named = self.build()
         self.assertNotRegex(named.out, r"(?m)^\s+players\s")
-        withheld = self.build("--players", "numbered")
+        # Moved by 4.430: exit 1, for the careers page the names build wrote.
+        withheld = self.build("--players", "numbered", expect=1)
         self.assertEqual(self.section(withheld.out, "rules in force"),
                          self.section(named.out, "rules in force"))
 
@@ -2936,8 +2956,11 @@ class TestADashboardLeftBehindWithNamesFailsAWithheldRun(CliCase):
         self.assertIn("      no card under data belongs to it any more\n"
                       "      it prints players' names, and this run withholds them\n",
                       done.out)
-        self.assertIn("exit 1: all 6 card(s) scored, no errors and 1 dashboard(s) "
-                      "still print\n          players' names\n", done.out)
+        # Moved by 4.430: the names build wrote careers.html too, which still
+        # prints names and is the line's second clause; the prune removes it.
+        self.assertIn("exit 1: all 6 card(s) scored, no errors, 1 dashboard(s) "
+                      "still print players'\n          names and careers.html "
+                      "still prints players' names\n", done.out)
         self.build("--players", "numbered", "--prune")
         self.assertFalse((self.cwd / "site" / "thursday-division-f").exists())
 
@@ -3030,7 +3053,8 @@ class TestRebuildingWithNamesOverAWithheldDashboardIsSaidOutLoud(CliCase):
                 "this run\n")
         self.assertIn(line, self.build("--quiet", "--players", "names",
                                        "--out", "site").out)
-        self.build("--players", "numbered")
+        # Moved by 4.430: exit 1, for the careers page the names build wrote.
+        self.build("--players", "numbered", expect=1)
         self.assertIn("  players      names: site/tuesday-division-b withholds them, "
                       "and a build\n               would not\n",
                       self.build("--check").out)
@@ -3046,10 +3070,12 @@ class TestSwitchingToWithheldNamesChangesNoResult(CliCase):
 
     def test_no_change_and_the_same_bytes(self):
         self.build()
-        first = self.build("--players", "numbered")
+        # Moved by 4.430: both exit 1, for the careers page the names build wrote,
+        # which neither prunes.
+        first = self.build("--players", "numbered", expect=1)
         self.assertNotIn("== since the last build", first.out)
         again = self.build("--players", "numbered",
-                           "--generated", "2026-09-17T12:00:00")
+                           "--generated", "2026-09-17T12:00:00", expect=1)
         self.assertIn("wrote        nothing", again.out)
         self.assertEqual(self.season()["meta"]["generated"], STAMP)
 
@@ -3185,6 +3211,48 @@ class TestEachSeasonIsNumberedOnItsOwn(CliCase):
                                  sorted(f"{name.title()} #{n}"
                                         for name, _ in TEAMS.values()
                                         for n in (1, 2, 3)))
+
+
+class TestTheLaddersStateItsLeaderAndTheNightsPlayedAreThePrograms(unittest.TestCase):
+    """``meta.ladder_state``, ``meta.leader`` and ``meta.matches_played`` (4.428-4.440).
+
+    The state and the count are the build's own answers, kept as a withheld build
+    keeps ``meta.ladder_complete`` and ``meta.matches_total``; the leader is a team's
+    slug, a label as ``teams[].slug`` is, and its figure is the row's
+    ``points_average``. Rejected: free text, which is what an unclassed field is
+    read as, and none of them is text to check for a name.
+    """
+
+    def test_each_is_classed_as_the_field_it_comes_from(self):
+        leaves = set().union(*(_leaf_patterns(doc) for doc in
+                               documents(demo() / "named") + documents(edge() / "named")))
+        for field, cls in (("meta.ladder_state", anonymise.PROGRAM),
+                           ("meta.matches_played", anonymise.PROGRAM),
+                           ("meta.leader.slug", anonymise.LABEL),
+                           ("meta.leader.value", anonymise.PROGRAM)):
+            with self.subTest(field=field):
+                self.assertIn(field, leaves)
+                self.assertEqual(anonymise.classify(field), cls)
+
+    def test_a_season_that_names_no_leader_is_classed_too(self):
+        # Null where the ladder is not settled, so the field is a leaf of its own.
+        self.assertEqual(anonymise.classify("meta.leader"), anonymise.PROGRAM)
+
+
+
+class TestTheLaddersSentenceIsTheProgramsToo(unittest.TestCase):
+    """``meta.ladder_detail``, the words F10's state is said in (4.458).
+
+    Built from counts and nothing a club typed, as ``meta.rules.unplayed_detail``
+    is, so it is classed with it and kept. Rejected: leaving it unclassed, which
+    reads it as free text to check for names it cannot hold.
+    """
+
+    def test_it_is_classed_as_the_program_s_own(self):
+        leaves = set().union(*(_leaf_patterns(doc) for doc in
+                               documents(demo() / "named") + documents(edge() / "named")))
+        self.assertIn("meta.ladder_detail", leaves)
+        self.assertEqual(anonymise.classify("meta.ladder_detail"), anonymise.PROGRAM)
 
 
 if __name__ == "__main__":

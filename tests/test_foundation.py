@@ -69,7 +69,7 @@ def make_match(scores=((6, 1), (6, 2), (1, 6), (6, 0)), *, home="rockets",
 class TestSlugs(unittest.TestCase):
 
     def test_accents_and_punctuation_fold_away(self):
-        self.assertEqual(slugs.slugify("Guillaume Évrard"), "guillaume-evrard")
+        self.assertEqual(slugs.slugify("Margaux Écrin"), "margaux-ecrin")
         self.assertEqual(slugs.slugify("O'Brien-Smith"), "o-brien-smith")
         self.assertEqual(slugs.slugify("  Spaced   Out  "), "spaced-out")
 
@@ -140,6 +140,27 @@ class TestSlugs(unittest.TestCase):
         self.assertEqual(slugs.display_name("RTC"), "RTC")
         self.assertEqual(slugs.display_name("ACES"), "Aces")
         self.assertEqual(slugs.display_name("WDTA"), "Wdta")
+
+    def test_the_abbreviations_the_check_s_comment_names_are_ones_it_keeps(self):
+        """The comment on the abbreviation check names only words the check keeps.
+
+        It named a four-letter acronym beside RTC as a word the check keeps, over a
+        check that keeps a word of three letters or fewer, so a reader of that line
+        was told the acronym stays in capitals where the test above pins it title
+        cased. Measured on the base (/tmp/mcf/scratch/CASE/before.txt): RTC and TC
+        are kept, and the comment's four-letter acronym and ABCD are title-cased.
+        Rejected: a cut of four, which keeps the comment true by changing NORTHSIDE
+        NETS to ``Northside NETS``.
+        """
+        source = (ROOT / "matchcentre" / "slugs.py").read_text(encoding="utf-8")
+        said = re.findall(r"#\s*(.*?)\s*—\s*an abbreviation, keep it", source)
+        self.assertEqual(len(said), 1, said)
+        # Abbreviations and nothing else, so no other word claims one the check
+        # title-cases: "any four-letter one" beside them read as one would.
+        self.assertRegex(said[0], r"^[A-Z]{2,}(?:, [A-Z]{2,})+$")
+        for word in said[0].split(", "):
+            with self.subTest(word):
+                self.assertEqual(slugs.display_name(word), word)
 
     def test_unslug_is_the_last_resort_display_name(self):
         self.assertEqual(slugs.unslug("riverside-rockets"), "Riverside Rockets")
@@ -304,6 +325,29 @@ class TestAOneLetterAIsATeamsLetterUnlessItReadsAsTheArticle(unittest.TestCase):
         self.assertEqual(slugs.display_name("WORTH A 1000 WORDS"),
                          "Worth A 1000 Words")
         self.assertEqual(slugs.display_name("HILLTOP A 2"), "Hilltop A 2")
+
+    def test_a_letter_after_a_word_that_names_one_reads_as_the_article(self):
+        """RIVERSIDE VITAMIN A ROCKETS is ``Riverside Vitamin a Rockets``, the known
+        cost of KINGS OF A COURT reading ``Kings of a Court``.
+
+        An A before a word is the article unless an article stands before it or the
+        word is one a team's letter stands before, so a letter after a word that names
+        one is lowered before any other word. Measured on the base
+        (/tmp/mcf/scratch/CASE/before.txt): ``Riverside Vitamin a Rockets`` in
+        ``season.json``, the report and the starter config's offer, PLAN A ROCKETS
+        ``Plan a Rockets`` and PLAN A PARTY ``Plan a Party``, while VITAMIN A, the A
+        closing the name, keeps it. ``[team_names]`` spells the name, and the note
+        the first run writes over that table names this guess. Pinned, as the
+        four-letter cut is, so the reading is a decision on record. Rejected: a list
+        of words before the A that name a letter (VITAMIN, PLAN), which makes PLAN A
+        PARTY ``Plan A Party``; and putting ROCKETS on the words a team's letter
+        stands before, a word of one team's name.
+        """
+        self.assertEqual(slugs.display_name("RIVERSIDE VITAMIN A ROCKETS"),
+                         "Riverside Vitamin a Rockets")
+        self.assertEqual(slugs.display_name("PLAN A ROCKETS"), "Plan a Rockets")
+        self.assertEqual(slugs.display_name("PLAN A PARTY"), "Plan a Party")
+        self.assertEqual(slugs.display_name("VITAMIN A"), "Vitamin A")
 
 
 class TestAShoutedWordIsCapitalisedAtItsFirstLetterAndNotAtAMarkBeforeIt(
@@ -935,7 +979,8 @@ class TestUnderRubbersAWholeMatchForfeitPaysTheSideThatCameEveryRubber(
 
     Rejected: 0.0/0.0, which pays the side that turned up nothing. Also rejected: a
     setting for what a forfeit is worth. This is a defect in one scheme, and no
-    club can set ``forfeit_award`` today.
+    club can set ``forfeit_award`` today. (4.420 later made it a ``[rules]``
+    setting, ``full-games`` by default, which pays these the same.)
     """
 
     RUBBERS = scoring.ruleset("rubbers")
@@ -1038,13 +1083,286 @@ class TestARubbersSchemeSaysWhatItPaysAMatchForfeitedWhole(unittest.TestCase):
                                 "games then sets"),
                 ("sets-first", "win 2, draw 1, loss 0; decided on sets then games"),
                 ("simple", "win 3, draw 1, loss 0; decided on sets then games")):
-            # Whatever its award: under full-games games-bonus pays a win and the
-            # games of every rubber, which the clause for sets won does not say.
-            for award in ("as-played", "full-games"):
+            # 4.420 moved this: what it said is said under as-played alone, the
+            # award that pays a forfeit as a played match, since full-games pays
+            # the side that gave the match up nothing and now says so
+            # (TestAForfeitPaidOtherwiseThanAsPlayedIsSaidBesideTheScheme).
+            for award in ("as-played",):
                 with self.subTest(preset=name, award=award):
                     self.assertEqual(dataclasses.replace(
                         scoring.ruleset(name), forfeit_award=award).describe(),
                         said)
+
+
+class TestAForfeitPaidOtherwiseThanAsPlayedIsSaidBesideTheScheme(unittest.TestCase):
+    """``Ruleset.describe`` says what a match forfeited whole pays, unless as played.
+
+    4.305: measured on the tree before this (/tmp/mcf/scratch/CANCEL/probe/
+    describe.py, output describe-before.txt), games-bonus paid a forfeit 5.0 under
+    ``fixed`` at 5 points and 6.4 under ``full-games``, and described itself both
+    times as "win 4, draw 3, loss 2, 0.1 per game; decided on games then sets",
+    the sentence it has as played, where it pays 4.0; sets-first and simple said
+    nothing of a fixed 5 points either. Only a scheme paying the sets won had a
+    forfeit clause. The sentence is the one the run report, season.json's
+    ``scoring_detail``, the page and config.toml's option table print, and with
+    ``full-games`` every preset's award (4.420) a scheme saying nothing would say
+    a forfeiter is paid a loss it is not paid.
+
+    Now the clause is written whenever the award is not ``as-played`` or the
+    points are the sets won: a fixed award as its points, ``full-games`` as a win,
+    with every rubber a love set where the scheme pays games or sets on top, and,
+    where the scheme's loss is not 0, what the side that gave the match up is paid.
+    Rejected: writing it only where the price differs from a played match's, which
+    makes the sentence depend on arithmetic a club cannot see, so that sets-first
+    and simple would say nothing of an award they apply.
+    """
+
+    WHOLE = "a match forfeited whole pays the side that turned up"
+
+    def test_each_preset_says_what_its_forfeit_pays(self):
+        for name, said in (
+                ("games-bonus", f"win 4, draw 3, loss 2, 0.1 per game; {self.WHOLE} "
+                                f"a win with every rubber a love set, and the side "
+                                f"that gave it up 0; decided on games then sets"),
+                ("sets-first", f"win 2, draw 1, loss 0; {self.WHOLE} a win; "
+                               f"decided on sets then games"),
+                ("rubbers", f"points = sets won; {self.WHOLE} every rubber; "
+                            f"decided on sets then games"),
+                ("simple", f"win 3, draw 1, loss 0; {self.WHOLE} a win; decided "
+                           f"on sets then games")):
+            with self.subTest(preset=name):
+                self.assertEqual(scoring.ruleset(name).describe(), said)
+
+    def test_a_fixed_award_is_said_as_its_points_under_every_preset(self):
+        for name, said in (
+                ("games-bonus", f"win 4, draw 3, loss 2, 0.1 per game; {self.WHOLE} "
+                                f"3 points, and the side that gave it up 0; "
+                                f"decided on games then sets"),
+                ("sets-first", f"win 2, draw 1, loss 0; {self.WHOLE} 3 points; "
+                               f"decided on sets then games"),
+                ("rubbers", f"points = sets won; {self.WHOLE} 3 points; decided "
+                            f"on sets then games"),
+                ("simple", f"win 3, draw 1, loss 0; {self.WHOLE} 3 points; "
+                           f"decided on sets then games")):
+            with self.subTest(preset=name):
+                rules = dataclasses.replace(scoring.ruleset(name),
+                                            forfeit_award="fixed",
+                                            forfeit_points=3.0)
+                self.assertEqual(rules.forfeit_win_points(DSSD), 3.0)
+                self.assertEqual(rules.describe(), said)
+
+    def test_a_scheme_paying_a_set_bonus_says_every_rubber_a_love_set_too(self):
+        rules = scoring.Ruleset(name="x", win=2.0, draw=1.0, loss=1.0,
+                                set_bonus=0.5, decide_by=("sets", "games"))
+        self.assertEqual(rules.describe(),
+                         f"win 2, draw 1, loss 1, 0.5 per set; {self.WHOLE} a win "
+                         f"with every rubber a love set, and the side that gave it "
+                         f"up 0; decided on sets then games")
+        self.assertEqual(rules.forfeit_win_points(DSSD), 4.0)
+
+    def test_as_played_says_nothing_of_a_forfeit_but_where_sets_won_are_paid(self):
+        for name in scoring.RULESETS:
+            rules = dataclasses.replace(scoring.ruleset(name),
+                                        forfeit_award="as-played")
+            with self.subTest(preset=name):
+                self.assertEqual(self.WHOLE in rules.describe(),
+                                 rules.points_are_sets_won)
+
+
+class TestAMatchGivenUpWholeIsPaidWhatTheConfigSaysAForfeitIsWorth(
+        unittest.TestCase):
+    """What a whole-match forfeit pays is the scheme's ``forfeit_award``, never a card's.
+
+    Measured on the tree before this (/tmp/mcf/scratch/CANCEL/probe/describe.py,
+    output describe-before.txt; and probe.py's box-forfeit, rows-ticked and
+    box-forfeit-over-play cases beside the season through build.py): every
+    preset's ``forfeit_award`` was ``as-played``, so a Match Forfeited box over
+    rows left 0-0 paid 4.0/2.0 under games-bonus, 2.0/0.0 under sets-first,
+    4.0/0.0 under rubbers and 3.0/0.0 under simple, and the box over 6-2, 6-3, 2-6
+    and 6-1 paid 6.0/3.2 under games-bonus, the side that gave the match up being
+    paid more than a loss. Under ``full-games`` the box paid 6.4 and still 2.0, as
+    ``forfeit_loss_points`` paid the scheme's loss whatever the award, against the
+    FORFEIT_AWARDS comment's "the forfeiter nothing"; and the night told by its
+    rows alone, every row 0-0 and ticked Forfeit against the away side, paid
+    4.0/2.0 under every award, as the played match its status says. The owner's
+    club pays a forfeit 6.4 to the side that came and 0 to the side that gave it
+    up, which is ``forfeit_win_points`` under ``full-games`` over four first-to-6
+    rubbers, and Match Centre's own TOTAL row of a walkover is that award.
+
+    Now every preset's award is ``full-games``, the side that gave the match up is
+    paid nothing outside ``as-played``, and one reading of who gave it up,
+    ``Match.given_up_by``, answers for the box, for a walkover's card (4.418,
+    whose match the box's status carries) and for the night told by its rows, so
+    the three tellings of 4.33 are paid alike under every award. Rejected:
+    keeping ``as-played`` the default and adding only the key, which leaves the
+    owner's walkovers paid 2.4 short and their forfeiters 2.0 over until the club
+    finds the line; pricing from the TOTAL row, which a card may leave out and
+    which 4.135 holds only as a cross-check; and a ``forfeit_loss`` key, which no
+    club on record asks for.
+    """
+
+    EMPTY = ((0, 0),) * 4
+    OVER_PLAY = ((6, 2), (6, 3), (2, 6), (6, 1))
+    AWARDS = {"as-played": None, "full-games": None, "fixed": 5.0}
+    # (preset, award) -> paid (home, away) when the away side gives the night up,
+    # told by the box or by its rows; then the box over OVER_PLAY.
+    PRICES = {
+        ("games-bonus", "as-played"): ((4.0, 2.0), (6.0, 3.2)),
+        ("games-bonus", "full-games"): ((6.4, 0.0), (6.4, 0.0)),
+        ("games-bonus", "fixed"): ((5.0, 0.0), (5.0, 0.0)),
+        ("sets-first", "as-played"): ((2.0, 0.0), (2.0, 0.0)),
+        ("sets-first", "full-games"): ((2.0, 0.0), (2.0, 0.0)),
+        ("sets-first", "fixed"): ((5.0, 0.0), (5.0, 0.0)),
+        ("rubbers", "as-played"): ((4.0, 0.0), (4.0, 0.0)),
+        ("rubbers", "full-games"): ((4.0, 0.0), (4.0, 0.0)),
+        ("rubbers", "fixed"): ((5.0, 0.0), (5.0, 0.0)),
+        ("simple", "as-played"): ((3.0, 0.0), (3.0, 0.0)),
+        ("simple", "full-games"): ((3.0, 0.0), (3.0, 0.0)),
+        ("simple", "fixed"): ((5.0, 0.0), (5.0, 0.0)),
+    }
+
+    @staticmethod
+    def paid(match: Match) -> tuple[float | None, float | None]:
+        home, away = match.points_for("rockets"), match.points_for("iguanas")
+        return (None if home is None else round(home, 6),
+                None if away is None else round(away, 6))
+
+    @classmethod
+    def priced(cls, name: str, award: str) -> scoring.Ruleset:
+        return dataclasses.replace(scoring.ruleset(name), forfeit_award=award,
+                                   forfeit_points=cls.AWARDS[award])
+
+    def boxed(self, rules, scores=EMPTY, by="away") -> Match:
+        return make_match(scores, rules=rules, status=MatchStatus.FORFEIT,
+                          forfeited_by=by)
+
+    def told(self, rules, by="away") -> Match:
+        return dataclasses.replace(make_match(self.EMPTY, rules=rules), sets=tuple(
+            dataclasses.replace(s, status=SetStatus.FORFEIT,
+                                **{f"{by}_forfeit": True})
+            for s in make_sets(self.EMPTY)))
+
+    def test_every_preset_pays_a_forfeit_in_full_unless_the_club_says_otherwise(self):
+        self.assertEqual({name: rules.forfeit_award
+                          for name, rules in scoring.RULESETS.items()},
+                         dict.fromkeys(scoring.RULESETS, "full-games"))
+        self.assertEqual(scoring.Ruleset(name="x", win=1, draw=0, loss=0)
+                         .forfeit_award, "full-games")
+
+    def test_the_price_under_each_preset_and_award_is_one_however_it_is_told(self):
+        self.assertEqual(set(self.PRICES),
+                         set(itertools.product(scoring.RULESETS, self.AWARDS)))
+        for (name, award), (empty, over_play) in self.PRICES.items():
+            rules = self.priced(name, award)
+            with self.subTest(preset=name, award=award):
+                self.assertEqual(self.paid(self.boxed(rules)), empty)
+                self.assertEqual(self.paid(self.told(rules)), empty)
+                self.assertEqual(self.paid(self.boxed(rules, self.OVER_PLAY)),
+                                 over_play)
+
+    def test_the_home_side_giving_it_up_is_paid_the_mirror(self):
+        for (name, award), (empty, _) in self.PRICES.items():
+            rules = self.priced(name, award)
+            with self.subTest(preset=name, award=award):
+                self.assertEqual(self.paid(self.boxed(rules, by="home")),
+                                 empty[::-1])
+                self.assertEqual(self.paid(self.told(rules, by="home")),
+                                 empty[::-1])
+
+    def test_the_side_that_gave_it_up_is_paid_a_loss_only_as_played(self):
+        for name in scoring.RULESETS:
+            for award in self.AWARDS:
+                rules = self.priced(name, award)
+                with self.subTest(preset=name, award=award):
+                    self.assertEqual(
+                        rules.forfeit_loss_points(DSSD),
+                        rules.loss if award == "as-played"
+                        and not rules.points_are_sets_won else 0.0)
+
+    def test_a_night_neither_box_nor_rows_give_up_is_paid_as_played(self):
+        # One row left 0-0 and ticked Forfeit, three played: a rubber given up, not
+        # the match, though the one row alone says what a forfeit's rows say.
+        rows = make_sets(((0, 0),) + self.OVER_PLAY[1:])
+        rows = (dataclasses.replace(rows[0], status=SetStatus.FORFEIT,
+                                    away_forfeit=True),) + rows[1:]
+        for name in scoring.RULESETS:
+            rules = self.priced(name, "full-games")
+            with self.subTest(preset=name):
+                match = dataclasses.replace(make_match(rules=rules), sets=rows)
+                self.assertIsNone(match.given_up_by)
+                self.assertEqual(self.paid(match), (
+                    rules.points(outcome="win", games_won=match.games_for("rockets"),
+                                 sets_won=match.sets_for("rockets")),
+                    rules.points(outcome="loss",
+                                 games_won=match.games_for("iguanas"),
+                                 sets_won=match.sets_for("iguanas"))))
+
+
+class TestWhoGaveAMatchUpIsOneReadingOfEveryTellingOfIt(unittest.TestCase):
+    """``Match.given_up_by``: the side that gave the whole match up, however told.
+
+    4.33 found three tellings of one night: the Match Forfeited box over rows left
+    0-0; the box over rows naming nobody; and no box, every row 0-0 and ticked
+    Forfeit against the one side. 4.418 adds a fourth, the walkover Match Centre
+    writes as Match Cancelled beside a winner and the award, which discover
+    builds with the box's status. Before this the box was read by status alone,
+    so the night told by its rows was priced as played (the class above
+    measures it) and asked for the roster of the side that never came (4.288).
+    Now one derived reading answers for all of them, and the status and
+    ``forfeited_by`` stay as the card printed them. Rejected: promoting the rows'
+    telling to status FORFEIT, which records a box nobody ticked (4.15).
+    """
+
+    EMPTY = ((0, 0),) * 4
+
+    def told(self, *flags, scores=EMPTY, status=MatchStatus.PLAYED) -> Match:
+        """A night whose rows are ticked Forfeit, row by row, against *flags*."""
+        rows = tuple(dataclasses.replace(
+            s, status=SetStatus.FORFEIT, home_forfeit="home" in flag,
+            away_forfeit="away" in flag)
+            for s, flag in zip(make_sets(scores), flags))
+        return dataclasses.replace(make_match(scores, status=status), sets=rows)
+
+    def test_the_box_names_the_side_that_gave_it_up(self):
+        for side in ("home", "away"):
+            with self.subTest(side=side):
+                match = make_match(self.EMPTY, status=MatchStatus.FORFEIT,
+                                   forfeited_by=side)
+                self.assertEqual(match.given_up_by, side)
+
+    def test_a_box_naming_no_one_side_names_nobody(self):
+        for by in (None, "both"):
+            with self.subTest(by=by):
+                self.assertIsNone(make_match(self.EMPTY, status=MatchStatus.FORFEIT,
+                                             forfeited_by=by).given_up_by)
+
+    def test_rows_each_left_empty_and_ticked_against_one_side_name_it(self):
+        for side in ("home", "away"):
+            with self.subTest(side=side):
+                match = self.told(*([(side,)] * 4))
+                self.assertEqual(match.given_up_by, side)
+                self.assertIs(match.status, MatchStatus.PLAYED)
+                self.assertIsNone(match.forfeited_by)
+
+    def test_rows_that_do_not_all_say_so_name_nobody(self):
+        for name, match in (
+                ("one row ticked against the other side",
+                 self.told(("away",), ("away",), ("away",), ("home",))),
+                ("one row ticked against both", self.told(
+                    ("away",), ("away",), ("away",), ("home", "away"))),
+                ("every row ticked against both",
+                 self.told(*([("home", "away")] * 4))),
+                ("every row ticked against nobody", self.told(*([()] * 4))),
+                ("one row not ticked", dataclasses.replace(
+                    self.told(*([("away",)] * 4)), sets=self.told(
+                        *([("away",)] * 4)).sets[:3] + make_sets(self.EMPTY)[3:])),
+                ("rows ticked over games", self.told(
+                    *([("away",)] * 4), scores=((6, 0),) * 4)),
+                ("a washout", self.told(*([("away",)] * 4),
+                                        status=MatchStatus.CANCELLED)),
+                ("a played night", make_match())):
+            with self.subTest(night=name):
+                self.assertIsNone(match.given_up_by)
 
 
 class TestAWholeMatchForfeitGoesToTheSideTheBoxDoesNotName(unittest.TestCase):
@@ -1193,6 +1511,289 @@ class TestASetStoppedWithNoBoxTickedIsOneRule(unittest.TestCase):
                                      .unfinished_unmarked)
 
 
+class TestARubberNotPlayedOutIsScoredByOneRuleBesideWhoWonIt(unittest.TestCase):
+    """``model.rubber_award``: the side and the games a rubber not played out scores.
+
+    4.421: a rubber ticked Forfeit against one side kept the games printed on its
+    row, so under ``games-bonus``, decided on games, the side whose rubbers were
+    awarded against it won the night on the games it won on court in them.
+    Measured (``/tmp/mcf/scratch/RUBBER/probe/before.txt``, case A): rows 2-6,
+    6-2, 1-6, 3-6, the away box ticked on three, were scored away 12-20 and paid
+    3.2 to 6.0, where the card's TOTAL row, Match Centre's own arithmetic, says
+    sets 4-0 and games 24-2. 4.422: a rubber whose Retired box is ticked went to
+    nobody at its printed games, where Match Centre gives the side that did not
+    retire the set, its games raised to the set's ``games_to_win``, and leaves the
+    retiring side its own. One function prices both, beside
+    ``forfeit_set_winner``, so discover, validate, the reader and the writer ask
+    one rule of a row and of a match given up whole.
+
+    Rejected: crediting a retired set to the side ahead, since a real card's home
+    side retired leading 4-2 and the away side was given the set; raising a
+    retired rubber's games under ``as-played``, whose point is that the printed
+    games stand; and keeping a match given up whole at the games its rows print,
+    since Match Centre totals such a night 24-0 even over rows that hold play.
+    """
+
+    def award(self, status, games, **flags):
+        return model_mod.rubber_award(status=status, home_games=games[0],
+                                      away_games=games[1], **flags)
+
+    def test_a_rubber_ticked_against_one_side_is_a_love_set_to_the_side_that_came(
+            self):
+        for gtw in (6, 4, 8, 10):
+            for award in ("full-games", "fixed"):
+                with self.subTest(games_to_win=gtw, award=award):
+                    self.assertEqual(
+                        self.award(SetStatus.FORFEIT, (2, 6), away_forfeit=True,
+                                   games_to_win=gtw, award=award),
+                        ("home", gtw, 0))
+                    self.assertEqual(
+                        self.award(SetStatus.FORFEIT, (6, 2), home_forfeit=True,
+                                   games_to_win=gtw, award=award),
+                        ("away", 0, gtw))
+
+    def test_as_played_names_the_side_that_came_at_the_printed_games(self):
+        self.assertEqual(self.award(SetStatus.FORFEIT, (2, 6), away_forfeit=True,
+                                    games_to_win=6, award="as-played"),
+                         ("home", 2, 6))
+        self.assertEqual(self.award(SetStatus.FORFEIT, (0, 0), home_forfeit=True,
+                                    games_to_win=6, award="as-played"),
+                         ("away", 0, 0))
+
+    def test_a_rubber_ticked_against_both_sides_or_neither_keeps_its_games(self):
+        for award in ("full-games", "fixed", "as-played"):
+            for ticks in ({"home_forfeit": True, "away_forfeit": True}, {}):
+                with self.subTest(award=award, ticks=ticks):
+                    self.assertIsNone(self.award(SetStatus.FORFEIT, (2, 6),
+                                                 games_to_win=6, award=award,
+                                                 **ticks))
+
+    def test_a_retired_rubber_goes_to_the_side_that_stayed_raised_to_win_it(self):
+        for games, flags, gtw, scored in (
+                ((5, 1), {"away_retired": True}, 6, ("home", 6, 1)),
+                ((4, 2), {"home_retired": True}, 6, ("away", 4, 6)),
+                ((0, 0), {"away_retired": True}, 6, ("home", 6, 0)),
+                ((5, 3), {"home_retired": True}, 6, ("away", 5, 6)),
+                ((7, 6), {"away_retired": True}, 6, ("home", 7, 6)),
+                ((3, 1), {"away_retired": True}, 4, ("home", 4, 1)),
+                ((1, 7), {"home_retired": True}, 8, ("away", 1, 8))):
+            for award in ("full-games", "fixed"):
+                with self.subTest(games=games, flags=flags, award=award):
+                    self.assertEqual(self.award(SetStatus.RETIRED, games,
+                                                games_to_win=gtw, award=award,
+                                                **flags), scored)
+
+    def test_as_played_gives_a_retired_rubber_to_the_side_that_stayed_as_printed(
+            self):
+        self.assertEqual(self.award(SetStatus.RETIRED, (4, 2), home_retired=True,
+                                    games_to_win=6, award="as-played"),
+                         ("away", 4, 2))
+        self.assertEqual(self.award(SetStatus.RETIRED, (5, 1), away_retired=True,
+                                    games_to_win=6, award="as-played"),
+                         ("home", 5, 1))
+
+    def test_a_retired_rubber_with_both_boxes_or_neither_is_nobodys(self):
+        for award in ("full-games", "fixed", "as-played"):
+            for boxes in ({"home_retired": True, "away_retired": True}, {}):
+                with self.subTest(award=award, boxes=boxes):
+                    self.assertIsNone(self.award(SetStatus.RETIRED, (5, 1),
+                                                 games_to_win=6, award=award,
+                                                 **boxes))
+
+    def test_a_rubber_played_or_left_incomplete_is_not_priced(self):
+        for status, games in ((SetStatus.PLAYED, (6, 2)),
+                              (SetStatus.INCOMPLETE, (5, 1))):
+            for award in ("full-games", "as-played"):
+                with self.subTest(status=status.value, award=award):
+                    self.assertIsNone(self.award(status, games, games_to_win=6,
+                                                 award=award))
+
+    def test_a_match_given_up_whole_makes_every_rubber_a_love_set_to_who_came(
+            self):
+        rows = ((SetStatus.PLAYED, (2, 6), {}), (SetStatus.PLAYED, (0, 0), {}),
+                (SetStatus.FORFEIT, (3, 6), {"home_forfeit": True,
+                                             "away_forfeit": True}),
+                (SetStatus.RETIRED, (4, 2), {"home_retired": True}),
+                (SetStatus.INCOMPLETE, (3, 3), {}))
+        for status, games, flags in rows:
+            for award in ("full-games", "fixed"):
+                with self.subTest(status=status.value, games=games, award=award):
+                    self.assertEqual(self.award(status, games, games_to_win=6,
+                                                award=award, given_up_by="away",
+                                                **flags), ("home", 6, 0))
+                    self.assertEqual(self.award(status, games, games_to_win=4,
+                                                award=award, given_up_by="home",
+                                                **flags), ("away", 0, 4))
+
+    def test_as_played_a_match_given_up_whole_keeps_every_row_as_printed(self):
+        self.assertIsNone(self.award(SetStatus.PLAYED, (2, 6), games_to_win=6,
+                                     award="as-played", given_up_by="away"))
+        self.assertEqual(self.award(SetStatus.FORFEIT, (0, 0), away_forfeit=True,
+                                    games_to_win=6, award="as-played",
+                                    given_up_by="away"), ("home", 0, 0))
+
+
+class TestARetiredSetGoesToTheSideWhoseRetiredBoxIsNotTicked(unittest.TestCase):
+    """``retired_set_winner`` and ``SetResult``: a retirement is read off its box.
+
+    4.422: the reader marked a row RETIRED from either side's box and kept no
+    side, and ``SetResult`` gave every retired set to nobody, however the card
+    ticked it. Measured (``/tmp/mcf/scratch/RUBBER/probe/before.txt``, case C):
+    rows 6-3, 6-0, 6-4 and 5-1 with the away Retired box ticked on the last, and a
+    TOTAL row of 4-0 24-8, were recorded 23-8 and 3-0 beside a totals-mismatch
+    error. Now one box names the side that stayed, and the set is complete and
+    theirs whatever the games read; both boxes, or none read, name nobody.
+
+    Rejected: the side ahead on the games, which on a real card is the side that
+    retired, leading 4-2.
+    """
+
+    def retired(self, games, **boxes) -> SetResult:
+        return SetResult(slot=DSSD.slots[0], home_games=games[0],
+                         away_games=games[1], status=SetStatus.RETIRED,
+                         rule=FIRST_TO_6, **boxes)
+
+    def test_one_box_names_the_other_side(self):
+        self.assertEqual(model_mod.retired_set_winner(home_retired=True,
+                                                      away_retired=False), "away")
+        self.assertEqual(model_mod.retired_set_winner(home_retired=False,
+                                                      away_retired=True), "home")
+
+    def test_both_boxes_or_neither_name_nobody(self):
+        for ticked in (True, False):
+            with self.subTest(both=ticked):
+                self.assertIsNone(model_mod.retired_set_winner(
+                    home_retired=ticked, away_retired=ticked))
+
+    def test_a_set_one_side_retired_from_is_complete_and_the_other_sides(self):
+        for games, boxes, winner in (((4, 2), {"home_retired": True}, "away"),
+                                     ((4, 6), {"home_retired": True}, "away"),
+                                     ((1, 5), {"home_retired": True}, "away"),
+                                     ((6, 1), {"away_retired": True}, "home")):
+            with self.subTest(games=games, boxes=boxes):
+                result = self.retired(games, **boxes)
+                self.assertTrue(result.completed)
+                self.assertEqual(result.winner, winner)
+                self.assertFalse(result.unfinished_unmarked)
+
+    def test_a_set_retired_with_both_boxes_ticked_is_nobodys(self):
+        result = self.retired((5, 1), home_retired=True, away_retired=True)
+        self.assertFalse(result.completed)
+        self.assertIsNone(result.winner)
+
+
+class TestASetScoredByAnAwardKeepsTheGamesPrintedOnItsRow(unittest.TestCase):
+    """``SetResult.printed`` and ``awarded_to``: the award, and the row as printed.
+
+    4.421 scores a rubber given up as the love set Match Centre totals it, so the
+    games on the row are no longer the games the set is scored at. They are kept
+    beside the scored ones, as the record of what was played: the match page and
+    a player's list show them, Games played sums them, and the duplicate check and
+    the checks of a forfeit's rows read them. ``awarded_to`` is who the award gave
+    the set, which decides it whatever the box: a match given up whole over a
+    rubber left incomplete scores that rubber a love set too.
+
+    Rejected: keeping the printed games in ``home_games`` and adding scored
+    properties beside them, where every reader left on the printed ones remakes
+    the split (C-1's player records, sets from the tick beside games from the
+    print).
+    """
+
+    def test_the_printed_games_are_the_scored_ones_until_an_award_rescored_them(
+            self):
+        plain = make_sets([(6, 2)])[0]
+        self.assertEqual((plain.printed_home_games, plain.printed_away_games),
+                         (6, 2))
+        awarded = dataclasses.replace(plain, home_games=6, away_games=0,
+                                      printed=(2, 6), status=SetStatus.FORFEIT,
+                                      away_forfeit=True, awarded_to="home")
+        self.assertEqual((awarded.home_games, awarded.away_games), (6, 0))
+        self.assertEqual((awarded.printed_home_games, awarded.printed_away_games),
+                         (2, 6))
+
+    def test_an_awarded_set_is_complete_and_the_side_it_was_awarded_to(self):
+        for status in (SetStatus.INCOMPLETE, SetStatus.RETIRED, SetStatus.PLAYED):
+            with self.subTest(status=status.value):
+                result = dataclasses.replace(
+                    make_sets([(0, 6)], status=status)[0], printed=(3, 2),
+                    awarded_to="away")
+                self.assertTrue(result.completed)
+                self.assertEqual(result.winner, "away")
+
+
+class TestARubberNobodyPlayedIsOneRuleOfTheMatch(unittest.TestCase):
+    """``Match.nobody_played``: a row no player is credited with, asked once.
+
+    4.289: a whole-match forfeit's 0-0 rows credited the players named on them a
+    match and sets played. Measured (``/tmp/mcf/scratch/RUBBER/probe/before.txt``,
+    case box over 0-0): the four players of each side were credited 4 matches and
+    12 sets where they played 3 nights. 4.421 scores such a row a love set, so the
+    question is asked of the games printed on it: a row printed 0-0 under a
+    forfeit, of the row or of the whole match, was played by nobody. validate's
+    passes-by (set-no-games, set-players-missing, roster-missing), the players'
+    figures, the contribution gap and the page's list all ask this. Asked of the
+    printed games too, ``given_up_by`` still names the side that gave up a night
+    told by its rows once those rows are scored as love sets.
+
+    Rejected: a retired row left 0-0, which somebody came to play.
+    """
+
+    def scored(self, result: SetResult, home: int, away: int) -> SetResult:
+        return dataclasses.replace(result, home_games=home, away_games=away,
+                                   printed=(result.home_games, result.away_games))
+
+    def test_a_rubber_ticked_and_left_empty_was_played_by_nobody(self):
+        rows = list(make_sets(((0, 0), (2, 6), (6, 2), (0, 0))))
+        rows[0] = self.scored(dataclasses.replace(
+            rows[0], status=SetStatus.FORFEIT, away_forfeit=True), 6, 0)
+        rows[1] = self.scored(dataclasses.replace(
+            rows[1], status=SetStatus.FORFEIT, away_forfeit=True), 6, 0)
+        rows[3] = dataclasses.replace(rows[3], status=SetStatus.RETIRED,
+                                      away_retired=True)
+        match = dataclasses.replace(make_match(), sets=tuple(rows))
+        self.assertEqual([match.nobody_played(r) for r in match.sets],
+                         [True, False, False, False])
+        self.assertFalse(match.no_rubber_played)
+        unticked = dataclasses.replace(match, sets=make_sets(((0, 0),) * 4))
+        self.assertEqual([unticked.nobody_played(r) for r in unticked.sets],
+                         [False] * 4)
+
+    def test_every_empty_row_of_a_match_given_up_whole_was_played_by_nobody(self):
+        for scores, played in ((((0, 0),) * 4, [True] * 4),
+                               (((2, 6), (6, 4), (3, 6), (0, 0)),
+                                [False, False, False, True])):
+            with self.subTest(scores=scores):
+                box = make_match(scores, status=MatchStatus.FORFEIT,
+                                 forfeited_by="away")
+                box = dataclasses.replace(box, sets=tuple(
+                    self.scored(r, 6, 0) for r in box.sets))
+                self.assertEqual([box.nobody_played(r) for r in box.sets], played)
+                self.assertEqual(box.no_rubber_played, all(played))
+
+    def test_a_night_given_up_by_its_rows_is_still_given_up_once_they_are_scored(
+            self):
+        rows = tuple(self.scored(dataclasses.replace(
+            r, status=SetStatus.FORFEIT, away_forfeit=True), 6, 0)
+            for r in make_sets(((0, 0),) * 4))
+        match = dataclasses.replace(make_match(), sets=rows)
+        self.assertEqual(match.given_up_by, "away")
+        self.assertTrue(match.no_rubber_played)
+        self.assertEqual((match.home_games, match.away_games), (24, 0))
+        self.assertEqual((match.printed_home_games, match.printed_away_games),
+                         (0, 0))
+
+    def test_a_match_prints_the_sum_of_its_rows_as_printed(self):
+        rows = list(make_sets(((2, 6), (6, 2), (1, 6), (3, 6))))
+        for i in (0, 2, 3):
+            rows[i] = self.scored(dataclasses.replace(
+                rows[i], status=SetStatus.FORFEIT, away_forfeit=True), 6, 0)
+        match = dataclasses.replace(make_match(), sets=tuple(rows))
+        self.assertEqual((match.home_games, match.away_games), (24, 2))
+        self.assertEqual((match.printed_home_games, match.printed_away_games),
+                         (12, 20))
+        self.assertFalse(make_match().no_rubber_played)
+
+
 # --------------------------------------------------------------------------
 # competition
 # --------------------------------------------------------------------------
@@ -1276,6 +1877,150 @@ class TestProvenance(unittest.TestCase):
         # It is printed on no scorecard, so any value this program chose would be
         # invention dressed as data.
         self.assertIsNone(Team(slug="rockets", name="Rockets").code)
+
+
+class TestAnAspectThatNamesNothingIsEmptyAndNoProvenance(unittest.TestCase):
+    """4.463, 4.464 and 4.462 in process: ``export._provenance`` over teams built
+    by hand, which is the fallback where discovery recorded nothing.
+
+    Measured on the base through the same calls: a competition with no captain
+    gave captains "derived", one registering nobody players "derived", and a
+    season with no name "derived", each a value the page lists as worked out; and
+    a captain the club declared who is on no team's squad counted for nothing, so
+    one declared beside a (C) read "card". Now an aspect that names nothing is
+    ``export.EMPTY``, ahead of discovery's record and of the fallback, and a
+    team's captain counts as the team says it came. Rejected: changing
+    ``merge_provenance([])``, which is pinned above and answers for the teams too.
+    """
+
+    @staticmethod
+    def provenance(comp: Competition) -> dict:
+        from matchcentre import export
+        return export._provenance(comp)
+
+    @staticmethod
+    def captained(comp: Competition, **teams: Team) -> Competition:
+        return dataclasses.replace(comp, teams={**comp.teams, **teams})
+
+    def setUp(self):
+        self.comp = make_competition(["rockets", "iguanas"])
+        self.marked = Player(slug="ann-ash", name="Ann Ash",
+                             name_source=Provenance.CARD, team="rockets",
+                             is_captain=True, captain_source=Provenance.CARD)
+
+    def test_empty_is_a_value_of_the_document_and_not_a_provenance(self):
+        from matchcentre import anonymise, export
+        self.assertNotIn(export.EMPTY, {member.value for member in Provenance})
+        self.assertNotEqual(export.EMPTY, anonymise.WITHHELD)
+
+    def test_no_captain_and_nobody_registered_are_empty(self):
+        from matchcentre import export
+        said = self.provenance(self.comp)
+        self.assertEqual((said["captains"], said["players"]),
+                         (export.EMPTY, export.EMPTY))
+
+    def test_discoverys_record_of_an_empty_collection_is_not_published(self):
+        from matchcentre import export
+        comp = dataclasses.replace(self.comp, provenance={
+            "captains": merge_provenance([]), "players": merge_provenance([])})
+        said = self.provenance(comp)
+        self.assertEqual((said["captains"], said["players"]),
+                         (export.EMPTY, export.EMPTY))
+
+    def test_fill_ins_shown_are_not_nobody(self):
+        comp = dataclasses.replace(self.comp, fill_in_names={"cy-wren": "Cy Wren"})
+        self.assertEqual(self.provenance(comp)["players"], "derived")
+
+    def test_a_captain_declared_off_every_squad_reads_declared(self):
+        comp = self.captained(self.comp, rockets=Team(
+            slug="rockets", name="Rockets", captain="zed-zane",
+            captain_declared="Zed Zane", players=(self.marked,)))
+        self.assertEqual(self.provenance(comp)["captains"], "declared")
+
+    def test_a_declared_captain_beside_a_marked_one_reads_as_both_sources(self):
+        comp = self.captained(
+            self.comp,
+            rockets=Team(slug="rockets", name="Rockets", captain="zed-zane",
+                         captain_declared="Zed Zane", players=(self.marked,)),
+            iguanas=Team(slug="iguanas", name="Iguanas", captain="bo-bell",
+                         players=(Player(slug="bo-bell", name="Bo Bell",
+                                         name_source=Provenance.CARD,
+                                         team="iguanas", is_captain=True,
+                                         captain_source=Provenance.CARD),)))
+        self.assertEqual(self.provenance(comp)["captains"],
+                         merge_provenance([Provenance.DECLARED,
+                                           Provenance.CARD]).value)
+
+    def test_a_captain_from_a_mark_reads_card(self):
+        comp = self.captained(self.comp, rockets=Team(
+            slug="rockets", name="Rockets", captain="ann-ash",
+            players=(self.marked,)))
+        said = self.provenance(comp)
+        self.assertEqual((said["captains"], said["players"]), ("card", "card"))
+
+    def test_a_season_no_page_names_is_empty_and_a_folders_name_derived(self):
+        from matchcentre import export
+        self.assertEqual(self.provenance(self.comp)["season"], export.EMPTY)
+        folder = dataclasses.replace(self.comp, season_key="2026-winter")
+        self.assertEqual(self.provenance(folder)["season"], "derived")
+        named = dataclasses.replace(self.comp, season="Winter",
+                                    provenance={"season": Provenance.CARD})
+        self.assertEqual(self.provenance(named)["season"], "card")
+
+
+class TestEveryOfferOfASeasonsNameIsTheOneItsPagesShow(unittest.TestCase):
+    """4.461 in process: ``export.season_offer`` and the writer's two places.
+
+    Measured on the base by ``config.render``: a competition with no season
+    offered ``# season = "2026 Season 2"`` in its section, and a season folder's
+    [seasons] line offered its key as it stands, ``# 2026-winter =
+    "2026-winter"``, where its pages read "2026 Winter". Now both ask the one
+    rule: the name the pages show, else the year or years of the matches' dates,
+    else nothing, and the section then writes no line. Rejected: the sample name
+    kept as an example, which deleting its # declares.
+    """
+
+    @staticmethod
+    def offer(comp: Competition, dates=()) -> str:
+        from matchcentre import export
+        return export.season_offer(comp, dates)
+
+    def setUp(self):
+        self.comp = make_competition(["rockets", "iguanas"])
+        self.multi = config_mod.Config(path=Path("config.toml"),
+                                       seasons_mode="multi")
+
+    def test_the_name_shown_is_offered_ahead_of_any_year(self):
+        named = dataclasses.replace(self.comp, season="Season 1")
+        self.assertEqual(self.offer(named, ["2026-08-18"]), "Season 1")
+        folder = dataclasses.replace(self.comp, season_key="2026-winter")
+        self.assertEqual(self.offer(folder, ["2027-08-18"]), "2026 Winter")
+
+    def test_failing_that_the_year_or_years_its_dates_give(self):
+        self.assertEqual(self.offer(self.comp, ["2026-08-18", "2026-08-25"]), "2026")
+        self.assertEqual(self.offer(self.comp, ["2027-01-05", "2026-12-15"]),
+                         "2026 to 2027")
+
+    def test_and_failing_that_nothing(self):
+        self.assertEqual(self.offer(self.comp), "")
+        self.assertEqual(self.offer(self.comp, ["", "26"]), "")
+
+    def test_the_seasons_table_offers_a_folder_the_name_its_pages_show(self):
+        folder = dataclasses.replace(self.comp, season_key="2026-winter")
+        lines = config_mod._seasons_section(self.multi, [folder])
+        self.assertIn('# 2026-winter = "2026 Winter"', lines)
+        self.assertEqual(config_mod._seasons_section(self.multi, [folder]), lines)
+        text = config_mod.render(self.multi, competitions=[folder])
+        self.assertIn('# 2026-winter = "2026 Winter"', text.splitlines())
+        self.assertNotIn("2026-winter = \"2026-winter\"", text)
+
+    def test_a_section_with_no_name_to_offer_writes_no_season_line(self):
+        text = config_mod.render(config_mod.Config(path=Path("config.toml")),
+                                 competitions=[self.comp])
+        self.assertNotRegex(text, r"(?m)^#? ?season = ")
+        self.assertNotIn("2026 Season 2", text)
+        self.assertIn("No card printed it and no date gave a year", " ".join(
+            line.lstrip("# ") for line in text.splitlines()))
 
 
 class TestRoundOrder(unittest.TestCase):
@@ -3142,6 +3887,233 @@ class TestACompetitionThatCannotDraw(unittest.TestCase):
                                  scoring.draws_detail(False))
 
 
+class TestWhatAForfeitIsWorthIsSetUnderRulesLikeTheOtherRules(unittest.TestCase):
+    """``[rules] forfeit_award`` and ``forfeit_points``, read beside unplayed and draws.
+
+    Measured on the tree before this (/tmp/mcf/scratch/CANCEL/probe/
+    config_probe.py, output config-before.txt): ``forfeit_award = "full-games"``,
+    ``"fixed"`` with ``forfeit_points = 5``, ``"fixed"`` alone, ``"full-game"``
+    and ``forfeit_points = 5`` alone each loaded with the warning "[rules]
+    forfeit_award is not a setting this program understands and was ignored." (or
+    forfeit_points), and the scheme in force was ``as-played`` with no points
+    every time, in a competition's section too. So no club could say what its
+    forfeits are worth, though ``Ruleset`` had the fields.
+
+    Now both are RULES_SETTINGS: read under [rules] and in a competition's section,
+    applied over the preset by ``ruleset_for``, and written back. An award the
+    program does not know is refused as ``unplayed`` is, with the three and the
+    nearest. ``fixed`` with no points under it or under [rules] is refused in
+    config terms, since the scheme cannot be built; points no ``fixed`` award reads
+    are warned about, since the ladder is the one the club had either way.
+    Rejected: refusing points without ``fixed``, which stops a build over a line
+    that changes nothing; and reading points as choosing ``fixed``, a setting
+    taking effect in a word nobody wrote.
+    """
+
+    COMP = "tuesday-division-c"
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+
+    def write(self, text):
+        path = self.dir / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def refused(self, text) -> str:
+        path = self.write(text)
+        with self.assertRaises(config_mod.ConfigError) as caught:
+            config_mod.load(path)
+        return str(caught.exception).replace(f"{path}: ", "", 1)
+
+    def test_both_are_rules_a_competition_may_override(self):
+        self.assertIn("forfeit_award", config_mod.RULES_SETTINGS)
+        self.assertIn("forfeit_points", config_mod.RULES_SETTINGS)
+
+    def test_each_award_is_applied_over_the_preset_and_nothing_else_moves(self):
+        for award, points, extra in (("as-played", None, ""),
+                                     ("full-games", None, ""),
+                                     ("fixed", 5.0, "forfeit_points = 5\n"),
+                                     ("fixed", 6.4, "forfeit_points = 6.4\n")):
+            with self.subTest(award=award, points=points):
+                loaded = config_mod.load(self.write(
+                    f'[rules]\nscoring = "games-bonus"\nforfeit_award = "{award}"\n'
+                    + extra))
+                self.assertEqual(loaded.warnings, ())
+                self.assertEqual(loaded.forfeit_award, award)
+                self.assertEqual(loaded.forfeit_points, points)
+                self.assertEqual(loaded.ruleset_for(None), dataclasses.replace(
+                    scoring.ruleset("games-bonus"), forfeit_award=award,
+                    forfeit_points=points))
+
+    def test_left_out_the_preset_s_award_stands(self):
+        loaded = config_mod.load(self.write('[rules]\nscoring = "simple"\n'))
+        self.assertEqual((loaded.forfeit_award, loaded.forfeit_points), ("", None))
+        self.assertEqual(loaded.ruleset_for(None), scoring.ruleset("simple"))
+
+    def test_the_award_is_read_in_any_case_as_unplayed_is(self):
+        loaded = config_mod.load(self.write('[rules]\nforfeit_award = " As-Played"\n'))
+        self.assertEqual(loaded.warnings, ())
+        self.assertEqual(loaded.ruleset_for(None).forfeit_award, "as-played")
+
+    def test_a_competition_overrides_the_award_and_the_points(self):
+        loaded = config_mod.load(self.write(
+            '[rules]\nforfeit_award = "as-played"\n'
+            f'[competitions."{self.COMP}"]\nforfeit_award = "fixed"\n'
+            'forfeit_points = 4.5\n'))
+        comp = loaded.competitions[self.COMP]
+        self.assertEqual(loaded.warnings, ())
+        self.assertEqual((loaded.ruleset_for(comp).forfeit_award,
+                          loaded.ruleset_for(comp).forfeit_points), ("fixed", 4.5))
+        self.assertEqual(loaded.ruleset_for(None).forfeit_award, "as-played")
+
+    def test_a_competition_s_points_price_the_award_it_inherits(self):
+        loaded = config_mod.load(self.write(
+            '[rules]\nforfeit_award = "fixed"\nforfeit_points = 5\n'
+            f'[competitions."{self.COMP}"]\nforfeit_points = 3\n'
+            '[competitions."monday-division-a"]\nscoring = "simple"\n'
+            '[competitions."wednesday-division-b"]\nforfeit_points = 0\n'))
+        self.assertEqual(loaded.warnings, ())
+        self.assertEqual(loaded.ruleset_for(loaded.competitions[self.COMP])
+                         .forfeit_points, 3.0)
+        self.assertEqual(loaded.ruleset_for(
+            loaded.competitions["monday-division-a"]).forfeit_points, 5.0)
+        # 0 is a price, asked with `is None` as draws is: not [rules]'s 5.
+        self.assertEqual(loaded.ruleset_for(
+            loaded.competitions["wednesday-division-b"]).forfeit_points, 0.0)
+
+    def test_an_award_it_does_not_know_is_refused_with_the_three_and_the_nearest(self):
+        for where, text in (
+                ("[rules]", '[rules]\nforfeit_award = "full-game"\n'),
+                (f"[competitions.{self.COMP}]",
+                 f'[competitions."{self.COMP}"]\nforfeit_award = "full-game"\n')):
+            with self.subTest(where=where):
+                self.assertEqual(self.refused(text),
+                                 f'{where} forfeit_award = "full-game" is not '
+                                 '"as-played", "full-games" or "fixed". Did you '
+                                 'mean full-games?')
+        self.assertEqual(self.refused('[rules]\nforfeit_award = "walkover"\n'),
+                         '[rules] forfeit_award = "walkover" is not "as-played", '
+                         '"full-games" or "fixed".')
+
+    def test_fixed_with_no_points_is_refused_in_config_terms(self):
+        self.assertEqual(
+            self.refused('[rules]\nforfeit_award = "fixed"\n'),
+            '[rules] forfeit_award = "fixed" pays a flat forfeit_points, and no '
+            'forfeit_points is set. Add one: the points a match forfeited whole '
+            'pays the side that turned up.')
+        self.assertEqual(
+            self.refused(f'[competitions."{self.COMP}"]\nforfeit_award = "fixed"\n'),
+            f'[competitions.{self.COMP}] forfeit_award = "fixed" pays a flat '
+            'forfeit_points, and no forfeit_points is set there or under [rules]. '
+            'Add one: the points a match forfeited whole pays the side that turned '
+            'up.')
+
+    def test_points_that_are_not_a_price_are_refused(self):
+        for typed in ('"5"', "true", "-1", "nan", "inf", "[5]"):
+            with self.subTest(typed=typed):
+                said = self.refused(f"[rules]\nforfeit_award = \"fixed\"\n"
+                                    f"forfeit_points = {typed}\n")
+                self.assertTrue(said.startswith(
+                    "[rules] forfeit_points must be a number of points, 0 or more, "
+                    "got "), said)
+
+    def test_points_no_fixed_award_reads_are_warned_about_and_not_applied(self):
+        for where, text, award in (
+                ("[rules]", "[rules]\nforfeit_points = 5\n", "full-games"),
+                ("[rules]", '[rules]\nforfeit_award = "as-played"\n'
+                            'forfeit_points = 5\n', "as-played"),
+                (f"[competitions.{self.COMP}]",
+                 f'[competitions."{self.COMP}"]\nforfeit_points = 5\n',
+                 "full-games")):
+            with self.subTest(where=where, award=award):
+                loaded = config_mod.load(self.write(text))
+                self.assertEqual(loaded.warnings, (
+                    f'{where} forfeit_points = 5 was not read: it prices a forfeit '
+                    f'only where forfeit_award = "fixed", and forfeit_award is '
+                    f'"{award}" here.',))
+                comp = loaded.competitions.get(self.COMP)
+                self.assertEqual(loaded.ruleset_for(comp),
+                                 dataclasses.replace(scoring.ruleset("games-bonus"),
+                                                     forfeit_award=award))
+
+    def test_points_a_competition_s_fixed_award_reads_are_not_warned_about(self):
+        loaded = config_mod.load(self.write(
+            '[rules]\nforfeit_points = 5\n'
+            f'[competitions."{self.COMP}"]\nforfeit_award = "fixed"\n'))
+        self.assertEqual(loaded.warnings, ())
+        self.assertEqual(loaded.ruleset_for(loaded.competitions[self.COMP])
+                         .forfeit_points, 5.0)
+
+    def test_points_every_fixed_award_sets_its_own_beside_are_warned_about(self):
+        # [rules]'s points are read only by a "fixed" section with none of its
+        # own, so a section pricing itself leaves them unread. Asking whether any
+        # section is "fixed" survived every test of the unit as reviewed
+        # (/tmp/mcf/scratch/CANCEL-review/own/run.py, #0).
+        loaded = config_mod.load(self.write(
+            '[rules]\nforfeit_points = 5\n'
+            f'[competitions."{self.COMP}"]\nforfeit_award = "fixed"\n'
+            'forfeit_points = 4\n'))
+        self.assertEqual(loaded.warnings, (
+            '[rules] forfeit_points = 5 was not read: it prices a forfeit only '
+            'where forfeit_award = "fixed", and forfeit_award is "full-games" '
+            'here.',))
+        self.assertEqual(loaded.ruleset_for(loaded.competitions[self.COMP])
+                         .forfeit_points, 4.0)
+
+    def test_the_first_run_writes_both_behind_a_hash_under_the_draws_line(self):
+        text = config_mod.render(config_mod.Config(path=self.dir / "config.toml"),
+                                 competitions=())
+        rules = text.split("[rules]\n", 1)[1]
+        draws = rules.index("# draws = false")
+        award = rules.index('# forfeit_award = "full-games"')
+        points = rules.index("# forfeit_points = ")
+        self.assertLess(draws, award)
+        self.assertLess(award, points)
+        self.assertLess(points, rules.index("# The shape of a match"))
+        self.assertNotRegex(text, r"(?m)^forfeit_(award|points) = ")
+        self.assertLessEqual(max(len(line) for line in text.splitlines()), 78)
+        loaded = config_mod.load(self.write(text))
+        self.assertEqual(loaded.warnings, ())
+        self.assertEqual(loaded.ruleset_for(None).forfeit_award, "full-games")
+
+    def test_the_first_run_says_what_each_award_pays(self):
+        # The option table is the one place the file a club edits says what
+        # each award does, as unplayed's does for a bye.
+        text = config_mod.render(config_mod.Config(path=self.dir / "config.toml"),
+                                 competitions=())
+        table = text.split("# What a match forfeited whole is worth", 1)[1]
+        table = table.split("# forfeit_award = ", 1)[0]
+        said = " ".join(line.lstrip("#").strip() for line in table.splitlines())
+        said = " ".join(said.split())
+        for award, pays in (
+                ("as-played", "paid as a match played, on the games the rows "
+                              "print"),
+                ("full-games", "the side that turned up is paid a win with "
+                               "every rubber a love set, and the side that "
+                               "gave the match up 0"),
+                ("fixed", "the side that turned up is paid forfeit_points, "
+                          "and the side that gave the match up 0")):
+            with self.subTest(award=award):
+                self.assertIn(f"{award} {pays}", said)
+
+    def test_a_club_that_set_them_gets_them_written_back_live(self):
+        for award, points in (("as-played", None), ("fixed", 5.0),
+                              ("fixed", 6.4)):
+            with self.subTest(award=award, points=points):
+                text = config_mod.render(config_mod.Config(
+                    path=self.dir / "config.toml", exists=True,
+                    forfeit_award=award, forfeit_points=points), competitions=())
+                self.assertRegex(text, rf'(?m)^forfeit_award = "{award}"$')
+                loaded = config_mod.load(self.write(text))
+                self.assertEqual(loaded.warnings, ())
+                self.assertEqual((loaded.forfeit_award, loaded.forfeit_points),
+                                 (award, points))
+
+
 class TestTheByesShorthand(unittest.TestCase):
     """``[competitions.<id>.byes]``: the byes a club has to type, and no more.
 
@@ -4066,7 +5038,9 @@ class TestConfigRendering(unittest.TestCase):
 
     def test_rounds_total_is_written_commented_out_too(self):
         text = config_mod.render(self.blank, competitions=[self.comp])
-        self.assertIn("# rounds_total = ", text)
+        # Moved by 4.465: the line has nothing after its =, for the club to type
+        # the season's length into, where it offered the rounds played.
+        self.assertRegex(text, r"(?m)^# rounds_total =$")
 
     def test_every_preset_is_listed_where_a_club_will_read_it(self):
         text = config_mod.render(self.blank, competitions=[self.comp])
@@ -4604,10 +5578,12 @@ class TestConfigRendering(unittest.TestCase):
         off the tuple rather than a list here, on a section built from cards and on
         one carried over with none, since both are written by the one function.
         """
+        # 4.420 moved this: forfeit_award and forfeit_points are rules too.
         rules = dict(scoring="rubbers", sets="pro-8", unplayed="average",
                      draws=False, format="doubles-3",
                      slots=("doubles", "doubles", "doubles"),
-                     min_sets_for_result=2)
+                     min_sets_for_result=2, forfeit_award="fixed",
+                     forfeit_points=5.0)
         self.assertEqual(set(rules), set(config_mod.RULES_SETTINGS),
                          "a rule this test does not set is a rule it does not check")
         on_cards = config_mod.CompetitionConfig(
@@ -4764,6 +5740,175 @@ class TestConfigRendering(unittest.TestCase):
         one = config_mod.render(self.blank, competitions=(), cards=1)
         self.assertIn("from the 1 scorecard under data/", self.prose(one))
 
+
+
+class TestAHomeCourtIsTheOneItsHomeCardsPrintMost(unittest.TestCase):
+    """4.469: a team's court is offered from its home cards, and a tie offers none.
+
+    The writer offered no court the cards gave, and wrote ``# "<first team>" = 1``
+    for every competition (/tmp/mcf/scratch/CONFIG/probes/out-before.txt). Every
+    card prints the court it was played on, and a team's home cards print its home
+    court: on a real season of 201 cards, the court printed most at home is the
+    court the club typed for each of the 54 teams with a home card. So the court
+    printed most is offered, and where two courts are printed as often neither
+    is: one of them picked by its number would be a guess the comment could not
+    stand behind.
+    Rejected: the lower number of a tie, and the court of the latest card, which a
+    night moved to another court for one week would give.
+    """
+
+    def team(self, slug: str, *courts: tuple[int, int]) -> Team:
+        return Team(slug=slug, name=slugs.unslug(slug), courts_printed=courts)
+
+    def test_the_court_printed_most_is_the_teams_and_a_tie_is_nobodys(self):
+        self.assertEqual(self.team("iguanas", (3, 3)).court_printed, 3)
+        self.assertEqual(self.team("iguanas", (2, 2), (4, 1)).court_printed, 2)
+        self.assertIsNone(self.team("iguanas", (2, 1), (3, 1)).court_printed)
+        self.assertIsNone(self.team("iguanas").court_printed)
+
+    def test_each_home_card_counts_once_and_a_tie_reads_in_the_courts_order(self):
+        # Discovery's own count: a card at home once, a washout with the rest, a
+        # card at away for nobody, the court printed most first though its number
+        # is the higher, and a tie in order of the courts' numbers and not of the
+        # cards, so the comment is the same whichever was read first.
+        from types import SimpleNamespace
+
+        from matchcentre import discover as discover_mod
+
+        def card(home: str, court: int | None, *, cancelled: bool = False):
+            away = "riverside-rockets" if home == "iguanas" else "iguanas"
+            return discover_mod._Sided(
+                SimpleNamespace(court=court, cancelled=cancelled), home, away)
+
+        sided = [card("iguanas", 3), card("iguanas", 2, cancelled=True),
+                 card("riverside-rockets", None), card("riverside-rockets", 5),
+                 card("riverside-rockets", 4), card("riverside-rockets", 5)]
+        self.assertEqual(discover_mod._home_courts(sided),
+                         {"iguanas": ((2, 1), (3, 1)),
+                          "riverside-rockets": ((5, 2), (4, 1))})
+
+    def courts_block(self, comp, config=None) -> list[str]:
+        text = config_mod.render(config or config_mod.Config(path=Path("config.toml")),
+                                 competitions=[comp], cards=6)
+        lines = text.splitlines()
+        at = lines.index(f"[competitions.{comp.id}.courts]")
+        return lines[at + 1:lines.index("", at)]
+
+    def test_a_tie_is_named_in_a_comment_and_given_no_line(self):
+        comp = dataclasses.replace(make_competition([]), teams={
+            "iguanas": self.team("iguanas", (2, 1), (3, 1)),
+            "riverside-rockets": self.team("riverside-rockets", (4, 2))})
+        block = self.courts_block(comp)
+        self.assertEqual([line for line in block if '" = ' in line],
+                         ['# "Riverside Rockets" = 4'])
+        self.assertIn("The home cards of Iguanas print court 2 on 1 card and court 3 "
+                      "on 1, so no court is offered for it.",
+                      " ".join(line.lstrip("# ") for line in block))
+
+    def test_a_court_the_club_declares_beside_a_tie_is_kept_as_it_was(self):
+        # A tie's comment is for a team the club gives no court. A court the club
+        # declares is its own line, and stays the only one whatever the cards print.
+        comp = dataclasses.replace(make_competition([]), teams={
+            "iguanas": self.team("iguanas", (2, 1), (3, 1))})
+        declared = config_mod.Config(
+            path=Path("config.toml"), exists=True,
+            competitions={comp.id: config_mod.CompetitionConfig(
+                id=comp.id, courts={"Iguanas": 7})})
+        block = self.courts_block(comp, declared)
+        self.assertEqual([line for line in block if " = " in line], ["Iguanas = 7"])
+        self.assertNotIn("no court is offered", " ".join(block))
+
+    def test_with_no_court_on_any_card_the_table_keeps_its_example(self):
+        # No card here printed a court, so there is nothing to read one from: the
+        # example line a club types over stays, under the comment it had.
+        block = self.courts_block(make_competition(["riverside-rockets", "iguanas"]))
+        self.assertEqual(block, ["# Each team's home court, if your club plays on "
+                                 "numbered courts.", "# Iguanas = 1"])
+
+
+class TestAProposalIsNamedAfterItsConfigAndKnownByItsFirstLine(unittest.TestCase):
+    """4.431: the proposal ``--discover`` writes beside a config, and how it is known.
+
+    Named after the config it proposes for and put beside it, so ``--config
+    other.toml`` has ``other.proposed.toml``; and known as this program's by its
+    first line, as the demo's config is, so a file a club wrote under that name is
+    never written over. Rejected: one ``config.proposed.toml`` whatever the config
+    was called, which two configs in one folder would share; and the proposal under
+    ``--out``, which is published.
+    """
+
+    def test_it_is_named_after_the_config_and_put_beside_it(self):
+        for config, proposed in (("config.toml", "config.proposed.toml"),
+                                 ("other.toml", "other.proposed.toml"),
+                                 ("notes.txt", "notes.proposed.toml"),
+                                 ("a/b/club.toml", "a/b/club.proposed.toml")):
+            self.assertEqual(config_mod.proposal_path(Path(config)), Path(proposed))
+
+    def proposed(self) -> str:
+        return config_mod.proposal("[club]\n", config_name="club.toml",
+                                   written="10 Sep 2026, 12:00pm", cards=8,
+                                   drops="Everything you have declared in it is "
+                                         "written back.")
+
+    def test_one_this_program_wrote_is_known_by_its_first_line(self):
+        text = self.proposed()
+        self.assertTrue(config_mod.written_as_proposal(text))
+        self.assertTrue(text.endswith("\n[club]\n"))
+        self.assertFalse(config_mod.written_as_proposal("# Our own draft.\n"))
+        self.assertFalse(config_mod.written_as_proposal("\n" + text))
+        self.assertFalse(config_mod.written_as_proposal(text[1:]))
+        # The marker's words are its whole first line, and not the start of one.
+        self.assertFalse(config_mod.written_as_proposal(
+            config_mod.PROPOSAL_MARKER + " (edited)\n# Our own notes.\n"))
+
+    def test_the_date_it_was_written_on_is_read_back_from_its_header(self):
+        # What a run renders the proposal with to ask whether the file holds it
+        # already, as the site's pages keep the stamp they were written with.
+        # Read off the header however it was flowed, the version's length moving
+        # the date from line to line.
+        for length in (0, 7, 19, 29):
+            version = "0." + "1" * length
+            for written in ("8 Oct 2026, 12:00am", "10 Sep 2026, 12:00pm"):
+                with self.subTest(version=version, written=written), \
+                        mock.patch.object(config_mod, "__version__", version):
+                    text = config_mod.proposal(
+                        "[club]\n", config_name="club.toml", written=written,
+                        cards=1, drops="Everything you have declared in it is "
+                                       "written back.")
+                    self.assertEqual(config_mod.proposal_written(text), written)
+        self.assertIsNone(config_mod.proposal_written("# Our own draft.\n"))
+        self.assertIsNone(config_mod.proposal_written(self.proposed()[1:]))
+        self.assertIsNone(config_mod.proposal_written(
+            config_mod.PROPOSAL_MARKER + "\n[club]\n"))
+
+    def test_its_header_says_what_it_is_and_keeps_to_the_width(self):
+        text = self.proposed()
+        said = " ".join(line.lstrip("# ") for line in text.splitlines())
+        for words in ("from the 8 scorecards it read", "club.toml already exists",
+                      "No run reads this file.", "copy it over club.toml",
+                      "Everything you have declared in it is written back."):
+            self.assertIn(words, said)
+        self.assertEqual([line for line in text.splitlines() if len(line) > 78], [])
+
+    def test_the_date_it_was_written_is_never_split_over_two_lines(self):
+        # Flowed at its spaces, the header 0.1.0 wrote on 8 Oct 2026 ended a line
+        # "on 8" and began the next "Oct 2026, 12:00am" (/tmp/mcf/scratch/CONFIG/
+        # probes/after/club/config.proposed.toml): 13 of the 90 versions and dates
+        # here split it. Rejected: a no-break space written in the file, which an
+        # editor shows as a space and a search for the date typed does not find.
+        for length in range(30):
+            version = "0." + "1" * length
+            for written in ("8 Oct 2026, 12:00am", "10 Sep 2026, 12:00pm",
+                            "28 Feb 2027, 11:59pm"):
+                with self.subTest(version=version, written=written), \
+                        mock.patch.object(config_mod, "__version__", version):
+                    lines = config_mod.proposal(
+                        "[club]\n", config_name="club.toml", written=written,
+                        cards=8, drops="Everything you have declared in it is "
+                                       "written back.").splitlines()
+                    self.assertTrue(any(written in line for line in lines), lines[:6])
+                    self.assertEqual([line for line in lines
+                                      if len(line) > 78 or "\0" in line], [])
 
 
 class TestAFirstRunWritesWhatItWorkedOutCommentedOut(unittest.TestCase):
@@ -5525,6 +6670,50 @@ class TestOneFunctionSaysWhereTheFileHoldsAReviewValue(unittest.TestCase):
         self.assertEqual(self.held([], *self.ITEM), "absent")
 
 
+class TestALineLeftForTheClubToTypeIsHeldOnlyAsWritten(unittest.TestCase):
+    """4.465 in process: ``held_in`` of an item whose line has nothing after its =.
+
+    The review offers the season's length as ``rounds_total =`` for the club to
+    finish, and ``held_in`` read the item's lines as TOML, which that line is not,
+    so the item held no value and the run after said "not in it" of a file
+    holding the line it wrote, and of one where the club had typed the length in.
+    Measured on the base by these calls: ``# rounds_total =`` under the live
+    header, and ``rounds_total = 10`` there, both "absent". Now a bare line is
+    held where the file holds that line bare behind a ``#``, and live where the
+    key is live, whatever it says, as any other value. Rejected: holding it by
+    the key alone behind the ``#``, which would call a number the club typed
+    there, and has not yet deleted the # of, the line that asks for one.
+    """
+
+    ITEM = ["[competitions.tuesday-division-c]", "rounds_total ="]
+    SEASON = ["[competitions.tuesday-division-c]", "season ="]
+
+    def held(self, lines, *text):
+        return config_mod.held_in(lines, "".join(line + "\n" for line in text))
+
+    def test_the_line_as_written_is_behind_a_hash(self):
+        self.assertEqual(self.held(self.ITEM, self.ITEM[0], "# rounds_total ="),
+                         "commented")
+        self.assertEqual(self.held(self.SEASON, self.SEASON[0], "# season ="),
+                         "commented")
+
+    def test_and_the_prose_under_it_is_not_its_value(self):
+        self.assertEqual(self.held(self.ITEM, self.ITEM[0], "# rounds_total =",
+                                   "# rounds_total = what your draw gives",
+                                   '# season = "Season 1"'), "commented")
+
+    def test_a_length_the_club_made_live_is_live(self):
+        self.assertEqual(self.held(self.ITEM, self.ITEM[0], "rounds_total = 10"),
+                         "live")
+
+    def test_a_number_behind_the_hash_or_another_header_is_not_the_line(self):
+        self.assertEqual(self.held(self.ITEM, self.ITEM[0], "# rounds_total = 7"),
+                         "absent")
+        self.assertEqual(self.held(self.ITEM, "[competitions.tuesday-division-b]",
+                                   "# rounds_total ="), "absent")
+        self.assertEqual(self.held(self.ITEM, self.ITEM[0], "# season ="), "absent")
+
+
 class TestAnItemOfSeveralBlocksIsHeldOnlyWhereEachIsHeldWhole(unittest.TestCase):
     """``held_in`` over an item of two rounds, and over a file of two blocks.
 
@@ -6224,17 +7413,42 @@ class TestNoClubSpecificsLeaked(unittest.TestCase):
         """
         hits = []
         for path in paths:
-            for number, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(), start=1):
-                folded = line.casefold()
-                for term in banned:
+            text = path.read_text(encoding="utf-8")
+            # Folded whole, a file holds every term any of its lines does, so a
+            # term it does not hold is not asked of each line.
+            whole = slugs.fold(text)
+            present = [term for term in banned if term in whole]
+            if not present:
+                continue
+            for number, line in enumerate(text.splitlines(), start=1):
+                folded = slugs.fold(line)
+                for term in present:
                     if term in folded:
-                        where = path.relative_to(ROOT)
+                        where = (path.relative_to(ROOT)
+                                 if path.is_relative_to(ROOT) else path.name)
                         hits.append(f"  {where}:{number}: {term!r} in "
                                     f"{line.strip()[:90]}")
         if hits:
             self.fail(f"{len(hits)} club-specific reference(s):\n"
                       + "\n".join(hits))
+
+    @staticmethod
+    def forms(terms):
+        """Each term as :meth:`assert_absent` reads a line, and as its slug.
+
+        Folded (:func:`~matchcentre.slugs.fold`), accents set aside with the case,
+        because a casefold alone passed a banned name written with an accent its
+        listed spelling has not, and as a slug, because the same name sat beside
+        it as one (4.470).
+        """
+        found = set()
+        for term in terms:
+            found.add(slugs.fold(term))
+            try:
+                found.add(slugs.slugify(term))
+            except ValueError:
+                pass            # no letter or digit: nothing a slug could spell
+        return sorted(found)
 
     # The strings that must not appear anywhere published: the club this project
     # was rewritten away from, and the real players named in its config. They are
@@ -6246,9 +7460,30 @@ class TestNoClubSpecificsLeaked(unittest.TestCase):
     def banned_terms(self):
         if not self.LEAK_TERMS.is_file():
             self.skipTest(f"{self.LEAK_TERMS.name} absent: nothing to leak")
-        return [line.strip().casefold()
-                for line in self.LEAK_TERMS.read_text(encoding="utf-8").splitlines()
-                if line.strip() and not line.startswith("#")]
+        return self.forms(
+            line.strip()
+            for line in self.LEAK_TERMS.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#"))
+
+    def test_a_banned_name_is_found_with_an_accent_or_as_a_slug(self):
+        # Fictional. 0.1.0 casefolded the line alone: a banned name was published
+        # in a slug example with an accent added, which no casefold takes off, and
+        # its slug beside it (4.470).
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "example.py"
+            path.write_text('slugify("Odile Écrin")\n'
+                            '"odile-ecrin"\n'
+                            'ZELIE MARCHETTI\n'
+                            'Odile and Écrin\n', encoding="utf-8")
+            with self.assertRaises(AssertionError) as caught:
+                self.assert_absent(self.forms(["Odile Ecrin", "Zélie Marchetti"]),
+                                   [path])
+        self.assertEqual(str(caught.exception).splitlines(), [
+            "3 club-specific reference(s):",
+            "  example.py:1: 'odile ecrin' in slugify(\"Odile Écrin\")",
+            "  example.py:2: 'odile-ecrin' in \"odile-ecrin\"",
+            "  example.py:3: 'zelie marchetti' in ZELIE MARCHETTI"])
 
     def test_the_foundation_modules_name_no_particular_club(self):
         # A generic tool that ships one club's name in its examples reads as

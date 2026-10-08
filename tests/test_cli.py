@@ -63,15 +63,17 @@ from matchcentre import (cardwriter, changes as changes_mod,         # noqa: E40
                          export as export_mod, format as fmt_mod, scorecard,
                          scoring, site)
 from matchcentre.card import Rejection, date_forms                   # noqa: E402
-from matchcentre.competition import Club, Competition                 # noqa: E402
+from matchcentre.competition import (Club, Competition, Provenance,  # noqa: E402
+                                     merge_provenance)
 from matchcentre.model import SetStatus                             # noqa: E402
 from matchcentre import sheet as sheet_mod                          # noqa: E402
 from test_pipeline import (DATES, EXPECTED_LADDER, FIXTURES,        # noqa: E402
                            SHORT_OF_RESULT_DATES, TEAMS, Swap,
                            offered_corrections, offered_lines, rows_for,
                            short_spec, squad_for, write_bye_season_cards,
-                           write_round_four, write_season_cards, write_short_card,
-                           write_short_round)
+                           write_fixture_card, write_round_four, write_season_cards,
+                           write_semi_final, write_short_card, write_short_round,
+                           write_washed_out_round, write_washout)
 
 BUILD = ROOT / "build.py"
 STAMP = "2026-09-10T12:00:00"
@@ -899,8 +901,12 @@ class TestEveryArtefactSaysWhichBuildMadeIt(CliCase):
         # on a first evening: the cards are somewhere else, and config.toml already
         # exists. Both used to answer "which version did that?" with silence.
         self.build()               # so that config.toml exists for --discover
+        # Moved by 4.431: --discover over a config writes a proposal beside it now,
+        # and refuses before any work only a file of the proposal's name that it
+        # did not write.
+        (self.cwd / "config.proposed.toml").write_text("# ours\n", encoding="utf-8")
         for argv, why in ((("--data", "nowhere"), "no such directory"),
-                          (("--discover",), "already exists")):
+                          (("--discover",), "this program did not write it")):
             with self.subTest(argv=argv):
                 run = self.build(*argv, expect=2)
                 self.assertIn(why, run.err)
@@ -1099,6 +1105,19 @@ def _with_a_pair_in_a_singles_row(write, typed):
     return written
 
 
+def _with_its_visitors_printed_unrated(write):
+    """*write*, handed a card that has a fill-in with its away roster block printed
+    with no ratings, so the line naming the players a card gives no rating for
+    names every visitor on court, each on a line of that block (4.442)."""
+    def written(path, spec):
+        if spec.home_fill_ins:
+            spec = dataclasses.replace(spec, away_roster=tuple(
+                dataclasses.replace(row, singles=None, doubles=None)
+                for row in spec.away_roster))
+        return write(path, spec)
+    return written
+
+
 def _with_the_lent_player_on_both_cards(plan):
     """*plan*, with the lending team's card left to name the player it lent: the
     demo leaves them off it, and a card whose scorer was not told does not."""
@@ -1253,8 +1272,12 @@ class TestTheSameCardsBuildTheSameBytesInAnyProcessAndAnyFolder(unittest.TestCas
     from a set has one order while it holds one name, and the demo has one fill-in
     in one match of fifteen: with ``export._fill_ins`` returning its set unsorted,
     every build here matched, and so did the whole suite. With two, that mutant
-    fails three of the four stages, and so does ``validate._check_ratings`` with
-    its sort taken out, in the line naming the players a card gave no rating for.
+    fails three of the four stages. The same card's away roster block goes to disk
+    with no ratings, so the line naming the players a card gives no rating for
+    names its visitors on court: with ``validate._check_ratings``' sort taken out
+    all four stages' files and reports differ, and with the visitors rated every
+    build matched, since the two fill-ins are on no line of the home block and are
+    not asked for a rating (4.442; /tmp/mcf/scratch/PNOISE/m-sort.txt).
     Here and not in the demo, because the demo is the season a club builds first
     and the one the README quotes, and a second fill-in on a card, a stranger or
     a player lent by another team, is one more warning in the report it prints.
@@ -1305,7 +1328,7 @@ class TestTheSameCardsBuildTheSameBytesInAnyProcessAndAnyFolder(unittest.TestCas
             said = io.StringIO()
             with mock.patch.object(demo_mod, "write_card_file", _with_a_second_fill_in(
                     _with_a_pair_in_a_singles_row(
-                        demo_mod.write_card_file,
+                        _with_its_visitors_printed_unrated(demo_mod.write_card_file),
                         cls.typed[dest.relative_to(cards).parts[0]]))), \
                     mock.patch.object(demo_mod, "plan_loan",
                                       _with_the_lent_player_on_both_cards(
@@ -2398,6 +2421,182 @@ class TestACaptainTheClubNamedIsNeverListedAsAGuess(CliCase):
                 self.assertEqual(review, [])
 
 
+def write_one_card(cwd: Path, config: str = "", **card) -> Path:
+    """cardwriter's default card as round 1 of a project of its own, under *config*.
+
+    The Tuesday Division C of Example Alphas and Example Bravos, whose rosters print
+    Alpha Ashford and Delta Dunmore with a (C); *card* is any CardSpec keyword.
+    """
+    folder = cwd / "data" / "Round1"
+    folder.mkdir(parents=True, exist_ok=True)
+    if config:
+        (cwd / "config.toml").write_text(config, encoding="utf-8")
+    cardwriter.write_card_file(folder / "r1.pdf", cardwriter.CardSpec(**card))
+    return cwd
+
+
+class OneCardValuesCase(unittest.TestCase):
+    """Projects of one card each, built once for the class, read as season.json."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.base = Path(cls._tmp.name)
+        cls.built = {name: cls.build_one(name, **spec)
+                     for name, spec in cls.PROJECTS.items()}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    PROJECTS: dict = {}
+
+    @classmethod
+    def build_one(cls, name: str, config: str = "", **card) -> dict:
+        cwd = write_one_card(cls.base / name, config, **card)
+        run = ShortOfResultCase.run_build(cwd)
+        assert run.code == 0, run.text[-3000:]
+        found = sorted((cwd / "site").rglob("season.json"))
+        assert len(found) == 1, found
+        return json.loads(found[0].read_text(encoding="utf-8"))
+
+    def provenance(self, name: str, aspect: str) -> str:
+        return self.built[name]["meta"]["provenance"][aspect]
+
+    def worked_out(self, name: str) -> list[str]:
+        return UnnamedSeasonCase.worked_out(self.built[name])
+
+
+def _rosters_without_a_captain() -> dict:
+    spec = cardwriter.CardSpec()
+    return {side: tuple(dataclasses.replace(row, captain=False)
+                        for row in getattr(spec, side))
+            for side in ("home_roster", "away_roster")}
+
+
+class TestAnAbsenceIsNotAValueWeWorkedOut(OneCardValuesCase):
+    """4.463: a competition naming nobody, or with no captain, guessed neither.
+
+    ``merge_provenance`` gives DERIVED for an empty collection, and discovery asked
+    it of the registered players and of the captained teams, so a squad of nobody
+    read "derived" and the page listed both under "values we worked out", under
+    "our best reading, not the club's word". Measured through build.py on
+    cardwriter's default card, the pages read in headless Chrome
+    (/tmp/mcf/scratch/STUB/out-before-values.txt): a washout whose 0-0 rows name
+    nobody read players and captains "derived" with 0 registered and "4 values we
+    worked out"; one counted card whose rosters print no (C) read captains
+    "derived" and "3 values" while its report said "Nothing was guessed"; the
+    default card read "card" and "card" and "2 values". Now season.json writes
+    ``export.EMPTY`` for players where the competition names nobody, fill-ins
+    included, and for captains where no team has one, and the page lists neither.
+    Rejected: ``merge_provenance([])`` giving CARD, which writes "card" beside no
+    captain; leaving the aspect out, which a reader cannot tell from one discovery
+    forgot; a fifth Provenance member, which needs a trusted answer an absence
+    does not have; and a guard in app.js, which has the page overrule Python.
+    """
+
+    PROJECTS = {
+        "default": {},
+        "names-nobody": dict(
+            cancelled=True, verb="VS", winner=cardwriter.NO_TICK,
+            rows=tuple(cardwriter.SetRow(0, 0, doubles, (), ())
+                       for doubles in (True, False, False, True))),
+        "no-captain": _rosters_without_a_captain(),
+        "washout": dict(cancelled=True, verb="VS", winner=cardwriter.NO_TICK),
+    }
+
+    def test_a_competition_that_names_nobody_lists_neither_as_worked_out(self):
+        self.assertEqual(self.built["names-nobody"]["players"], [])
+        self.assertEqual((self.provenance("names-nobody", "players"),
+                          self.provenance("names-nobody", "captains")),
+                         (export_mod.EMPTY, export_mod.EMPTY))
+        self.assertEqual(self.worked_out("names-nobody"), ["rounds_total", "teams"])
+
+    def test_a_competition_with_no_captain_lists_no_captains_as_worked_out(self):
+        self.assertEqual(len(self.built["no-captain"]["players"]), 6)
+        self.assertEqual((self.provenance("no-captain", "players"),
+                          self.provenance("no-captain", "captains")),
+                         ("card", export_mod.EMPTY))
+        self.assertEqual(self.worked_out("no-captain"), ["rounds_total", "teams"])
+
+    def test_fill_ins_shown_are_not_called_empty(self):
+        # The default washout's rows print four fill-ins its match page shows, so
+        # its players stay discovery's until 4.263 says what fill-ins are.
+        self.assertEqual(self.built["washout"]["players"], [])
+        self.assertNotEqual(self.provenance("washout", "players"), export_mod.EMPTY)
+        self.assertEqual(self.provenance("washout", "captains"), export_mod.EMPTY)
+
+    def test_a_card_that_names_both_reads_as_the_card(self):
+        self.assertEqual((self.provenance("default", "players"),
+                          self.provenance("default", "captains")), ("card", "card"))
+        self.assertEqual(self.worked_out("default"), ["rounds_total", "teams"])
+
+
+class TestACaptainTheClubDeclaredReadsAsDeclaredWhereverTheyArePrinted(
+        OneCardValuesCase):
+    """4.464: a team's captain's source is read from the team, not the captain's record.
+
+    Discovery merged ``t.player(t.captain).captain_source`` over the teams whose
+    captain is on the squad, so a captain the club declared who is on no counted
+    card counted for nothing, and with every captain so declared the division read
+    captains "derived": the team page flagged the declared captain with "The
+    captain was worked out from a roster mark rather than declared. Set captains
+    under ...", telling the club to declare what it declared. Measured through
+    build.py on cardwriter's default card, the pages read in headless Chrome
+    (/tmp/mcf/scratch/STUB/out-before-values.txt): both banners' captains declared
+    as people on no card read captains "derived", with "3 values we worked out"
+    and the team page's captain flagged under that sentence; both declared as
+    players the rosters print read "declared". Now each team with a captain gives
+    DECLARED where ``Team.captain_declared`` is set and CARD otherwise, in
+    discovery and in export's fallback alike, and a team with no captain gives
+    nothing: one captain declared beside a team whose roster marks none read
+    "declared" (/tmp/mcf/scratch/STUB/fix/before.txt), where counted as the card's
+    it would read "mixed" and be flagged. Rejected: the player record kept as
+    the source, which drops exactly the captains typed for people no counted card
+    prints; and registering a declared captain as a player, which 4.44 undid.
+    """
+
+    CAPTAINS = ('[competitions.tuesday-division-c]\nday = "Tuesday"\n'
+                'division = "C"\n\n[competitions.tuesday-division-c.captains]\n')
+    PROJECTS = {
+        "on-no-card": {"config": CAPTAINS + '"Example Alphas" = "Zulu Zimmerman"\n'
+                                            '"Example Bravos" = "Yara Young"\n'},
+        "beside-a-mark": {"config": CAPTAINS + '"Example Alphas" = "Bravo Beeching"\n'},
+        "both-on-the-card": {"config": CAPTAINS
+                             + '"Example Alphas" = "Bravo Beeching"\n'
+                               '"Example Bravos" = "Echo Elmsworth"\n'},
+        "beside-no-mark": {"config": CAPTAINS + '"Example Alphas" = "Bravo Beeching"\n',
+                           **_rosters_without_a_captain()},
+    }
+
+    def test_captains_declared_as_people_on_no_card_read_declared(self):
+        self.assertEqual(self.provenance("on-no-card", "captains"), "declared")
+        self.assertEqual(sorted(team["captain"]
+                                for team in self.built["on-no-card"]["teams"]),
+                         ["Yara Young", "Zulu Zimmerman"])
+        self.assertEqual(self.worked_out("on-no-card"), ["rounds_total", "teams"])
+
+    def test_a_declared_captain_beside_a_marked_one_reads_as_both_sources_do(self):
+        # Card and declaration, which 4.329 is to give a value the page does not
+        # flag; until then merge_provenance's, as the players' are.
+        self.assertEqual(self.provenance("beside-a-mark", "captains"),
+                         merge_provenance([Provenance.CARD, Provenance.DECLARED]).value)
+
+    def test_captains_declared_as_people_the_card_prints_read_declared(self):
+        self.assertEqual(self.provenance("both-on-the-card", "captains"), "declared")
+        self.assertEqual(sorted(team["captain"]
+                                for team in self.built["both-on-the-card"]["teams"]),
+                         ["Bravo Beeching", "Echo Elmsworth"])
+
+    def test_a_declared_captain_beside_a_team_with_none_reads_declared(self):
+        self.assertEqual(self.provenance("beside-no-mark", "captains"), "declared")
+        self.assertEqual(sorted((team["name"], team.get("captain"))
+                                for team in self.built["beside-no-mark"]["teams"]),
+                         [("Example Alphas", "Bravo Beeching"),
+                          ("Example Bravos", None)])
+        self.assertEqual(self.worked_out("beside-no-mark"), ["rounds_total", "teams"])
+
+
 class TestATeamPrintedWithTheLetterAKeepsItOnEveryPage(CliCase):
     """HILLTOP A beside HILLTOP B is Hilltop A beside Hilltop B, front page and all.
 
@@ -2426,6 +2625,53 @@ class TestATeamPrintedWithTheLetterAKeepsItOnEveryPage(CliCase):
         self.assertEqual(re.findall(r"Hilltop a\b", run.text), [])
         self.assertIn('hilltop-a = "Hilltop A"',
                       (self.cwd / "config.toml").read_text(encoding="utf-8"))
+
+
+class TestTheFirstRunSaysWhichTeamNameGuessesToCheckFirst(CliCase):
+    """The note over ``[team_names]`` names the two guesses most likely to be wrong.
+
+    It said a line behind a # was this program's best guess and to correct it if it
+    read wrongly, and named no guess that might. Measured on the base with the
+    Rockets printed RIVERSIDE ABCD and the Aces RIVERSIDE VITAMIN A ROCKETS
+    (/tmp/mcf/scratch/CASE/before.txt): exit 0, and the starter config offered
+    ``riverside-abcd = "Riverside Abcd"`` and ``riverside-vitamin-a-rockets =
+    "Riverside Vitamin a Rockets"`` behind a # under those three lines, as it
+    offered Lakeside Spinners, which is right, so a club removing every # adopted
+    the two wrong ones with the right. Now the note names an acronym of four
+    letters or more read as a word and a letter A read as the word a, each with the
+    reading the rule gives. Rejected: marking each offer the rule judged, which
+    marks names it reads right; and a cut of four letters, which changes NORTHSIDE
+    NETS to ``Northside NETS`` to keep an acronym.
+    """
+
+    GUESS = re.compile(r'\b([A-Z]{2,}(?: [A-Z]+)*) is offered as "([^"]+)"')
+
+    def test_the_note_names_both_guesses_as_the_rule_reads_them(self):
+        from matchcentre import slugs
+        for card in self.cards:
+            card.unlink()
+        write_season_cards(self.cwd / "data", banners={
+            "riverside-rockets": "RIVERSIDE ABCD",
+            "hilltop-aces": "RIVERSIDE VITAMIN A ROCKETS"})
+        self.build()
+        lines = (self.cwd / "config.toml").read_text(encoding="utf-8").splitlines()
+        at = lines.index("[team_names]") + 1
+        note = []
+        while not re.match(r'# [\w"-]+ = "', lines[at]):
+            note.append(lines[at].removeprefix("#").strip())
+            at += 1
+        said = " ".join(note)
+        self.assertEqual(self.GUESS.findall(said),
+                         [("ABCD", "Abcd"), ("PLAN A ROCKETS", "Plan a Rockets")],
+                         said)
+        for shouted, reading in self.GUESS.findall(said):
+            with self.subTest(shouted):
+                self.assertEqual(slugs.display_name(shouted), reading)
+        self.assertIn("remove the #", said)
+        offered = lines[at:lines.index("", at)]
+        self.assertIn('# riverside-abcd = "Riverside Abcd"', offered)
+        self.assertIn('# riverside-vitamin-a-rockets = "Riverside Vitamin a Rockets"',
+                      offered)
 
 
 class TestAPlayerPrintedWithTheInitialAIsNotOfferedAsAGuess(CliCase):
@@ -3916,6 +4162,243 @@ class TestACardWhoseDateWillNotReadIsFiledByTheNightItPrints(CliCase):
                                        f"{date_forms()}"), len(FIXTURES))
 
 
+class TestACardDatedOffItsCompetitionsNightIsFiledUnderThatNight(CliCase):
+    """A card dated off its competition's night made a competition of its own.
+
+    Measured on a fictional Tuesday B1 night of five teams and three rounds
+    (``/tmp/mcf/scratch/FILE/probe_build.py``), every card under ``Brindle Tuesday
+    Night Fixtures 2026``, one of round 2 printing ``Thu 27/08/2026`` and one of
+    round 3 the range ``Tue 01/09 - Sun 06/09``: 0.1.0 built three competitions,
+    ``thursday-division-b1`` and ``sunday-division-b1`` of one card each, and the
+    Tuesday ladder said round 2 "accounts for none of" three teams and round 3 of
+    three, so neither round's bye was credited and Eastwood Bears played
+    nothing. On a club's 201 cards, 2 print a single date two days after their
+    night, and the other cards of their round, 11 and 14 of them, print the
+    night's date; 0.1.0 built 17 competitions there of the 10 there are.
+
+    The competition line's night files the card. Its match is shown on the date
+    the round's other cards print on that night when they agree on one, and on its
+    own date when they do not; either way one note says which date the card
+    printed, the night its line names, and the date shown and why. A card that
+    printed no date is given none. A note and not a warning, since nothing is
+    wrong with the result. Decided in discover, where a round's cards are
+    together, and not by the reader, which sees one card. A declared draw is
+    still compared with the date shown, and date-mismatch quotes the date the
+    card printed beside it, since that is the one a club checks the card by.
+    Rejected: the card's own date wherever it falls, which puts a Tuesday round's
+    match on a Thursday the round was not played; the folder a card sits in,
+    which is a label the club typed and which a single season's ``data/`` does
+    not name; the config's ``day`` alone, since a division letter does not pick
+    the night when Monday and Tuesday both run a B1.
+    """
+
+    LINE = "Brindle Tuesday Night Fixtures 2026"
+    TEAMS = ("HILLTOP ACES", "RIVERSIDE ROCKETS", "LAKESIDE SPINNERS",
+             "WESTFIELD HAWKS", "EASTWOOD BEARS", "NORTHSIDE NETS")
+
+    def night(self, fixtures, *, declare: int = 0,
+              line: str = LINE) -> dict[tuple[int, int], str]:
+        """``data/`` again, one card a ``(round, home, away, date line)``.
+
+        Each team its own squad, so that nothing but the dates is in question.
+        *declare* lists the first that many teams in a config, so that a round's
+        byes are credited; every card prints the competition line *line*. Returns
+        each fixture's card as the build names it.
+        """
+        shutil.rmtree(self.cwd / "data")
+        named = {}
+        for index, (rnd, home, away, when) in enumerate(fixtures, start=1):
+            squads = [tuple(f"{first} {self.TEAMS[team].split()[0].title()}"
+                            for first in ("Ari", "Bel", "Cam"))
+                      for team in (home, away)]
+            folder = self.cwd / "data" / f"Round{rnd}"
+            folder.mkdir(parents=True, exist_ok=True)
+            rosters = [tuple(cardwriter.RosterRow(name=name, singles=2.5, doubles=2.5,
+                                                  captain=(i == 0))
+                             for i, name in enumerate(squad)) for squad in squads]
+            spec = cardwriter.CardSpec(
+                competition_line=line, when=when, round_label=rnd,
+                division="B1", court=f"{index:02d}", match_id=f"300{index:04d}",
+                home_name=self.TEAMS[home], away_name=self.TEAMS[away],
+                rows=rows_for(((6, 2), (6, 3), (2, 6), (6, 1)), *squads),
+                home_roster=rosters[0], away_roster=rosters[1])
+            cardwriter.write_card_file(folder / f"card{index}.pdf", spec)
+            named[home, away] = f"data/Round{rnd}/card{index}.pdf"
+        if declare:
+            teams = ", ".join(f'"{name.title()}"' for name in self.TEAMS[:declare])
+            (self.cwd / "config.toml").write_text(
+                f'[competitions.tuesday-division-b1]\nday = "Tuesday"\n'
+                f'division = "B1"\nteams = [{teams}]\n', encoding="utf-8")
+        return named
+
+    def competitions(self) -> list[str]:
+        return sorted(path.parent.name
+                      for path in (self.cwd / "site").rglob("season.json"))
+
+    def dates(self) -> dict[tuple[str, str], str]:
+        return {(m["home"], m["away"]): m["date"]
+                for m in self.season("tuesday-division-b1")["matches"]}
+
+    def test_the_round_its_other_cards_agree_on_is_the_date_shown(self):
+        named = self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                            ("6", 2, 3, "Thu 24/09/2026 7:00 PM")))
+        run = self.build()
+        self.assertEqual(self.competitions(), ["tuesday-division-b1"])
+        self.assertEqual(self.dates()["lakeside-spinners", "westfield-hawks"],
+                         "2026-09-22")
+        said = " ".join(run.text.split())
+        self.assertIn(f"{named[2, 3]} is dated 2026-09-24, a Thursday, but its "
+                      f"competition line names Tuesday nights; it is filed under "
+                      f"Tuesday and shown on 2026-09-22, the date of every other "
+                      f"card of round 6 on a Tuesday.", said)
+        self.assertEqual(said.count("competition line names Tuesday nights"), 1)
+
+    def test_with_no_other_card_on_the_night_its_own_date_stands(self):
+        named = self.night((("5", 0, 1, "Tue 15/09/2026 7:00 PM"),
+                            ("6", 2, 3, "Thu 24/09/2026 7:00 PM")))
+        run = self.build()
+        self.assertEqual(self.competitions(), ["tuesday-division-b1"])
+        self.assertEqual(self.dates()["lakeside-spinners", "westfield-hawks"],
+                         "2026-09-24")
+        self.assertIn(f"{named[2, 3]} is dated 2026-09-24, a Thursday, but its "
+                      f"competition line names Tuesday nights; it is filed under "
+                      f"Tuesday and shown on its own date, since no other card of "
+                      f"round 6 is dated on a Tuesday.", " ".join(run.text.split()))
+
+    def test_with_other_cards_on_two_nights_its_own_date_stands(self):
+        named = self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                            ("6", 4, 5, "Tue 29/09/2026 7:00 PM"),
+                            ("6", 2, 3, "Thu 24/09/2026 7:00 PM")))
+        run = self.build()
+        self.assertEqual(self.dates()["lakeside-spinners", "westfield-hawks"],
+                         "2026-09-24")
+        self.assertIn(f"{named[2, 3]} is dated 2026-09-24, a Thursday, but its "
+                      f"competition line names Tuesday nights; it is filed under "
+                      f"Tuesday and shown on its own date, since the other cards of "
+                      f"round 6 on a Tuesday are dated 2026-09-22 and 2026-09-29.",
+                      " ".join(run.text.split()))
+
+    def test_two_cards_off_the_night_each_take_the_nights_date(self):
+        # Each is shown on the Tuesday's date, and neither counts the other, on a
+        # Wednesday, as a second date the round was played on.
+        self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                    ("6", 2, 3, "Thu 24/09/2026 7:00 PM"),
+                    ("6", 4, 5, "Wed 23/09/2026 7:00 PM")))
+        said = " ".join(self.build().text.split())
+        dates = self.dates()
+        self.assertEqual((dates["lakeside-spinners", "westfield-hawks"],
+                          dates["eastwood-bears", "northside-nets"]),
+                         ("2026-09-22", "2026-09-22"))
+        self.assertEqual(said.count("the date of every other card of round 6 on a "
+                                    "Tuesday."), 2)
+
+    def test_a_card_whose_line_names_no_night_is_filed_by_its_date_as_before(self):
+        self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                    ("6", 2, 3, "Thu 24/09/2026 7:00 PM")),
+                   line="Example District Tennis Club Night Fixtures 2026")
+        said = " ".join(self.build().text.split())
+        self.assertEqual(self.competitions(),
+                         ["thursday-division-b1", "tuesday-division-b1"])
+        self.assertNotIn("competition line names", said)
+
+    def test_a_weekday_the_date_contradicts_is_said_in_the_same_note(self):
+        named = self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                            ("6", 2, 3, "Wed 24/09/2026 7:00 PM")))
+        said = " ".join(self.build().text.split())
+        self.assertIn(f"{named[2, 3]} is dated 2026-09-24, a Thursday (the card "
+                      f"prints Wednesday), but its competition line names Tuesday "
+                      f"nights;", said)
+        self.assertNotIn("the date is what it was filed under", said)
+
+    def test_a_card_on_its_night_printing_another_weekday_has_one_note(self):
+        # 22/09/2026 is a Tuesday, on the night, so the date files the card as the
+        # night does, and its one note says the date is what it was filed under,
+        # as the doctor does. Only a card its night files off its date is told of
+        # the night.
+        named = self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                            ("6", 2, 3, "Wed 22/09/2026 7:00 PM")))
+        said = " ".join(self.build().text.split())
+        self.assertIn(f"{named[2, 3]} is dated 2026-09-22, a Tuesday, but the card "
+                      f"prints Wednesday; the date is what it was filed under", said)
+        self.assertEqual(said.count("but the card prints Wednesday"), 1)
+        self.assertNotIn("competition line names Tuesday nights", said)
+
+    def test_a_declared_draw_is_told_the_date_the_card_printed(self):
+        # The draw has round 6 on the Wednesday, the round's cards print the
+        # Tuesday, and one card the Thursday, shown on the Tuesday. date-mismatch
+        # said "the card is dated 2026-09-22" of the card printing 2026-09-24,
+        # since the date it quoted was the one shown
+        # (/tmp/mcf/scratch/FILE/fix/probe_declared.py). Declared on the Tuesday,
+        # the draw agrees with the date shown, and the card's own date is the
+        # note's to tell.
+        named = self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                            ("6", 2, 3, "Thu 24/09/2026 7:00 PM")), declare=4)
+        config = (self.cwd / "config.toml").read_text(encoding="utf-8")
+        for declared in ("2026-09-23", "2026-09-22"):
+            with self.subTest(declared=declared):
+                (self.cwd / "config.toml").write_text(
+                    config + f'\n[[competitions.tuesday-division-b1.rounds]]\n'
+                    f'number = "6"\ndate = "{declared}"\nfixtures = '
+                    f'[["Hilltop Aces", "Riverside Rockets"], '
+                    f'["Lakeside Spinners", "Westfield Hawks"]]\n', encoding="utf-8")
+                said = " ".join(self.build().text.split())
+                self.assertIn(f"{named[2, 3]} is dated 2026-09-24", said)
+                mismatched = [
+                    "tuesday-division-b1: R6 hilltop-aces v riverside-rockets: the "
+                    "card is dated 2026-09-22; the declared draw has round 6 on "
+                    "2026-09-23. The card wins.",
+                    "tuesday-division-b1: R6 lakeside-spinners v westfield-hawks: "
+                    "the card is dated 2026-09-24 and is shown on 2026-09-22, the "
+                    "date of the other cards of its round; the declared draw has "
+                    "round 6 on 2026-09-23. The cards win."]
+                if declared == "2026-09-23":
+                    for message in mismatched:
+                        self.assertIn(message, said)
+                else:
+                    self.assertNotIn("date-mismatch", said)
+
+    def test_an_undated_card_is_not_given_the_date_its_round_prints(self):
+        # A date the card did not print is not the card's: it stays undated, filed
+        # by the night, and the reader's warning on the match is all that is said
+        # of it.
+        self.night((("6", 0, 1, "Tue 22/09/2026 7:00 PM"),
+                    ("6", 2, 3, "Tue 7:00 PM")))
+        said = " ".join(self.build().text.split())
+        self.assertEqual(self.competitions(), ["tuesday-division-b1"])
+        match, = (m for m in self.season("tuesday-division-b1")["matches"]
+                  if m["home"] == "lakeside-spinners")
+        self.assertEqual(match["date"], "")
+        self.assertNotIn("competition line names Tuesday nights", said)
+        self.assertEqual([w[-47:] for w in match["warnings"]],
+                         ["filed by the Tuesday its competition line names"])
+
+    def test_a_night_with_a_stray_of_each_kind_is_one_competition(self):
+        # Five teams, so a round's bye is somebody's: round 2's Westfield Hawks v
+        # Eastwood Bears prints a Thursday, round 3's Hilltop Aces v Eastwood Bears
+        # a range of days with no year.
+        self.night((("1", 0, 1, "Tue 18/08/2026 7:00 PM"),
+                    ("1", 2, 3, "Tue 18/08/2026 7:00 PM"),
+                    ("2", 0, 2, "Tue 25/08/2026 7:00 PM"),
+                    ("2", 3, 4, "Thu 27/08/2026 7:00 PM"),
+                    ("3", 0, 4, "Tue 01/09 - Sun 06/09 7:00 PM"),
+                    ("3", 1, 3, "Tue 01/09/2026 7:00 PM")), declare=5)
+        run = self.build()
+        self.assertEqual(self.competitions(), ["tuesday-division-b1"])
+        season = self.season("tuesday-division-b1")
+        self.assertEqual({r["number"]: r["byes"] for r in season["rounds"]},
+                         {"1": ["eastwood-bears"], "2": ["riverside-rockets"],
+                          "3": ["lakeside-spinners"]})
+        self.assertEqual({r["number"]: r["date"] for r in season["rounds"]},
+                         {"1": "2026-08-18", "2": "2026-08-25", "3": "2026-09-01"})
+        self.assertEqual(self.dates()["westfield-hawks", "eastwood-bears"],
+                         "2026-08-25")
+        self.assertEqual(self.dates()["hilltop-aces", "eastwood-bears"],
+                         "2026-09-01")
+        said = " ".join(run.text.split())
+        self.assertNotIn("accounts for none of", said)
+        self.assertNotIn("undated", said)
+
+
 class TestAHalfDownloadedCardIsAMissingCard(CliCase):
     """A card the club exported, that the browser never finished writing.
 
@@ -4727,14 +5210,16 @@ class TestDiscoverIsTheOneRunTheConfigWriteIsThePointOf(CliCase):
 
 class TestDiscoverDoesNotDestroyWork(CliCase):
 
-    def test_discover_refuses_to_overwrite_a_config_without_force(self):
+    def test_discover_does_not_overwrite_a_config_without_force(self):
+        # Moved by 4.431: it builds as a plain run does, exit 0 here and not a
+        # refusal, and writes its proposal beside the file instead.
         self.build()
         original = (self.cwd / "config.toml").read_text(encoding="utf-8")
-        run = self.build("--discover", expect=None)
-        self.assertNotEqual(run.code, 0)
+        run = self.build("--discover", expect=0)
         self.assertEqual((self.cwd / "config.toml").read_text(encoding="utf-8"),
                          original, "--discover overwrote a config file without "
                                    "--force")
+        self.assertTrue((self.cwd / "config.proposed.toml").is_file(), run.text[-800:])
 
     def test_discover_with_force_rewrites_it(self):
         self.build()
@@ -5248,9 +5733,12 @@ class TestDiscoverForceWritesBackEverythingAClubDeclaredButTheDraw(unittest.Test
         cls.config.write_text("\n".join((cls.DECLARED, cls.DRAW, cls.WAITING,
                                          cls.WAITING_DRAW)), encoding="utf-8")
         cls.before = config_mod.load(cls.config)
-        cls.run_build(cls.cwd)
+        cls.first = cls.run_build(cls.cwd)
         cls.page_before = cls.season_of(cls.cwd)
+        # Moved by 4.431: --discover over the file builds and writes the proposal
+        # beside it, whose header says what --force drops, as the refusal did.
         cls.refused = cls.run_build(cls.cwd, "--discover")
+        cls.proposed = proposal_said(cls.cwd)
         shutil.rmtree(cls.cwd / "site")
         cls.forced = cls.run_build(cls.cwd, "--discover", "--force")
         cls.written = cls.config.read_text(encoding="utf-8")
@@ -5265,6 +5753,7 @@ class TestDiscoverForceWritesBackEverythingAClubDeclaredButTheDraw(unittest.Test
         (cls.undrawn / "config.toml").write_text(
             "\n".join((cls.DECLARED, cls.WAITING)), encoding="utf-8")
         cls.undrawn_refused = cls.run_build(cls.undrawn, "--discover")
+        cls.undrawn_proposed = proposal_said(cls.undrawn)
 
         # The same file with Riverside Rockets shown as "The Rockets".
         cls.shown = base / "shown"
@@ -5422,8 +5911,10 @@ class TestDiscoverForceWritesBackEverythingAClubDeclaredButTheDraw(unittest.Test
                                  (3, self.PINNED_ROUNDS))
 
     def test_the_refusal_names_the_draw_as_what_force_drops(self):
-        said = " ".join(self.refused.err.split())
-        self.assertEqual(self.refused.code, 2, said)
+        # Moved by 4.431: said in the proposal's header, by a run that exits as
+        # the plain run before it did.
+        said = self.proposed
+        self.assertEqual(self.refused.code, self.first.code, self.refused.text[-1500:])
         self.assertIn("except the draw", said)
         # Both sections with a draw, the one no card reached as well.
         for comp_id in ("tuesday-b", "thursday-a"):
@@ -5436,22 +5927,26 @@ class TestDiscoverForceWritesBackEverythingAClubDeclaredButTheDraw(unittest.Test
     def test_and_names_a_rounds_note_as_going_with_it_which_it_does(self):
         # The note is typed in a block, so it goes with the draw; the refusal named
         # the dates, fixtures and byes the blocks hold, and not the one the page shows.
-        self.assertIn("the dates, fixtures, byes and notes they hold",
-                      " ".join(self.refused.err.split()))
+        # Moved by 4.431: in the proposal's header.
+        self.assertIn("the dates, fixtures, byes and notes they hold", self.proposed)
         notes = {r["number"]: r["note"] for r in self.page_before["rounds"]}
         self.assertEqual(notes["2"], self.NOTE)
         self.assertEqual({r["note"] for r in self.page_after["rounds"]}, {""})
         self.assertNotIn(self.NOTE, self.written)
 
     def test_and_says_a_comment_the_club_typed_goes_too_which_it_does(self):
-        self.assertIn("comment", " ".join(self.refused.err.split()))
+        # Moved by 4.431: in the proposal's header.
+        self.assertIn("The file is written fresh, so a comment you added to it goes.",
+                      self.proposed)
         self.assertIn(self.COMMENT, self.DECLARED)
         self.assertNotIn(self.COMMENT, self.written)
 
     def test_a_file_with_no_draw_is_not_told_it_loses_one(self):
-        said = " ".join(self.undrawn_refused.err.split())
-        self.assertEqual(self.undrawn_refused.code, 2, said)
-        self.assertIn("Add --force", said)
+        # Moved by 4.431: the proposal's header says it, where the refusal said
+        # "Add --force".
+        said = self.undrawn_proposed
+        self.assertIn("Everything you have declared in it is written back. The file "
+                      "is written fresh", said)
         self.assertNotIn("draw", said)
         self.assertNotIn("rounds]]", said)
 
@@ -5705,7 +6200,10 @@ class TestADrawItsCardsHavePlayedPastIsReportedOnceAsTheDraw(unittest.TestCase):
                 forced, after = self.forced[name], self.after[name]
                 self.assertEqual(forced.code, 1, forced.text[-1500:])
                 self.assertNotRegex(self.written[name], r"(?m)^rounds_total\b")
-                self.assertIn("# rounds_total = 3", self.written[name])
+                # Moved by 4.465: a length nobody gave is written with nothing
+                # after its =, where it offered the 3 rounds played.
+                self.assertRegex(self.written[name], r"(?m)^# rounds_total =$")
+                self.assertNotIn("rounds_total = 3", self.written[name])
                 self.assertIn(why, self.written_flat(name))
                 self.assertEqual(after.code, 0, after.text[-1500:])
                 self.assertIsNone(self.page_after[name]["meta"]["rounds_total"])
@@ -5729,7 +6227,10 @@ class TestADrawItsCardsHavePlayedPastIsReportedOnceAsTheDraw(unittest.TestCase):
                 self.assertEqual(played, 3)
                 self.assertIn(f'Without it the dashboard says "{played} rounds played"',
                               self.written_flat(name))
-                self.assertIn(f"# rounds_total = {played}", self.written[name])
+                # Moved by 4.465: the count is said, and no longer offered as the
+                # length behind a #.
+                self.assertRegex(self.written[name], r"(?m)^# rounds_total =$")
+                self.assertNotIn(f"rounds_total = {played}", self.written[name])
 
     def test_a_season_is_as_many_rounds_long_as_its_length_not_its_cards(self):
         # "declared as 1 rounds long", measured on each run above before this. The
@@ -5862,8 +6363,9 @@ class TestASeasonsProgressCountsItsRegularRoundsAndNamesItsFinalsApart(
                 self.assertIn(said, flat(self.runs[name].text))
 
     def test_and_so_does_the_front_page(self):
-        for name, tag, bars in (("final", "Round 2 of 2", ["100"]),
-                                ("typed_sf", "Round 3 of 3", ["100"]),
+        # A count said as a count since 4.439, where it was "Round 2 of 2".
+        for name, tag, bars in (("final", "2 of 2 rounds played", ["100"]),
+                                ("typed_sf", "3 of 3 rounds played", ["100"]),
                                 ("first_sf", "3 rounds played", [])):
             with self.subTest(config=name):
                 self.assertEqual(picker_progress(self.fronts[name]), ([tag], bars))
@@ -5882,10 +6384,14 @@ class TestASeasonsProgressCountsItsRegularRoundsAndNamesItsFinalsApart(
         self.assertIn('the dashboard will say "3 rounds played"',
                       flat(self.runs["first_sf"].text))
 
-    def test_the_review_offers_the_regular_rounds_as_the_length(self):
+    def test_the_review_names_the_regular_rounds_and_offers_no_length(self):
+        # Moved by 4.465, and renamed from
+        # test_the_review_offers_the_regular_rounds_as_the_length: the regular
+        # rounds are what the dashboard says, and no number is offered as the
+        # length, the count of them or the count with the final.
         said = flat(self.runs["first_sf"].text)
         self.assertIn('without it the dashboard says "3 rounds played"', said)
-        self.assertIn("rounds_total = 3", said)
+        self.assertNotIn("rounds_total = 3", said)
         self.assertNotIn("rounds_total = 4", said)
 
     def test_and_so_does_the_file_force_writes(self):
@@ -5893,7 +6399,9 @@ class TestASeasonsProgressCountsItsRegularRoundsAndNamesItsFinalsApart(
         self.assertEqual(forced.code, 0, forced.text[-1500:])
         self.assertIn('Without it the dashboard says "3 rounds played"',
                       written_flat(self.written["first_sf"]))
-        self.assertIn("# rounds_total = 3", self.written["first_sf"])
+        # Moved by 4.465: the line has nothing after its = for the length.
+        self.assertRegex(self.written["first_sf"], r"(?m)^# rounds_total =$")
+        self.assertNotIn("rounds_total = 3", self.written["first_sf"])
 
     def test_a_season_whose_only_cards_are_finals_has_played_no_round(self):
         """Nought is the count's new floor, and the plural's.
@@ -5992,8 +6500,9 @@ class TestARunF3StopsBuildsItsPageAsASeasonOfUnknownLength(unittest.TestCase):
         for name, tag, bars in (("typed", "3 rounds played", []),
                                 ("dated", "3 rounds played", []),
                                 ("final", "2 rounds played", []),
-                                ("fits", "Round 3 of 5", ["60"]),
-                                ("other_error", "Round 3 of 5", ["60"])):
+                                # Since 4.439: was "Round 3 of 5".
+                                ("fits", "3 of 5 rounds played", ["60"]),
+                                ("other_error", "3 of 5 rounds played", ["60"])):
             with self.subTest(config=name):
                 self.assertEqual(picker_progress(self.fronts[name]), ([tag], bars))
 
@@ -6670,7 +7179,9 @@ class TestTheWholeReportFitsTheWidthItDeclares(CliCase):
 
     def test_nor_of_a_multi_season_run(self):
         # Multi-season mode adds a careers line to the cards section, and a first
-        # run in that mode is the only report that prints it.
+        # run in that mode is the only report that prints it. (Since 4.430 a
+        # single-season run printing names prints one too, in its own words, and
+        # the runs above test it; this is still the only one of the multi line.)
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp)
             for season in ("2025-winter", "2026-winter"):
@@ -6907,7 +7418,8 @@ class TestTheWholeReportFitsTheWidthItDeclares(CliCase):
                 None, [f"number = {typed}", f"fixtures = {twice}"],
                 "round 111111111111... (5000 characters) of the declared draw lists "
                 "Riverside Rockets v Hilltop Aces more than once"),
-            "the refusal of --discover": (
+            # Moved by 4.431: what the refusal said, the proposal's header says.
+            "the proposal --discover writes": (
                 None, [f"number = {typed}", "finals = true"],
                 f"round 111111111111... (5000 characters) of {comp} is scored in "
                 f"the ladder as a regular round"),
@@ -6923,18 +7435,30 @@ class TestTheWholeReportFitsTheWidthItDeclares(CliCase):
                 else:
                     written.write_text(text.replace(under, "\n".join([under, *lines]),
                                                     1), encoding="utf-8")
-                refused = name == "the refusal of --discover"
-                run_ = self.build("--check", *(("--discover",) if refused else ()),
-                                  expect=2 if refused else 0 if under else 1)
-                self.assertFits(run_.out + run_.err, f"a run whose config holds {name}")
-                self.assertIn(echo, " ".join((run_.out + run_.err).split()))
+                proposes = name == "the proposal --discover writes"
+                run_ = self.build(*(("--discover",) if proposes else ("--check",)),
+                                  expect=None if proposes else 0 if under else 1)
+                said = run_.out + run_.err
+                if proposes:
+                    # Moved by 4.431: the run builds now, so its report holds F11's
+                    # note on the round, which echoes the label whole, a line 5008
+                    # columns wide that the refusal never reached; filed as a row
+                    # of its own. What the refusal said is measured where it is.
+                    said = run_.err + "\n" + (self.cwd / "config.proposed.toml").read_text(
+                        encoding="utf-8").split(f"\n{PROPOSAL_RULE}\n", 1)[0]
+                self.assertFits(said, f"a run whose config holds {name}")
+                self.assertIn(echo, " ".join(written_flat(said).split()))
 
     def test_the_notes_still_say_everything_they_said_before(self):
         # Wrapping is the one change where losing a clause is invisible: the report
         # still reads as prose. So the sentences are checked whole, across the wrap.
         flat = " ".join(self.run_.out.split())
-        self.assertIn("no bye is ever credited (a missing card and a resting team "
-                      "look identical from here) and a misspelt banner becomes a "
+        # 4.445 moved the parenthetical: a missing card and a rest do not look
+        # identical, and what checking the list buys is that the one team off is
+        # the division's.
+        self.assertIn("no bye is ever credited (a team on no card of a round is "
+                      "resting only if it is one of the division's, and only a list "
+                      "you have checked says so) and a misspelt banner becomes a "
                       "team of its own", flat)
         self.assertIn("in config.toml. Until you do", flat)
 
@@ -7193,7 +7717,9 @@ class TestACommandTooWideForTheReportIsContinuedWhereAWordBegins(unittest.TestCa
     def test_the_careers_page_s_lead_alone_goes_on_like_the_dashboards_one(self):
         # The paragraph a single-season run prints when the careers page is all it
         # left has a command of its own, with nothing but a build to reach it: an
-        # --out of 50 characters made it 85 columns on one line.
+        # --out of 50 characters made it 85 columns on one line. (Since 4.430 the
+        # run that leaves the page alone is one withholding names, in either
+        # mode, and the paragraph is that run's; the command is as it was.)
         out = "published/" + "y" * 40
         lines = self.left_behind(
             [self.orphan(Path(out) / site.CAREERS_PAGE, kind="careers")],
@@ -7487,12 +8013,16 @@ class TestADeepFolderDoesNotPushTheWordsOffTheEdge(CliCase):
             self.without_the_one_line_refusal(run_.err), "a refusal on stderr")
         self.assertIn("and run this again", self.flat(run_.err))
 
-    def test_refusing_to_overwrite_a_config_says_why_inside_it(self):
+    def test_refusing_to_overwrite_a_file_it_did_not_write_says_why_inside_it(self):
+        # Moved by 4.431: --discover over a config writes a proposal beside it, and
+        # what it refuses before any work is a file of that name it did not write.
         self.deep()
+        (self.cwd / config_mod.proposal_path(self.config)).write_text(
+            "# ours\n", encoding="utf-8")
         run_ = self.deep(extra=("--discover",), expect=2)
         self.assertFits(
             self.without_the_one_line_refusal(run_.err), "a refusal on stderr")
-        self.assertIn("Add --force if that is what you want", self.flat(run_.err))
+        self.assertIn("Rename it or move it, and run this again.", self.flat(run_.err))
 
     def without_the_one_line_refusal(self, err: str) -> str:
         """``stderr`` minus its ``error:`` lines, which are one line on purpose.
@@ -7992,7 +8522,8 @@ class TestTheReportsFieldsHoldAPathWithASpaceInItWhole(CliCase):
         self.assertField(run_, "open", self.out / "index.html")
         # And the sentence wrote is when nothing new was written.
         again = self.spaced()
-        self.assertIn("  wrote        nothing: all 9 file(s) under", again.out)
+        # Moved by 4.430: all 9 before it, the tenth the careers page.
+        self.assertIn("  wrote        nothing: all 10 file(s) under", again.out)
         self.assertField(again, "wrote", self.out)
 
     def test_a_dashboard_that_could_not_be_written_names_its_file_whole(self):
@@ -8325,7 +8856,9 @@ class TestACardWithRubbersNobodyCameForIsScoredAndStopsNothing(CliCase):
         run = self.build()
         self.assertIn("exit 0: all 8 card(s) scored, no errors", run.out)
         self.assertNotIn("totals-mismatch", run.out)
-        self.assertRegex(run.out, r"\n +1  Riverside Rockets +4  4  0  0 +23\.8 ")
+        # 4.421 moved this: the rubbers nobody came for are love sets to the
+        # rockets, the night 20-8 and 6.0 points where it was 8-8 and 4.8.
+        self.assertRegex(run.out, r"\n +1  Riverside Rockets +4  4  0  0 +25\.0 ")
 
 
 class TestNothingLeaksIntoTheProject(CliCase):
@@ -8956,7 +9489,10 @@ class TestARebuildWritesOnlyTheFilesThatChanged(CliCase):
                          "the first build, which wrote every file, says the same "
                          "thing as one that wrote none")
 
-    def test_a_card_that_arrives_writes_the_four_files_that_say_so(self):
+    def test_a_card_that_arrives_writes_the_five_files_that_say_so(self):
+        # Moved by 4.430: was ..._the_four_files_..., before a single-season
+        # build wrote the careers page, which adds up the card's figures and
+        # carries the night they changed, so it is the fifth.
         held, aside = self.cards[-1], self.cwd / "held.pdf"
         shutil.move(held, aside)
         before = self.settled()
@@ -8967,10 +9503,10 @@ class TestARebuildWritesOnlyTheFilesThatChanged(CliCase):
         # count. The stylesheets, the script and the competition's index.html are
         # copies of templates the cards cannot reach.
         self.assertEqual(self.moved(before),
-                         ["index.html", "picker-data.js",
+                         ["careers.html", "index.html", "picker-data.js",
                           f"{self.COMP}/season-data.js",
                           f"{self.COMP}/season.json"])
-        self.assertIn(f"4 of {len(before)} file(s)", self.wrote_line(run))
+        self.assertIn(f"5 of {len(before)} file(s)", self.wrote_line(run))
         # And the other half of the rule: a night that *did* change the figures is
         # dated from that night. Keeping the old stamp whenever one was there would
         # leave a page whose ladder moved reading as last week's.
@@ -8996,8 +9532,9 @@ class TestARebuildWritesOnlyTheFilesThatChanged(CliCase):
         document.write_text(export_mod.season_json(season), encoding="utf-8")
         self.build("--generated", self.LATER)
         self.assertEqual(self.season()["meta"]["generated"], self.LATER)
+        # Moved by 4.430: the careers page carries the stamp too, so it moves.
         self.assertEqual(self.moved(before),
-                         ["index.html", "picker-data.js",
+                         ["careers.html", "index.html", "picker-data.js",
                           f"{self.COMP}/season-data.js",
                           f"{self.COMP}/season.json"])
 
@@ -9079,7 +9616,8 @@ class TestARebuildWritesOnlyTheFilesThatChanged(CliCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         # Next week's round, which is what the README's paragraph is about: the last
         # card held back from the first run and copied in for the second, which writes
-        # the four files that say so. It used to be the second run of a first run,
+        # the five files that say so (four before 4.430 wrote the careers page in
+        # single-season mode). It used to be the second run of a first run,
         # which read back the config the first had written; that run writes nothing
         # now.
         held, aside = self.cards[-1], self.cwd / "held.pdf"
@@ -9593,7 +10131,9 @@ class TestABuildWritesAStatusBesideTheFrontPage(CliCase):
     def test_one_season(self):
         run = self.build()
         self.check(run)
-        self.assertIn("wrote        9 file(s) under site", run.out)
+        # Moved by 4.430: nine before it, the tenth the careers page that every
+        # build printing names now writes beside the front page.
+        self.assertIn("wrote        10 file(s) under site", run.out)
 
     def test_multi_season_mode(self):
         # One season in its own folder, so the tree is the same nine files one
@@ -9648,8 +10188,9 @@ class TestTheNextGoodBuildClearsTheFailure(StatusCase):
     """The first good build after a failure puts the clean status back, and only that.
 
     Through the same compare-then-write as every other generated file, so the run
-    that clears it says it wrote one file of nine, and the eight it left alone are
-    the figures a failed build was not allowed to touch either.
+    that clears it says it wrote one file of ten (of nine before 4.430 wrote the
+    careers page in single-season mode), and the nine it left alone are the
+    figures a failed build was not allowed to touch either.
     """
 
     def test_the_cards_put_back(self):
@@ -9660,7 +10201,8 @@ class TestTheNextGoodBuildClearsTheFailure(StatusCase):
         aside.rename(self.cwd / "data")
         run = self.build()
         self.assertEqual(self.status.read_bytes(), self.CLEAN)
-        self.assertIn("wrote 1 of 9 file(s) under site; the other 8 already held",
+        # Moved by 4.430: 1 of 9 and the other 8, before the careers page.
+        self.assertIn("wrote 1 of 10 file(s) under site; the other 9 already held",
                       self.wrote(run))
 
 
@@ -9722,10 +10264,13 @@ class TestTheDiscoverRefusalLeavesTheStatusAlone(StatusCase):
     exactly as current as they were before the command was typed.
     """
 
-    def test_discover_without_force(self):
+    def test_discover_refusing_a_file_it_did_not_write(self):
+        # Moved by 4.431: --discover over a config writes a proposal beside it, and
+        # refuses before any work only a file of that name it did not write.
+        (self.cwd / "config.proposed.toml").write_text("# ours\n", encoding="utf-8")
         before = self.status.read_bytes()
         run = self.build("--discover", expect=2)
-        self.assertIn("already exists", run.err)
+        self.assertIn("this program did not write it", run.err)
         self.assertEqual(self.status.read_bytes(), before)
 
 
@@ -10209,7 +10754,8 @@ class TestATemplateThatDoesNotAskForTheStatusGetsNone(StatusCase):
                 "--data", str(self.cwd / "data"), "--out", str(self.cwd / "site"),
                 "--config", str(self.cwd / "config.toml"), "--generated", STAMP]), 0)
         self.assertFalse(self.status.exists())
-        self.assertIn(f"wrote        8 file(s) under {self.cwd / 'site'}",
+        # Moved by 4.430: 8 before it, the ninth the careers page.
+        self.assertIn(f"wrote        9 file(s) under {self.cwd / 'site'}",
                       out.getvalue())
 
 
@@ -11414,8 +11960,11 @@ class TestOneFileIsTheWholeDashboard(CliCase):
         one bug that cannot be caught by a test that names the file itself is the
         file being named something else.
         """
+        # Moved by 4.430: the careers page, which every build printing names now
+        # writes at the root beside the front page, is not a fold.
         found = sorted(p for p in (self.cwd / "site").rglob("*.html")
                        if p.name != "index.html"
+                       and p != self.cwd / "site" / site.CAREERS_PAGE
                        and (not competition or competition in p.parts))
         self.assertEqual(len(found), 1,
                          f"expected one folded page under site; found {found}")
@@ -11567,10 +12116,12 @@ class TestOneFileIsTheWholeDashboard(CliCase):
         self.assertNotIn("one file", run.text,
                          "a run that folded nothing still has something to say "
                          "about folding")
+        # Moved by 4.430: careers.html, which a build printing names now writes
+        # in either mode, and which is no fold.
         self.assertEqual(
             self.files_in("site"),
-            ["build-status.js", "index.html", "picker-data.js", "styles.css",
-             f"{self.COMP}/app.js", f"{self.COMP}/index.html",
+            ["build-status.js", "careers.html", "index.html", "picker-data.js",
+             "styles.css", f"{self.COMP}/app.js", f"{self.COMP}/index.html",
              f"{self.COMP}/season-data.js", f"{self.COMP}/season.json",
              f"{self.COMP}/styles.css"])
 
@@ -11638,8 +12189,10 @@ class TestOneFileIsTheWholeDashboard(CliCase):
         """
         write_second_competition(self.cwd / "data" / "division-c")
         run = self.build("--single-file")
+        # Moved by 4.430: the careers page at the root is not a fold.
         folded = sorted(p for p in (self.cwd / "site").rglob("*.html")
-                        if p.name != "index.html")
+                        if p.name != "index.html"
+                        and p != self.cwd / "site" / site.CAREERS_PAGE)
         self.assertEqual(len(folded), 2, f"expected two folded pages; got {folded}")
         said = " ".join(self.section(run.text, "result").split())
         self.assertIn("2 written", said)
@@ -11843,8 +12396,10 @@ class TestTheOneFileLineCountsThePagesThisRunWrote(CliCase):
         Found as the class above finds one, and not by the rule that names them,
         which is part of what is under test.
         """
+        # Moved by 4.430: the careers page at the root is not a fold.
         return sorted(name for name in snapshot
-                      if name.endswith(".html") and not name.endswith("index.html"))
+                      if name.endswith(".html") and not name.endswith("index.html")
+                      and name != site.CAREERS_PAGE)
 
     def rewritten(self, before: dict) -> list[str]:
         """The folded pages whose bytes or modification time moved since *before*."""
@@ -11949,7 +12504,7 @@ class TestTheOneFileLineCountsThePagesThisRunWrote(CliCase):
     def test_a_run_that_only_put_back_a_missing_index_says_none_of_them_was_written(self):
         """One dashboard's ``index.html`` deleted: the run writes it back and nothing else.
 
-        The other way the two counts part company. The line above says ``1 of 22``,
+        The other way the two counts part company. The line above says ``1 of 23``,
         because one file was missing, and none of the folded pages moved, so this line
         says none of them was written. Measured on three demo divisions, two lines
         that are right on every other run in this class are wrong on this one. A line
@@ -11965,7 +12520,8 @@ class TestTheOneFileLineCountsThePagesThisRunWrote(CliCase):
         after = self.snapshot()
         self.assertEqual([name for name in after if after[name] != before.get(name)],
                          [f"{self.THIRD}/index.html"])
-        self.assertIn("wrote 1 of 22 file(s) under",
+        # Moved by 4.430: 1 of 22 before it, the 23rd the careers page.
+        self.assertIn("wrote 1 of 23 file(s) under",
                       " ".join(self.section(run.out, "result").split()))
         self.assertIn(f"one file none written: all 3, one beside each dashboard "
                       f"({self.kilobytes()}KB in all), already held what this run "
@@ -13611,16 +14167,21 @@ class TestEveryLinkInTheBuiltSiteOpensWithoutAServer(unittest.TestCase):
                         f"file listing rather than the page. Name the file: "
                         f"{landing.name}/index.html")
 
-    def test_the_careers_page_is_walked_with_the_rest_in_multi_mode_only(self):
+    def test_the_careers_page_is_walked_with_the_rest_in_both_modes(self):
         # Written at the site root in multi-season mode, so the walk above reads
         # its links with every other page's. Asserted, so that a careers page that
         # stopped being written cannot leave this class walking one page fewer.
-        self.assertFalse((self.sites["single"] / site.CAREERS_PAGE).exists())
-        page = self.sites["multi"] / site.CAREERS_PAGE
-        self.assertTrue(page.is_file())
-        walked = [target for on, target in self.links(self.sites["multi"])
-                  if on == page]
-        self.assertTrue(any("#/player/" in target for target in walked), walked)
+        # Moved by 4.430: this was ..._in_multi_mode_only, and held the single
+        # site to no careers page. A single-season build printing names writes
+        # one since 4.430, as the season's players, whose every row links a
+        # competition's player page, so both sites' pages are walked.
+        for mode, root in self.sites.items():
+            with self.subTest(mode=mode):
+                page = root / site.CAREERS_PAGE
+                self.assertTrue(page.is_file())
+                walked = [target for on, target in self.links(root) if on == page]
+                self.assertTrue(any("#/player/" in target for target in walked),
+                                walked)
 
     def test_a_template_that_lost_its_home_link_stops_the_run(self):
         """Because the alternative is a dashboard with no way back to the front.
@@ -13952,8 +14513,11 @@ class TestALinkAtAFileTheBuildWritesIsRefusedBeforeAnythingIsWritten(CliCase):
         decoys = {path: self.linked(path) for path in files}
         held = {decoy: decoy.read_bytes() for decoy in decoys.values()}
         run = self.build(expect=2)
+        # Moved by 4.430: a single-season build printing names writes the
+        # careers page beside the front page, and its refusal names it so.
         self.assertEqual(self.said(run), sorted(
-            self.refusal(path, "the front page" if path.parent == self.site
+            self.refusal(path, "the careers page" if path.name == site.CAREERS_PAGE
+                         else "the front page" if path.parent == self.site
                          else "the dashboard") for path in files))
         for path, decoy in decoys.items():
             self.assertTrue(path.is_symlink(), path)
@@ -14351,6 +14915,551 @@ class TestADashboardNoRunBuildsAnyMoreIsSaidOutLoud(OrphanCase):
         over = [line for line in run.out.splitlines() if len(line) > build_mod.WIDTH]
         self.assertEqual(over, [], f"{len(over)} line(s) run over "
                                    f"{build_mod.WIDTH} columns")
+
+
+def fixture_file(data: Path, rnd: str, home: str, away: str) -> Path:
+    """Where :func:`write_season_cards` writes the card of that round and those sides."""
+    return (data / f"Round{rnd}" / f"{TEAMS[home][0].title().replace(' ', '')}-"
+                                   f"{TEAMS[away][0].title().replace(' ', '')}.pdf")
+
+
+def write_indexed_card(data: Path, index: int, *, on: str | None = None,
+                       round_label: str | None = None, swapped: bool = False,
+                       match_id: str | None = None) -> Path:
+    """``FIXTURES[index - 1]``'s card as :func:`write_season_cards` writes it, or moved.
+
+    *on* is the date it prints, with that date's own weekday beside it, so a card
+    moved to a Thursday names Thursday twice and is filed under Thursday by a rule
+    that goes by either. *round_label* is the round it prints, and *swapped* puts
+    the away side first. Written to the file that round and those sides are given,
+    so a card that is only re-dated replaces the one it was. *match_id* is the id
+    it prints, as a card re-exported under a new one or another night's would.
+    """
+    rnd, home, away, scores = FIXTURES[index - 1]
+    played = DATES[rnd]
+    if swapped:
+        home, away = away, home
+        scores = tuple((theirs, ours) for ours, theirs in scores)
+    rnd = round_label or rnd
+    home_rows, home_on_court = squad_for(home, TEAMS[home][1])
+    away_rows, away_on_court = squad_for(away, TEAMS[away][1])
+    path = fixture_file(data, rnd, home, away)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return cardwriter.write_card_file(path, cardwriter.CardSpec(
+        date=on or played, round_label=rnd, division="B", court=f"{index:02d}",
+        match_id=f"200{index:04d}" if match_id is None else match_id,
+        home_name=TEAMS[home][0],
+        away_name=TEAMS[away][0],
+        rows=rows_for(scores, home_on_court, away_on_court),
+        home_roster=home_rows, away_roster=away_rows))
+
+
+class RefiledCase(CliCase):
+    """A project whose first build filed cards under a night they were not played on.
+
+    ``MISFILED`` is each such card, by its place in ``FIXTURES`` counted from one,
+    with the date it printed for that build: another night's, with that night's
+    weekday beside it. The competition line names no night on these cards, so the
+    printed date and weekday are all a reader has to file one by, and both name
+    the other night. The first build, which wrote the dashboard every test here is
+    about, belongs to the class as :class:`OrphanCase`'s does; each test puts some
+    of those cards right or takes them away, and builds again.
+
+    ``SEASONS`` writes the season into each of those folders under ``data/``, in
+    multi-season mode, the last of them holding the misfiled cards. Empty is a
+    single-season project, whose first run writes its ``config.toml``.
+
+    ``ANOTHER_NIGHT`` is the date of each round on a second night of the same four
+    teams, by round: every card of the season again, under ``data/another-night``,
+    dated so, each printing ``ANOTHER_NIGHT_IDS`` and its place in ``FIXTURES``
+    as its id. ``200``, the first night's ids, is two nights whose cards share
+    them. Empty is no second night.
+    """
+
+    MISFILED: dict[int, str] = {}
+    SEASONS: tuple[str, ...] = ()
+    ANOTHER_NIGHT: dict[str, str] = {}
+    ANOTHER_NIGHT_IDS = "200"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._shared = tempfile.TemporaryDirectory()
+        cls.pristine = Path(cls._shared.name) / "built"
+        for data in cls.folders(cls.pristine):
+            write_season_cards(data)
+        for index, on in cls.MISFILED.items():
+            write_indexed_card(cls.folders(cls.pristine)[-1], index, on=on)
+        for index, (rnd, *_) in enumerate(FIXTURES, start=1):
+            if cls.ANOTHER_NIGHT:
+                write_indexed_card(cls.folders(cls.pristine)[-1] / "another-night",
+                                   index, on=cls.ANOTHER_NIGHT[rnd],
+                                   match_id=f"{cls.ANOTHER_NIGHT_IDS}{index:04d}")
+        if cls.SEASONS:
+            (cls.pristine / "config.toml").write_text(
+                '[build]\nseasons = "multi"\n', encoding="utf-8")
+        done = subprocess.run(
+            (sys.executable, str(BUILD), "--generated", STAMP),
+            cwd=cls.pristine, capture_output=True, text=True, timeout=600)
+        if done.returncode != 0:
+            raise AssertionError(f"the fixture's build failed:\n"
+                                 f"{done.stdout}{done.stderr}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._shared.cleanup()
+
+    @classmethod
+    def folders(cls, project: Path) -> list[Path]:
+        return ([project / "data" / season for season in cls.SEASONS]
+                or [project / "data"])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self._tmp.name) / "project"
+        shutil.copytree(self.pristine, self.cwd)
+        self.addCleanup(self._tmp.cleanup)
+        self.data = self.folders(self.cwd)[-1]
+
+    def put_right(self, *indexes: int) -> None:
+        """Those cards, or every misfiled one, printing their own Tuesday again."""
+        for index in indexes or tuple(self.MISFILED):
+            write_indexed_card(self.data, index)
+
+    def take_away(self, *indexes: int, under: str = "") -> None:
+        """Those cards deleted, or those of the folder *under* ``data/``."""
+        for index in indexes:
+            fixture_file(self.data / under, *FIXTURES[index - 1][:3]).unlink()
+
+    def drop_section(self, comp_id: str) -> None:
+        """Every table of *comp_id* taken out of config.toml, as from a club's own file."""
+        path = self.cwd / "config.toml"
+        kept, inside = [], False
+        for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+            if line.startswith("["):
+                table = line.lstrip("[")
+                inside = table.startswith((f"competitions.{comp_id}]",
+                                           f"competitions.{comp_id}."))
+            if not inside:
+                kept.append(line)
+        path.write_text("".join(kept), encoding="utf-8")
+
+    def edit_config(self, old: str, new: str) -> None:
+        path = self.cwd / "config.toml"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, f"config.toml holds {old!r} "
+                                             f"{text.count(old)} time(s)")
+        path.write_text(text.replace(old, new), encoding="utf-8")
+
+    def reason(self, run: Run, orphan: str, heading: str = "left behind") -> str:
+        """What the report prints under *orphan*'s path, its wrapping undone."""
+        block = printed_finding(self, self.section(run.out, heading),
+                                str(Path("site") / orphan))
+        return " ".join(" ".join(block[1:]).split())
+
+
+class TestADashboardLeftBehindByACardReadThisRunSaysWhereTheCardWasFiled(RefiledCase):
+    """A card filed under another night and then put right left a dashboard said to have none.
+
+    Row 4.457. A Tuesday card that printed a Thursday -- here R3 Hilltop Aces v
+    Lakeside Spinners, dated Thursday 3 September -- was filed under Thursday, so
+    the first run built a Thursday Division B of one card and wrote
+    [competitions.thursday-division-b] into config.toml live, label, day and
+    division. Put right, the card was filed under tuesday-division-b and listed
+    there as new under since the last build, and the Thursday dashboard it left
+    was given the reason a deleted season gets: "no card under data belongs to it
+    any more", of a card under data that this run had just read. Measured on a
+    copy of the base (/tmp/mcf/scratch/LOCKIN/probe/before.txt, the draft's six
+    teams of a Tuesday Division C over three rounds): that reason for a re-dated
+    card and for a deleted one alike, with the section declared and with it taken
+    out, under a plain run, --check and --prune; a probe matching the stale
+    copy's matches to this run's by season key, round and the two teams found 1
+    of 1 re-dated and 0 of 1 deleted.
+
+    Now the reason names the fixture, the file this run read it from and the
+    competition it was filed under, when every card of the copy was read, and
+    while config.toml declares the copy's competition it says that section is all
+    that keeps it on the front page. Rejected: matching by the file's path, which
+    a re-export renames, and by the printed match id alone, which some cards
+    leave out and others share; hiding the front page's entry, which would make a
+    published page depend on what an earlier build left.
+    """
+
+    MISFILED = {6: "2026-09-03"}
+    STALE = "thursday-division-b"
+
+    def test_it_names_the_card_this_run_read_and_where_it_was_filed(self):
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("its 1 card's fixture, R3 Hilltop Aces v Lakeside Spinners, "
+                      "was read this run from "
+                      f"{Path('data', 'Round3', 'HilltopAces-LakesideSpinners.pdf')} "
+                      "and filed under tuesday-division-b", said)
+        self.assertNotIn("belongs to it any more", said)
+
+    def test_the_section_the_first_run_wrote_for_it_is_said_to_be_all_that_lists_it(self):
+        # The first run's own file: [competitions.thursday-division-b] with label,
+        # day and division live, which is what lists it on the front page.
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("so this copy is stale and --prune removes it. "
+                      "[competitions.thursday-division-b] in config.toml is all that "
+                      "keeps Thursday Division B on the front page, with no results: "
+                      "if it was written for that card, delete it", said)
+
+    def test_with_no_section_for_it_the_copy_is_said_to_be_stale_alone(self):
+        """The owner's case: a config.toml declaring none of the nights a card strayed to.
+
+        Measured on the real cards by the integrator: 8 cards under seven stray
+        competitions, none of them declared, and every card of each found under a
+        Monday or Tuesday competition once filed on its own night. So the reason a
+        club reads there is this one, and it must not send them to a section
+        their file does not have.
+        """
+        self.drop_section(self.STALE)
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("and filed under tuesday-division-b, so this copy is stale "
+                      "and --prune removes it", said)
+        self.assertNotIn("[competitions.", said)
+        self.assertNotIn("delete it", said)
+
+    def test_a_section_that_could_claim_no_card_is_not_said_to_list_it(self):
+        # A day and no division, or a division and no day: the front page lists no
+        # entry for either, so the section keeps nothing on it and the sentence
+        # about it would be untrue.
+        for kept in ('day = "Thursday"\n', 'division = "B"\n'):
+            with self.subTest(kept=kept):
+                shutil.rmtree(self.cwd)
+                shutil.copytree(self.pristine, self.cwd)
+                self.edit_config('day = "Thursday"\ndivision = "B"\n', kept)
+                self.put_right()
+                run = self.build(expect=None)
+                said = self.reason(run, self.STALE)
+                self.assertIn("so this copy is stale and --prune removes it", said)
+                self.assertNotIn("front page", said)
+                front = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+                self.assertNotIn("Thursday Division B", front)
+
+    def test_the_entry_is_named_as_the_front_page_names_it(self):
+        # The section's own label, which is what the front page prints for a
+        # competition no document describes; the stale copy's, on the line above
+        # the reason, is the one it was built with.
+        self.edit_config('label = "Thursday Division B"', 'label = "Thursday Night B"')
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("Thursday Division B -- 1 card(s)", said)
+        self.assertIn("keeps Thursday Night B on the front page, with no results",
+                      said)
+        front = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Thursday Night B", front)
+        self.assertIn("No results yet", front)
+
+    def test_a_check_says_what_the_front_page_a_build_writes_would_list(self):
+        # --check rewrites no front page, and the one there is the last build's,
+        # which links the Thursday dashboard with its result.
+        # And --prune would remove the copy, as in a plain run.
+        self.put_right()
+        said = self.reason(self.build("--check"), self.STALE)
+        self.assertIn("so this copy is stale and --prune removes it", said)
+        self.assertIn("is all that keeps Thursday Division B on the front page a "
+                      "build writes, with no results", said)
+
+    def test_a_copy_holding_a_file_of_the_club_s_is_not_said_to_go_with_prune(self):
+        # --prune refuses a folder holding a file this tool did not write.
+        self.put_right()
+        (self.cwd / "site" / self.STALE / "notes.txt").write_text(
+            "ours\n", encoding="utf-8")
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("filed under tuesday-division-b, so this copy is stale. ", said)
+        self.assertNotIn("--prune removes it", said)
+
+    def test_a_prune_says_what_it_did_with_the_copy_and_not_what_it_would(self):
+        # The line under the reason is what --prune did, so the reason does not
+        # also say what it would do.
+        self.put_right()
+        said = self.reason(self.build("--prune"), self.STALE, heading="pruned")
+        self.assertIn("filed under tuesday-division-b, so this copy is stale. ", said)
+        self.assertNotIn("--prune removes it", said)
+        self.assertRegex(said, r"delete it removed \d+ file\(s\)$")
+
+    def test_a_card_taken_away_rather_than_put_right_keeps_the_reason_it_had(self):
+        self.take_away(6)
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("read this run", said)
+
+    def test_a_card_put_right_under_a_new_id_keeps_the_reason_it_had(self):
+        # A card re-exported under another id is another export of the fixture,
+        # and nothing but the fixture, which two nights can share, ties it to
+        # the copy's card. The reason a deleted season gets is still true: no
+        # card under data is filed under the copy.
+        write_indexed_card(self.data, 6, match_id="2010006")
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("read this run", said)
+
+    def test_the_same_teams_in_another_round_are_not_its_card(self):
+        self.take_away(6)
+        write_indexed_card(self.data, 6, on="2026-09-08", round_label="4")
+        said = self.reason(self.build(expect=None), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+
+    def test_the_same_teams_the_other_way_round_are_not_its_card(self):
+        """Matched on home and away as the card prints them, as a fixture is everywhere.
+
+        Two nights can field teams of one name, so a card of the same two teams is
+        not proof of the same card, and the sides as printed are one more thing
+        two different nights' cards would have to agree on. Rejected: either way
+        round, which would match R3 Lakeside Spinners v Hilltop Aces here and say
+        a card was read that is not the one the copy holds. A card re-exported with
+        its sides swapped keeps the old reason, which is still true: no card under
+        data belongs to the Thursday competition.
+        """
+        self.take_away(6)
+        write_indexed_card(self.data, 6, swapped=True)
+        said = self.reason(self.build(expect=None), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+
+    def test_a_copy_whose_matches_cannot_be_read_keeps_the_reason_it_had(self):
+        # No match read from it is not every match found, and nor is a match that
+        # is not a table: absence of evidence is not recorded as evidence.
+        self.put_right()
+        stale = self.cwd / "site" / self.STALE / "season.json"
+        kept = json.loads(stale.read_text(encoding="utf-8"))
+        for matches in ([], [*kept["matches"], "not a match"]):
+            with self.subTest(matches=matches):
+                stale.write_text(json.dumps({**kept, "matches": matches}),
+                                 encoding="utf-8")
+                said = self.reason(self.build(), self.STALE)
+                self.assertIn("no card under data belongs to it any more", said)
+
+    def hold_twice(self) -> None:
+        """The misfiled card saved a second time, under data/again, and built into
+        the copy, which then holds two cards of the one fixture (F9)."""
+        write_indexed_card(self.data / "again", 6, on=self.MISFILED[6])
+        self.build(expect=None)
+        stale = self.cwd / "site" / self.STALE / "season.json"
+        held = json.loads(stale.read_text(encoding="utf-8"))["matches"]
+        self.assertEqual(len(held), 2, "the copy does not hold both cards")
+
+    def test_a_card_the_copy_holds_twice_is_named_once(self):
+        # Two of the copy's cards, both read this run, and one fixture.
+        self.hold_twice()
+        self.put_right()
+        write_indexed_card(self.data / "again", 6)
+        said = self.reason(self.build(expect=None), self.STALE)
+        self.assertIn("Thursday Division B -- 2 card(s)", said)
+        self.assertIn("its 2 cards' fixtures, R3 Hilltop Aces v Lakeside Spinners, "
+                      "were read this run and filed under tuesday-division-b, so",
+                      said)
+
+    def test_a_fixture_the_copy_holds_twice_and_this_run_read_once_is_not_found(self):
+        """As many cards of each fixture as the copy holds, or the reason it had.
+
+        The copy holds two cards of R3 Hilltop Aces v Lakeside Spinners and this
+        run read one: the other is a result no card this run read accounts for.
+        Before, each of the copy's two was found as the one card this run read,
+        and the reason said "its 2 cards' fixtures ... were read this run" of one.
+        """
+        self.hold_twice()
+        self.put_right()
+        self.take_away(6, under="again")
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("read this run", said)
+
+    def test_a_fixture_the_copy_holds_once_and_this_run_read_twice_is_not_found(self):
+        # The card saved a second time: which of the two files was the copy's
+        # card nothing here can say, so neither is named as the one it held.
+        self.put_right()
+        write_indexed_card(self.data / "again", 6)
+        said = self.reason(self.build(expect=None), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("read this run", said)
+
+    def test_the_readme_quotes_the_reason_in_the_words_the_report_prints(self):
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        start = readme.index("### It says a dashboard was left behind")
+        quoted = re.search(r"^- \*\*`(its 1 card's [^`]*)`\*\*", readme[start:], re.M)
+        self.assertIsNotNone(quoted, "the README lists no cause for a card read "
+                                     "this run")
+        at = 0
+        for piece in quoted.group(1).split("…"):
+            found = said.find(piece.strip(), at)
+            self.assertGreaterEqual(found, at, f"{piece.strip()!r} is not in the "
+                                               f"reason, in order: {said}")
+            at = found + len(piece.strip())
+
+    def test_the_report_that_says_it_still_fits_the_width(self):
+        self.put_right()
+        run = self.build("--quiet")
+        over = [line for line in run.out.splitlines() if len(line) > build_mod.WIDTH]
+        self.assertEqual(over, [], f"{len(over)} line(s) run over "
+                                   f"{build_mod.WIDTH} columns")
+
+
+class TestADashboardLeftBehindBySeveralCardsCountsThemAndNamesAFew(RefiledCase):
+    """Several cards of a copy: counted, a few fixtures named, and every one found.
+
+    The owner's stray competitions hold one or two cards each, and a whole night
+    misfiled holds a season. Two Thursday cards of round 1 and four Wednesday ones
+    of rounds 2 and 3 here, every card of the season on the wrong night, so the
+    first run built no Tuesday competition at all and wrote a section for each
+    stray night. Rejected: naming every fixture, which makes a misfiled season a
+    paragraph, and naming each card's file past the first, which doubles the
+    reason for no decision it changes; the dashboard it was filed under names each
+    one's file on its match page.
+    """
+
+    MISFILED = {1: "2026-08-20", 2: "2026-08-20", 3: "2026-08-26",
+                4: "2026-08-26", 5: "2026-09-02", 6: "2026-09-02"}
+
+    def test_two_cards_are_counted_and_both_fixtures_named(self):
+        # In the stale copy's own order, the order its dashboard lists them in.
+        self.put_right()
+        said = self.reason(self.build(), "thursday-division-b")
+        self.assertIn("its 2 cards' fixtures, R1 Lakeside Spinners v Parkview "
+                      "Wanderers and R1 Riverside Rockets v Hilltop Aces, were read "
+                      "this run and filed under tuesday-division-b, so this copy is "
+                      "stale", said)
+
+    def test_past_three_fixtures_the_rest_are_counted(self):
+        self.put_right()
+        said = self.reason(self.build(), "wednesday-division-b")
+        self.assertIn("its 4 cards' fixtures, R2 Hilltop Aces v Parkview Wanderers, "
+                      "R2 Riverside Rockets v Lakeside Spinners, R3 Hilltop Aces v "
+                      "Lakeside Spinners and 1 more, were read this run and filed "
+                      "under tuesday-division-b", said)
+
+    def test_the_section_is_said_to_have_been_written_for_those_cards(self):
+        self.put_right()
+        said = self.reason(self.build(), "thursday-division-b")
+        self.assertIn("if it was written for those cards, delete it", said)
+
+    def test_the_cut_names_three_and_counts_the_rest(self):
+        # The cut is scope.in_words_capped, which names a list whole up to its
+        # limit, three exactly included, and counts what is past it.
+        from matchcentre.scope import in_words_capped
+        cases = {(): "", ("a",): "a", ("a", "b", "c"): "a, b and c",
+                 ("a", "b", "c", "d"): "a, b, c and 1 more",
+                 ("a", "b", "c", "d", "e"): "a, b, c and 2 more"}
+        for items, said in cases.items():
+            with self.subTest(items=items):
+                self.assertEqual(in_words_capped(items, 3), said)
+
+    def test_one_card_of_several_not_read_this_run_keeps_the_reason_it_had(self):
+        # Three of the four Wednesday cards were read; the fourth is gone, and the
+        # copy holds a result no card under data accounts for.
+        self.put_right(1, 2, 3, 4, 5)
+        self.take_away(6)
+        run = self.build()
+        said = self.reason(run, "wednesday-division-b")
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("read this run", said)
+        self.assertIn("were read this run", self.reason(run, "thursday-division-b"))
+
+
+class TestADashboardLeftBehindIsMatchedOnlyToCardsOfItsOwnSeason(RefiledCase):
+    """The season key is part of the match: a draw repeats from one season to the next.
+
+    In multi-season mode each folder under data/ is a season, and the same two
+    teams meet in the same round of every season that repeats its draw. Matched
+    on the round and the teams alone, a 2026 card taken away would be found in
+    2025's competition, and a 2026 card put right named under 2025's, the first
+    competition by id.
+    """
+
+    MISFILED = {6: "2026-09-03"}
+    SEASONS = ("2025", "2026")
+    STALE = str(Path("2026") / "2026-thursday-division-b")
+
+    def test_the_card_put_right_is_found_under_its_own_season(self):
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("filed under 2026-tuesday-division-b", said)
+
+    def test_a_card_of_another_season_is_not_its_card(self):
+        self.take_away(6)
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+
+
+class TestADashboardLeftBehindIsNotGivenTheCardOfAnotherNightFieldingItsTeams(
+        RefiledCase):
+    """A fixture of two teams another night fields as well is no evidence of a card.
+
+    Two nights can field teams of one name, and each night's card of R3 Hilltop
+    Aces v Lakeside Spinners is a fixture of the same round and the same two
+    teams. Here a Monday night of the same four teams beside the Tuesday one, its
+    cards printing the Tuesday cards' ids, since an id is no proof either: some
+    cards leave it out and others share one. The Tuesday R3 card was filed under
+    Thursday by the first build. Matched on the fixture alone, the first card
+    found won: with the Tuesday card deleted, the Thursday copy was said to have
+    been "read this run from" the Monday card "and filed under
+    monday-division-b", and put right, the same, though the card was under
+    Tuesday (/tmp/mcf/scratch/LOCKIN/twonights-before.txt, measured on
+    Division C). So a fixture is found only where one competition of the copy's
+    season fields both its teams; otherwise the copy keeps the reason it had,
+    which is true of it: no card under data is filed under it. Rejected: one
+    card per fixture, which the deleted card leaves the Monday one.
+    """
+
+    MISFILED = {6: "2026-09-03"}
+    ANOTHER_NIGHT = {"1": "2026-08-17", "2": "2026-08-24", "3": "2026-08-31"}
+    STALE = "thursday-division-b"
+
+    def test_a_card_taken_away_is_not_said_to_be_the_other_night_s(self):
+        self.take_away(6)
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("monday-division-b", said)
+
+    def test_a_card_put_right_is_not_said_to_be_either_night_s(self):
+        # Both nights hold a card of the fixture, and nothing on the copy says
+        # which it held.
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("read this run", said)
+
+    def test_a_night_fielding_only_one_of_its_teams_does_not_stand_in_its_way(self):
+        # Monday without its three cards of Lakeside Spinners fields Hilltop Aces
+        # alone, so only Tuesday fields both.
+        self.take_away(2, 3, 6, under="another-night")
+        self.put_right()
+        said = self.reason(self.build(), self.STALE)
+        self.assertIn("its 1 card's fixture, R3 Hilltop Aces v Lakeside Spinners, "
+                      "was read this run from "
+                      f"{Path('data', 'Round3', 'HilltopAces-LakesideSpinners.pdf')} "
+                      "and filed under tuesday-division-b", said)
+
+
+class TestADashboardLeftBehindIsNotGivenACardThatPrintedAnotherId(RefiledCase):
+    """The one night fielding both teams, where its card printed another id, is not it.
+
+    A Monday night of the same four teams again, its cards printing ids of their
+    own, and the Tuesday R3 Hilltop Aces v Lakeside Spinners filed under Thursday
+    by the first build. With that card deleted and Tuesday's two other cards of
+    Lakeside Spinners too, Tuesday fields Hilltop Aces alone and Monday is the
+    one night fielding both, so the rule of one night found Monday's card and
+    said the copy's had been "read this run from data/another-night/Round3/
+    HilltopAces-LakesideSpinners.pdf and filed under monday-division-b"
+    (/tmp/mcf/scratch/LOCKIN/probe/s1.txt). The copy's card printed 2000006 and
+    Monday's prints 3000006, so it is not found, and the copy keeps the reason
+    it had.
+    """
+
+    MISFILED = {6: "2026-09-03"}
+    ANOTHER_NIGHT = {"1": "2026-08-17", "2": "2026-08-24", "3": "2026-08-31"}
+    ANOTHER_NIGHT_IDS = "300"
+
+    def test_a_card_deleted_whose_night_fields_its_teams_no_more_is_not_found(self):
+        self.take_away(2, 3, 6)
+        said = self.reason(self.build(expect=None), "thursday-division-b")
+        self.assertIn("no card under data belongs to it any more", said)
+        self.assertNotIn("monday-division-b", said)
 
 
 class TestPruneRemovesOnlyTheDashboardsThisToolWrote(OrphanCase):
@@ -15536,16 +16645,26 @@ class TestTheListsTheChecksNameAreSentences(unittest.TestCase):
         from matchcentre.model import Rating
         # Four players on court, two a side in the doubles, and the row's case is
         # the last: only ana-reyes rated.
-        listed = {("bo-nash", "dee-ferro", "eli-quade"): "ana-reyes",
-                  ("dee-ferro", "eli-quade"): "ana-reyes and bo-nash",
-                  ("ana-reyes",): "bo-nash, dee-ferro and eli-quade"}
+        # 4.442 moved the words: one name is told what its block gave, and more
+        # than one are listed by the same rule as before, the block said once for
+        # each side the names are on: ana-reyes and bo-nash are both home players,
+        # on one block, and bo-nash, dee-ferro and eli-quade on both.
+        listed = {("bo-nash", "dee-ferro", "eli-quade"):
+                      "the roster block gives no rating for ana-reyes, who played, "
+                      "so ana-reyes shows",
+                  ("dee-ferro", "eli-quade"):
+                      "the roster block gives no rating for ana-reyes and bo-nash, "
+                      "who played, so each shows",
+                  ("ana-reyes",):
+                      "the roster blocks give no rating for bo-nash, dee-ferro and "
+                      "eli-quade, who played, so each shows"}
         for rated, absent in listed.items():
             with self.subTest(rated=rated):
                 found = validate._check_ratings(SimpleNamespace(playable=[
                     self.match(ratings={slug: Rating(singles=5.0) for slug in rated})]))
                 self.assertEqual([issue.message for issue in found],
-                                 [f"R3 rockets v aces: no rating was read for "
-                                  f"{absent}."])
+                                 [f"R3 rockets v aces: {absent} none for this "
+                                  f"round."])
 
     def test_a_roster_the_squad_does_not_match_is_told_it_as_a_sentence(self):
         # Only what the roster leaves out: roster-mismatch, which told a roster the
@@ -15624,10 +16743,15 @@ class TestTheListsTheNotesAndTheLoaderNameAreSentences(unittest.TestCase):
         for byes, named in ((("rockets",), "Spinners and Wrens"),
                             ((), "Rockets, Spinners and Wrens")):
             with self.subTest(named=named):
+                # is_finals since 4.445, which skips a final's round; number and
+                # the card's two teams since 4.444, which counts a round's own
+                # cards' teams as accounted for.
                 drawn = SimpleNamespace(source="cards", fixtures=(("aces", "owls"),),
-                                        byes=byes)
+                                        byes=byes, is_finals=False, number="1")
                 note, = discover_mod._shortfall_notes(
-                    "c", {"1": drawn}, [SimpleNamespace(round="1")], teams, True)
+                    "c", {"1": drawn},
+                    [SimpleNamespace(round="1", home="aces", away="owls")], teams,
+                    True)
                 self.assertTrue(note.startswith(
                     f"c: round 1 accounts for none of {named}. Two or more teams "),
                     note)
@@ -18767,6 +19891,434 @@ class TestASeasonsNameFromItsSeasonsLineIsLeftToThatLineByDiscover(OnlyCase):
         self.assertFalse(any("[seasons]" in line for line in section), section)
 
 
+def write_two_unnamed_rounds(data: Path, *, season_line: str = "",
+                             dates: tuple[str, str] = ("2026-08-18", "2026-08-25"),
+                             when: str | None = None, flat: bool = False) -> None:
+    """Two cards of a Tuesday Division B, home and away, printing *season_line*.
+
+    Hilltop Aces and Bramble Finches, a round each, with no season printed unless
+    one is given. *when* is the date line each card prints in place of its date:
+    a weekday and a time alone gives a card no date at all. Each card is in a
+    round's folder under *data*, or *flat*, directly in it.
+    """
+    aces, finches = ("Ada Quill", "Bea Rook"), ("Cy Wren", "Di Lark")
+    for rnd, played, (home, away), (ours, theirs) in (
+            (1, dates[0], ("HILLTOP ACES", "BRAMBLE FINCHES"), (aces, finches)),
+            (2, dates[1], ("BRAMBLE FINCHES", "HILLTOP ACES"), (finches, aces))):
+        folder = data if flat else data / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cardwriter.write_card_file(folder / f"r{rnd}.pdf", cardwriter.CardSpec(
+            season_line=season_line, date=played, round_label=str(rnd),
+            division="B", match_id=f"300000{rnd}", home_name=home, away_name=away,
+            rows=(cardwriter.SetRow(6, 2, True, ours, theirs),
+                  cardwriter.SetRow(6, 3, False, ours[:1], theirs[:1]),
+                  cardwriter.SetRow(2, 6, False, ours[1:], theirs[1:]),
+                  cardwriter.SetRow(6, 1, True, ours, theirs)),
+            home_roster=tuple(cardwriter.RosterRow(name, 2.5, 2.5, captain=not at)
+                              for at, name in enumerate(ours)),
+            away_roster=tuple(cardwriter.RosterRow(name, 2.5, 2.5, captain=not at)
+                              for at, name in enumerate(theirs)),
+            **({} if when is None else {"when": when})))
+
+
+def flagged_by_the_page() -> tuple[str, ...]:
+    """The provenance values app.js's isDerived flags, read off its source.
+
+    So that a test counting the values the page lists as worked out counts them as
+    the page does, rather than by a copy of the rule that can fall out of step.
+    """
+    source = (ROOT / "matchcentre" / "web" / "app.js").read_text(encoding="utf-8")
+    start = source.index("\nfunction isDerived(")
+    return tuple(re.findall(r"v === '(\w+)'",
+                            source[start:source.index("\n}\n", start)]))
+
+
+class UnnamedSeasonCase(unittest.TestCase):
+    """Projects of :func:`write_two_unnamed_rounds`, built once for the class.
+
+    Each class says in ``runs`` what it builds; nothing a test does changes them.
+    """
+
+    SINGLE = "[competitions.tuesday-division-b]"
+    MULTI = "[competitions.2026-winter-tuesday-division-b]"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.base = Path(cls._tmp.name)
+        cls.runs()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @classmethod
+    def runs(cls):
+        """Build what the class's tests read."""
+
+    @classmethod
+    def project(cls, name: str, *, multi: bool = False, flat: bool = False,
+                **cards) -> Path:
+        """Two cards in a project of their own; in multi-season mode under
+        data/2026-winter, or *flat* directly in data/, with the file
+        ``--discover --force`` writes there."""
+        cwd = cls.base / name
+        write_two_unnamed_rounds(cwd / "data" / "2026-winter" if multi and not flat
+                                 else cwd / "data", flat=flat, **cards)
+        if multi:
+            (cwd / "config.toml").write_text('[build]\nseasons = "multi"\n',
+                                             encoding="utf-8")
+            cls.run_in(cwd, "--discover", "--force")
+        return cwd
+
+    @staticmethod
+    def run_in(cwd: Path, *argv: str) -> Run:
+        return ShortOfResultCase.run_build(cwd, *argv)
+
+    @staticmethod
+    def written(cwd: Path) -> str:
+        return (cwd / "config.toml").read_text(encoding="utf-8")
+
+    @staticmethod
+    def edit(cwd: Path, pattern: str, new: str) -> None:
+        """The one line of the file *pattern* matches made *new*, as a club edits."""
+        path = cwd / "config.toml"
+        text, count = re.subn(pattern, new, path.read_text(encoding="utf-8"),
+                              count=1, flags=re.M)
+        assert count == 1, (pattern, path)
+        path.write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def section_of(text: str, header: str) -> list[str]:
+        """A written file's lines from *header* to the next header, live or not."""
+        lines = text.splitlines()
+        start = lines.index(header)
+        end = next((at for at in range(start + 1, len(lines))
+                    if lines[at].startswith(("[", "# ["))), len(lines))
+        return lines[start:end]
+
+    @staticmethod
+    def season_lines(section: list[str]) -> list[str]:
+        return [line for line in section if re.match(r"(# )?season =", line)]
+
+    @staticmethod
+    def comment_above(section: list[str], line: str) -> str:
+        """The comment directly above *line*, its marks taken out and one line."""
+        above: list[str] = []
+        for entry in reversed(section[:section.index(line)]):
+            if not entry.startswith("# ") or re.match(r'# (\[|[\w"-]+ =)', entry):
+                break
+            above.insert(0, entry[2:])
+        return " ".join(above)
+
+    @staticmethod
+    def season_item(run: Run) -> tuple[str, list[str]]:
+        """The review's season name item: its status and its TOML."""
+        found = [(status, [line for line in toml if line])
+                 for subject, status, toml in review_items(run.text)
+                 if subject.startswith("the season name for ")]
+        assert len(found) == 1, run.text[-3000:]
+        return found[0]
+
+    @staticmethod
+    def document(cwd: Path) -> dict:
+        found = sorted((cwd / "site").rglob("season.json"))
+        assert len(found) == 1, found
+        return json.loads(found[0].read_text(encoding="utf-8"))
+
+    @staticmethod
+    def worked_out(document: dict) -> list[str]:
+        """The aspects the page lists under "values we worked out", as app.js's
+        isDerived picks them."""
+        flagged = flagged_by_the_page()
+        return sorted(aspect for aspect, value
+                      in document["meta"]["provenance"].items() if value in flagged)
+
+
+class TestASeasonsNameIsOfferedAsItsPagesShowItOrNotAtAll(UnnamedSeasonCase):
+    """4.461: every offer of a season's name is the one ``export.season_offer`` gives.
+
+    When no card printed a season, the file offered ``# season = "2026 Season 2"``
+    in each competition's section, a name nothing gave, while the review offered
+    only what the cards support, and the [seasons] table offered a third value,
+    the folder's key as it stands. Measured through build.py on cards printing no
+    season, two runs each (/tmp/mcf/scratch/STUB/out-before-season.txt): dated
+    2026 and dated 2027, config.toml:115 held ``# season = "2026 Season 2"``
+    against the review's ``season = "2026"`` and ``season = "2027"``, which then
+    said "not in it; add the lines below to the [competitions.tuesday-division-b]
+    it has already, to adopt it" of a section holding a ``# season =`` line, on
+    both runs; with a weekday and no date, the same line against ``season = ""``
+    and "fill this in"; in data/2026-winter under multi, ``# 2026-winter =
+    "2026-winter"`` and ``# season = "2026 Season 2"`` against the review's
+    ``"2026 Winter"``, the name every page shows. Adopted as the file says, the
+    section's line declared "2026 Season 2" and the [seasons] line headed the
+    front page "2026-winter - Tuesday"; the review's ``season = ""`` added as
+    printed was "live already, so the next run reads it as declared", and
+    declared nothing. Now the file, the review and the [seasons] table all offer
+    the name the pages show, else the year or years the dates give; where there
+    is neither, the file writes a comment and no line, and the review a bare
+    ``season =`` that does not load until a name is typed after it. Rejected: a
+    sample name kept as an example, which a club adopts by deleting a # and then
+    publishes; and ``# season = ""``, which uncommented declares nothing and is
+    then called live.
+    """
+
+    NO_NAME = ("What your association calls this season. No card printed it and "
+               "no date gave a year, so the dashboard leaves it out until you "
+               "say: add season = and the name in double quotes.")
+
+    @classmethod
+    def runs(cls):
+        cls.dated = cls.project("dated")
+        cls.dated_runs = (cls.run_in(cls.dated), cls.run_in(cls.dated))
+        cls.dated_file = cls.written(cls.dated)
+        cls.later = cls.project("later", dates=("2027-08-17", "2027-08-24"))
+        cls.later_run = cls.run_in(cls.later)
+        cls.later_file = cls.written(cls.later)
+        cls.edit(cls.later, r"^# (season = .*)$", r"\1")
+        cls.later_adopted = cls.run_in(cls.later)
+        cls.undated = cls.project("undated", when="Tue 7:00 PM")
+        cls.undated_runs = (cls.run_in(cls.undated), cls.run_in(cls.undated))
+        cls.undated_file = cls.written(cls.undated)
+        _, toml = cls.season_item(cls.undated_runs[0])
+        # The review's lines added under the section the file has, as printed.
+        cls.edit(cls.undated, rf"^{re.escape(cls.SINGLE)}$",
+                 "\n".join([cls.SINGLE, *toml[1:]]))
+        cls.undated_pasted = cls.run_in(cls.undated)
+        cls.edit(cls.undated, r"^season =.*$", 'season = "Winter 2026"')
+        cls.undated_typed = cls.run_in(cls.undated)
+        cls.winter = cls.project("winter", multi=True)
+        cls.winter_run = cls.run_in(cls.winter)
+        cls.winter_file = cls.written(cls.winter)
+        cls.edit(cls.winter, r"^# (2026-winter = .*)$", r"\1")
+        cls.winter_adopted = cls.run_in(cls.winter)
+        cls.printed = cls.project("printed", season_line="Season 1")
+        cls.printed_run = cls.run_in(cls.printed)
+        cls.printed_file = cls.written(cls.printed)
+
+    def test_a_season_its_dates_give_a_year_is_offered_that_year_on_every_run(self):
+        for name, text, runs, year in (
+                ("dated", self.dated_file, self.dated_runs, "2026"),
+                ("later", self.later_file, (self.later_run,), "2027")):
+            with self.subTest(project=name):
+                self.assertEqual(self.season_lines(self.section_of(text, self.SINGLE)),
+                                 [f'# season = "{year}"'])
+                for run in runs:
+                    self.assertEqual(run.code, 0, run.text[-2000:])
+                    self.assertEqual(self.season_item(run),
+                                     (f"in config.toml: {ADOPT}",
+                                      [self.SINGLE, f'season = "{year}"']))
+
+    def test_deleting_its_hash_names_the_season_that_year(self):
+        self.assertEqual(self.later_adopted.code, 0, self.later_adopted.text[-2000:])
+        meta = self.document(self.later)["meta"]
+        self.assertEqual((meta["season_label"], meta["provenance"]["season"]),
+                         ("2027", "declared"))
+
+    def test_no_file_offers_a_season_nothing_gave(self):
+        for name, text in (("dated", self.dated_file), ("later", self.later_file),
+                           ("undated", self.undated_file),
+                           ("winter", self.winter_file)):
+            with self.subTest(project=name):
+                self.assertNotIn("2026 Season 2", text)
+
+    def test_a_season_no_card_or_date_names_is_offered_no_name(self):
+        section = self.section_of(self.undated_file, self.SINGLE)
+        self.assertEqual(self.season_lines(section), [])
+        self.assertIn(self.NO_NAME, written_flat("\n".join(section)))
+        self.assertTrue(all(len(line) <= 78 for line in section), section)
+        for run in self.undated_runs:
+            self.assertEqual(run.code, 0, run.text[-2000:])
+            self.assertEqual(self.season_item(run), (
+                f"in config.toml: not in it; add the lines below to the "
+                f"{self.SINGLE} it has already, with the season's name in double "
+                f"quotes typed after the =, to adopt it",
+                [self.SINGLE, "season ="]))
+
+    def test_its_lines_stop_the_next_run_until_a_name_is_typed_after_the_equals(self):
+        # Measured before this: "live already, so the next run reads it as
+        # declared -- check it now", of a season = "" that declared nothing.
+        run = self.undated_pasted
+        self.assertEqual(run.code, 2, run.text[-2000:])
+        self.assertIn("config.toml: not valid TOML", run.err)
+        self.assertNotIn("live already", run.text)
+        self.assertEqual(self.undated_typed.code, 0, self.undated_typed.text[-2000:])
+        meta = self.document(self.undated)["meta"]
+        self.assertEqual((meta["season_label"], meta["provenance"]["season"]),
+                         ("Winter 2026", "declared"))
+
+    def test_a_seasons_folder_name_made_readable_is_offered_in_every_place(self):
+        self.assertEqual(self.winter_run.code, 0, self.winter_run.text[-2000:])
+        table = self.section_of(self.winter_file, "[seasons]")
+        self.assertIn('# 2026-winter = "2026 Winter"', table)
+        self.assertTrue(all(len(line) <= 78 for line in table), table)
+        self.assertEqual(self.season_lines(self.section_of(self.winter_file,
+                                                           self.MULTI)),
+                         ['# season = "2026 Winter"'])
+        self.assertEqual(self.season_item(self.winter_run),
+                         (f"in config.toml: {ADOPT}",
+                          [self.MULTI, 'season = "2026 Winter"']))
+        self.assertEqual(self.document(self.winter)["meta"]["season_label"],
+                         "2026 Winter")
+
+    def test_deleting_the_hash_of_its_seasons_line_keeps_the_name_shown(self):
+        self.assertEqual(self.winter_adopted.code, 0,
+                         self.winter_adopted.text[-2000:])
+        meta = self.document(self.winter)["meta"]
+        self.assertEqual((meta["season_label"], meta["provenance"]["season"]),
+                         ("2026 Winter", "declared"))
+        front = (self.winter / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertRegex(front, r"<h2[^>]*>2026 Winter - Tuesday<")
+
+    def test_a_season_its_cards_print_is_offered_as_before(self):
+        section = self.section_of(self.printed_file, self.SINGLE)
+        self.assertEqual(self.season_lines(section), ['# season = "Season 1"'])
+        self.assertEqual(self.comment_above(section, '# season = "Season 1"'),
+                         "What your association calls this season. Scorecards do "
+                         "not reliably print it, so the dashboard leaves it out "
+                         "until you say. Remove the # to use it.")
+        self.assertEqual(self.season_item(self.printed_run),
+                         (f"in config.toml: {ADOPT}",
+                          [self.SINGLE, 'season = "Season 1"']))
+
+
+class TestEachMessageAboutASeasonsNameSaysWhereTheNameShownCameFrom(
+        UnnamedSeasonCase):
+    """4.462: a folder's name is said to be a folder's, and no name is not a value.
+
+    For a season nobody named, every message about its name described something
+    that was not happening. Measured through build.py on cards printing no season,
+    the pages read in headless Chrome (/tmp/mcf/scratch/STUB/out-before-season.txt):
+    in data/2026-winter under multi, every page showed "2026 Winter", its folder's
+    name made readable, yet the file's comment and the review's why said the
+    dashboard leaves it out until you say, and the page's flag on it said "No
+    season label was declared, so this one was worked out from the cards" of a
+    name no card holds; in single mode no page shows a season, yet the panel read
+    "3 values we worked out" with the season among them, where the printed-season
+    control read 2. Now the folder's case is worded as a folder's, and a season
+    no page names is provenance "empty", which the page does not list. Rejected:
+    "worked out from the cards" kept for a folder, which is not a card; showing no
+    name in multi mode until one is declared, against the naming order the front
+    page is built on; and "derived" kept for an empty label, which lists a value
+    the page does not show.
+
+    In multi-season mode a season's cards that sit in no season folder are keyed
+    by the year on them, and the first cut of this said of that year too that it
+    was the folder's name: measured on the same cards directly in data/
+    (/tmp/mcf/scratch/STUB/fix/before.txt), the file's comment, the review's why
+    and the page's flag all said "folder" of ``2026`` beside the run's own note
+    that the cards sit in no season folder. Now ``meta.season_label_from`` says
+    which the name shown is, "folder" or "date", and each message says that.
+    Rejected: one wording for both, "the name worked out", which tells the club
+    nothing about where to look.
+    """
+
+    FLAT = "[competitions.2026-tuesday-division-b]"
+    FOLDER_COMMENT = ("What your association calls this season. No card prints it, "
+                      "so the dashboard shows its folder's name made readable until "
+                      "you say, here or by the season's line under [seasons]. "
+                      "Remove the # to use it.")
+    FOLDER_WHY = ("no card prints it, so the dashboard shows the season's folder "
+                  "name made readable until a human says what it is")
+    DATE_COMMENT = ("What your association calls this season. No card prints it, "
+                    "so the dashboard shows the year on its cards until you say, "
+                    "here or by the season's line under [seasons]. Remove the # to "
+                    "use it.")
+    DATE_WHY = ("no card prints it, so the dashboard shows the year on the "
+                "season's cards until a human says what it is")
+
+    @classmethod
+    def runs(cls):
+        cls.winter = cls.project("winter", multi=True)
+        cls.winter_run = cls.run_in(cls.winter)
+        cls.no_folder = cls.project("no-folder", multi=True, flat=True)
+        cls.no_folder_run = cls.run_in(cls.no_folder)
+        cls.dated = cls.project("dated")
+        cls.dated_run = cls.run_in(cls.dated)
+        cls.undated = cls.project("undated", when="Tue 7:00 PM")
+        cls.undated_run = cls.run_in(cls.undated)
+        cls.printed = cls.project("printed", season_line="Season 1")
+        cls.printed_run = cls.run_in(cls.printed)
+        cls.printed_winter = cls.project("printed-winter", multi=True,
+                                         season_line="Season 1")
+        cls.printed_winter_run = cls.run_in(cls.printed_winter)
+
+    def test_the_file_says_a_folders_name_is_shown_until_the_club_says(self):
+        section = self.section_of(self.written(self.winter), self.MULTI)
+        self.assertEqual(self.comment_above(section, '# season = "2026 Winter"'),
+                         self.FOLDER_COMMENT)
+        self.assertTrue(all(len(line) <= 78 for line in section), section)
+
+    def test_and_so_does_the_review(self):
+        self.assertEqual(self.winter_run.code, 0, self.winter_run.text[-2000:])
+        self.assertIn("the season name for 2026-winter-tuesday-division-b why: "
+                      f"{self.FOLDER_WHY} in config.toml:", flat(self.winter_run.text))
+
+    def test_the_page_still_flags_a_folders_name_as_worked_out(self):
+        document = self.document(self.winter)
+        self.assertEqual((document["meta"]["season_label"],
+                          document["meta"]["season_label_from"],
+                          document["meta"]["provenance"]["season"]),
+                         ("2026 Winter", "folder", "derived"))
+        self.assertEqual(self.worked_out(document), ["rounds_total", "season",
+                                                     "teams"])
+
+    def test_the_file_says_the_year_on_cards_in_no_season_folder_is_shown(self):
+        section = self.section_of(self.written(self.no_folder), self.FLAT)
+        self.assertEqual(self.comment_above(section, '# season = "2026"'),
+                         self.DATE_COMMENT)
+        self.assertTrue(all(len(line) <= 78 for line in section), section)
+
+    def test_and_so_does_the_review_of_that_year(self):
+        run = self.no_folder_run
+        self.assertEqual(run.code, 0, run.text[-2000:])
+        self.assertIn("the season name for 2026-tuesday-division-b why: "
+                      f"{self.DATE_WHY} in config.toml:", flat(run.text))
+        self.assertNotIn("folder name made readable", flat(run.text))
+
+    def test_the_document_says_the_name_shown_is_the_year_on_its_cards(self):
+        document = self.document(self.no_folder)
+        self.assertEqual((document["meta"]["season_label"],
+                          document["meta"]["season_label_from"],
+                          document["meta"]["provenance"]["season"]),
+                         ("2026", "date", "derived"))
+        self.assertEqual(self.worked_out(document), ["rounds_total", "season",
+                                                     "teams"])
+
+    def test_a_name_printed_or_absent_is_said_to_come_from_neither(self):
+        for name, cwd in (("dated", self.dated), ("printed", self.printed),
+                          ("printed-winter", self.printed_winter)):
+            with self.subTest(project=name):
+                self.assertEqual(self.document(cwd)["meta"]["season_label_from"], "")
+
+    def test_a_season_no_page_names_is_not_counted_among_the_values_worked_out(self):
+        for name, cwd, run in (("dated", self.dated, self.dated_run),
+                               ("undated", self.undated, self.undated_run)):
+            with self.subTest(project=name):
+                self.assertEqual(run.code, 0, run.text[-2000:])
+                document = self.document(cwd)
+                self.assertEqual((document["meta"]["season_label"],
+                                  document["meta"]["provenance"]["season"]),
+                                 ("", export_mod.EMPTY))
+                self.assertEqual(self.worked_out(document), ["rounds_total", "teams"])
+
+    def test_a_season_its_cards_print_reads_as_the_cards_did(self):
+        # The printed season's wording is 4.349's, and stands until it lands.
+        for name, cwd, header in (("printed", self.printed, self.SINGLE),
+                                  ("printed-winter", self.printed_winter, self.MULTI)):
+            with self.subTest(project=name):
+                document = self.document(cwd)
+                self.assertEqual(document["meta"]["provenance"]["season"], "card")
+                self.assertEqual(self.worked_out(document), ["rounds_total", "teams"])
+                section = self.section_of(self.written(cwd), header)
+                self.assertIn("# What your association calls this season. "
+                              "Scorecards do not", section)
+        self.assertIn("the season name for tuesday-division-b why: scorecards do "
+                      "not reliably print it, so the dashboard leaves it out until "
+                      "a human says what it is in config.toml:",
+                      flat(self.printed_run.text))
+
+
 class TestPruneAndOnlyAreRefusedTogether(OnlyCase):
     """``--prune --only`` is refused during the parse, the way ``--prune --check`` is.
 
@@ -20471,8 +22023,8 @@ class TestTheRefusalNamesAFinalTheDrawDeclaresAgainstItsLabel(FinalsDrawCase):
     def refused(self) -> str:
         self.declare(self.TYPED, later=("GF",))
         self.write_finals("SF")
-        run = self.build("--discover", expect=2)
-        return " ".join(run.err.split())
+        # Moved by 4.431: what the refusal said, the proposal's header says.
+        return proposal_of(self)
 
     def test_a_final_typed_on_a_numbered_round_is_named(self):
         self.assertIn(f"round 3 of {self.COMP} is scored in the ladder as a regular "
@@ -20489,7 +22041,7 @@ class TestTheRefusalNamesAFinalTheDrawDeclaresAgainstItsLabel(FinalsDrawCase):
     def test_rounds_moved_the_same_way_are_said_together(self):
         self.declare({"1": "true", "2": "true", "3": "true"})
         self.write_finals("SF")
-        said = " ".join(self.build("--discover", expect=2).err.split())
+        said = proposal_of(self)  # moved by 4.431: the proposal's header
         self.assertIn(f"round 1 of {self.COMP}, round 2 of {self.COMP} and round 3 of "
                       f"{self.COMP} are scored in the ladder as regular rounds, not as "
                       f"the finals you declared.", said)
@@ -20499,7 +22051,7 @@ class TestTheRefusalNamesAFinalTheDrawDeclaresAgainstItsLabel(FinalsDrawCase):
         # fits it and exits 0, and the refusal is the one place the move is said.
         self.declare({"3": "true"}, total=3)
         self.write_finals("SF")
-        said = " ".join(self.build("--discover", expect=2).err.split())
+        said = proposal_of(self)  # moved by 4.431: the proposal's header
         self.assertIn(f"round 3 of {self.COMP} is scored in the ladder as a regular "
                       f"round, not as the final you declared", said)
         self.build("--discover", "--force")
@@ -20514,7 +22066,7 @@ class TestTheRefusalNamesAFinalTheDrawDeclaresAgainstItsLabel(FinalsDrawCase):
     def test_a_draw_whose_labels_say_it_all_is_told_nothing_of_finals(self):
         self.declare({"1": "false", "SF": "true"})
         self.write_finals("SF")
-        said = " ".join(self.build("--discover", expect=2).err.split())
+        said = proposal_of(self)  # moved by 4.431: the proposal's header
         self.assertIn("the dates, fixtures, byes and notes they hold.", said)
         self.assertNotIn("you declared", said)
 
@@ -20634,10 +22186,11 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
         self.assertIn(f"so rounds_total = 2 is written for {self.COMP} where your draw "
                       f"gave it 3 rounds, unless its cards have played past either "
                       f"length.",
-                      " ".join(self.build("--discover", expect=2).err.split()))
+                      proposal_of(self))  # moved by 4.431: the proposal's header
         self.build("--discover", "--force")
         self.assertNotIn("\nrounds_total", self.config())
-        self.assertIn("\n# rounds_total = 3\n", self.config())
+        # Moved by 4.465: the length's line, with nothing after its =.
+        self.assertIn("\n# rounds_total =\n", self.config())
         flat = " ".join(line.lstrip("# ") for line in self.config().splitlines())
         self.assertIn("The draw you declared gave the season 2 rounds, with a round "
                       "counted a final only if its label names one, and cards were "
@@ -20660,18 +22213,21 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
         self.build()
         self.assertEqual(self.rounds(), (3, None))
 
-    def test_the_count_the_commented_line_offers_is_the_run_afters(self):
+    def test_the_count_the_commented_line_names_is_the_run_afters(self):
         # Counted as this run counts, under the typed flags, it would offer
         # ``# rounds_total = 2`` beside "2 rounds played", where the run after says
         # 3 and stops on 2 if the # is taken off. The base wrote that 2 live on
         # this draw (/tmp/t7/scratch/CFORCE/fixup, base.out, B), and offered it
         # commented so on a draw of 1 and 2 typed true, which its cards outgrew
         # (/tmp/t7/scratch/CFORCE/corner).
+        # Moved by 4.465, and renamed from
+        # test_the_count_the_commented_line_offers_is_the_run_afters: the count is
+        # named in the comment, and the line offers none.
         self.unlisted({"2": "true"})
         self.build("--discover", "--force")
-        flat = " ".join(self.config().split())
-        self.assertIn('# "3 rounds played" and shows no percentage', flat)
-        self.assertIn("\n# rounds_total = 3\n", self.config())
+        self.assertIn('Without it the dashboard says "3 rounds played" and shows no '
+                      'percentage', written_flat(self.config()))
+        self.assertIn("\n# rounds_total =\n", self.config())
 
     def test_a_draw_this_run_finds_played_past_has_no_length_written_live(self):
         # The draw gives rounds 1 and 2, and round 3 has cards it does not list, so
@@ -20687,7 +22243,8 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
         flat = " ".join(line.lstrip("# ") for line in self.config().splitlines())
         self.assertIn("The draw you declared gave the season 2 rounds, and cards "
                       "were found for round 3, which it does not list", flat)
-        self.assertIn("\n# rounds_total = 3\n", self.config())
+        # Moved by 4.465: the length's line, with nothing after its =.
+        self.assertIn("\n# rounds_total =\n", self.config())
         self.build()
         self.assertEqual(self.rounds(), (3, None))
 
@@ -20700,7 +22257,7 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
         self.assertIn(f"so rounds_total = 3 is written for {self.COMP} where your "
                       f"draw gave it 2 rounds, unless its cards have played past "
                       f"either length. The file is written fresh",
-                      " ".join(self.build("--discover", expect=2).err.split()))
+                      proposal_of(self))  # moved by 4.431: the proposal's header
 
     def test_a_length_both_runs_find_played_past_is_said_why_once(self):
         # Round 2 typed a final and round 3 left out: this run counts rounds 1 and 3
@@ -20715,7 +22272,8 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
         self.assertIn("The draw you declared gave the season 1 round, and cards were "
                       "found for round 3, which it does not list", flat)
         self.assertNotIn("with a round counted a final", flat)
-        self.assertIn("\n# rounds_total = 3\n", self.config())
+        # Moved by 4.465: the length's line, with nothing after its =.
+        self.assertIn("\n# rounds_total =\n", self.config())
 
     def test_a_length_the_labels_leave_as_it_was_is_named_where_its_rounds_move(self):
         # Rounds 2 and SF move opposite ways, so the draw of 1, 2 and SF gives 2
@@ -20725,7 +22283,7 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
         self.unlisted({"2": "true"})
         self.assertIn(f"so rounds_total = 2 is written for {self.COMP} as your draw "
                       f"gave it, unless its cards have played past it. The file",
-                      " ".join(self.build("--discover", expect=2).err.split()))
+                      proposal_of(self))  # moved by 4.431: the proposal's header
         self.build("--discover", "--force")
         flat = " ".join(line.lstrip("# ") for line in self.config().splitlines())
         self.assertIn("The draw you declared gave the season 2 rounds, with a round "
@@ -20752,7 +22310,8 @@ class TestForceWritesTheSeasonLengthTheRunAfterItReads(FinalsDrawCase):
     def refusal(self, finals: dict[str, str], **declared) -> str:
         self.declare(finals, **declared)
         self.write_finals("SF")
-        return " ".join(self.build("--discover", expect=2).err.split())
+        # Moved by 4.431: what the refusal said, the proposal's header says.
+        return proposal_of(self)
 
     def test_the_refusal_names_the_length_after_the_round_it_follows(self):
         self.assertIn(f"round 3 of {self.COMP} is scored in the ladder as a regular "
@@ -21774,8 +23333,12 @@ class TestACardPrintingAResultItsSetsDoNotReachIsCitedInTheReminder(ShortOfResul
             match_id="9100003", home_name="NORTHSIDE NETS",
             away_name="SOUTHSIDE SETS",
             rows=(cardwriter.SetRow(6, 3, True, home[:2], away[:2]),
+                  # 4.422 moved this: ticked Retired against the away side, which
+                  # now gives home the set raised to 6 games, and this is a
+                  # doubles that stopped.
                   cardwriter.SetRow(3, 2, True, home[2:], away[2:],
-                                    status=SetStatus.RETIRED, status_side="away")),
+                                    status=SetStatus.INCOMPLETE,
+                                    status_side="away")),
             home_roster=tuple(cardwriter.RosterRow(name=n, singles=2.5,
                                                    doubles=2.5, captain=(i == 0))
                               for i, n in enumerate(home)),
@@ -22006,13 +23569,137 @@ class TestASetStoppedWithNoBoxTickedPointsAtTheSetLengthFirst(ShortOfResultCase)
         # Measured on the tree before validate's set gate became the model's rule.
         warned = [w["message"] for w in self.season_of(self.first, "tuesday-division-b")
                   ["validation"]["warnings"] if w["rule"] == "set-unfinished"]
-        tail = ("is not a finished set under first-to-6 (first to 6) and is not "
-                "marked forfeit, retired or incomplete, so nobody is credited the set.")
+        # Row 4.434 moved this: the same four rubbers, in the same order, are one
+        # finding for the competition, where they were four.
         self.assertEqual(warned, [
-            f"R4 riverside-rockets v hilltop-aces s2: 4-3 {tail}",
-            f"R4 riverside-rockets v hilltop-aces d2: 3-2 {tail}",
-            f"R5 lakeside-spinners v parkview-wanderers s2: 4-3 {tail}",
-            f"R5 lakeside-spinners v parkview-wanderers d2: 3-2 {tail}"])
+            "4 rubbers stopped short of a finished set under first-to-6 (first to "
+            "6) and are not marked forfeit, retired or incomplete, so nobody is "
+            "credited them: R4 riverside-rockets v hilltop-aces s2 4-3, R4 "
+            "riverside-rockets v hilltop-aces d2 3-2, R5 lakeside-spinners v "
+            "parkview-wanderers s2 4-3 and R5 lakeside-spinners v "
+            "parkview-wanderers d2 3-2."])
+
+
+# A Monday division of four teams of its own, two rounds, each card's last rubber
+# stopped where the night did. Invented players.
+MONDAY_STOPPED = {
+    "westfield-hawks": ("WESTFIELD HAWKS", ("Mo Abara", "Nell Quist", "Oli Pratt")),
+    "northside-nets": ("NORTHSIDE NETS", ("Pia Lund", "Quoy Sato", "Rae Tull")),
+    "eastwood-bears": ("EASTWOOD BEARS", ("Sol Imre", "Tam Voss", "Uma Kell")),
+    "bramble-finches": ("BRAMBLE FINCHES", ("Vic Oyelaran", "Wren Hale",
+                                            "Xan Ruiz")),
+}
+MONDAY_STOPPED_CARDS = (
+    ("1", "2026-08-17", "westfield-hawks", "northside-nets", (4, 3)),
+    ("1", "2026-08-17", "eastwood-bears", "bramble-finches", (2, 2)),
+    ("2", "2026-08-24", "westfield-hawks", "eastwood-bears", (1, 0)),
+    ("2", "2026-08-24", "northside-nets", "bramble-finches", (0, 0)),
+)
+
+
+def write_monday_stopped(folder: Path) -> None:
+    """The Monday division's four cards, three sets won at home on each."""
+    for index, (rnd, day, home, away, last) in enumerate(MONDAY_STOPPED_CARDS):
+        home_name, home_players = MONDAY_STOPPED[home]
+        away_name, away_players = MONDAY_STOPPED[away]
+        (folder / f"Round{rnd}").mkdir(parents=True, exist_ok=True)
+        cardwriter.write_card_file(
+            folder / f"Round{rnd}" / f"{home}-{away}.pdf", cardwriter.CardSpec(
+                date=day, round_label=rnd, division="A", court=f"7{index}",
+                match_id=f"710{index:04d}", home_name=home_name,
+                away_name=away_name,
+                rows=rows_for(((6, 2), (6, 3), (6, 4), last), home_players,
+                              away_players),
+                home_roster=tuple(cardwriter.RosterRow(
+                    name=n, singles=2.5, doubles=2.5, captain=(i == 0))
+                    for i, n in enumerate(home_players)),
+                away_roster=tuple(cardwriter.RosterRow(
+                    name=n, singles=2.5, doubles=2.5, captain=(i == 0))
+                    for i, n in enumerate(away_players))))
+
+
+class TestEachCompetitionIsToldItsOwnStoppedRubbersOnce(unittest.TestCase):
+    """Two nights' competitions whose last rubbers stopped at the finishing time.
+
+    Row 4.434, through ``build.py``. Measured on the tree before, on these cards:
+    eight warnings under ``set-unfinished``, ``set-tied`` and ``set-no-games``, one
+    a rubber, in a report of ``10 warnings``. Each competition is now told each
+    rule once, listing its own rubbers and no other's, a lone rubber as it was, and
+    the run's exit status is what it was. Rejected: one finding a rule for the
+    whole run, where every finding belongs to one competition; and one a round,
+    6 findings on these cards where one a competition is 5, as a round's two
+    matches stopped under different rules as often as under one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from test_pipeline import write_stopped_cards
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.cwd = Path(cls._tmp.name) / "club"
+        write_season_cards(cls.cwd / "data" / "tuesday")
+        write_stopped_cards(cls.cwd / "data" / "tuesday", (
+            ("4", "riverside-rockets", "hilltop-aces", (5, 4)),
+            ("4", "lakeside-spinners", "parkview-wanderers", (4, 2)),
+            ("5", "riverside-rockets", "lakeside-spinners", (3, 3)),
+            ("5", "hilltop-aces", "parkview-wanderers", (5, 5))))
+        write_monday_stopped(cls.cwd / "data" / "monday")
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        done = subprocess.run((sys.executable, str(BUILD), "--generated", STAMP),
+                              cwd=cls.cwd, capture_output=True, text=True,
+                              timeout=600, env=env)
+        cls.built = Run(done.returncode, done.stdout, done.stderr, cls.cwd)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def warned(self, competition: str, rule: str) -> list[dict]:
+        found, = [p for p in (self.cwd / "site").rglob("season.json")
+                  if competition in p.parts]
+        season = json.loads(found.read_text(encoding="utf-8"))
+        return [w for w in season["validation"]["warnings"] if w["rule"] == rule]
+
+    def test_the_run_exits_as_it_did(self):
+        self.assertEqual(self.built.code, 0, self.built.text[-3000:])
+        self.assertEqual(self.built.text.splitlines()[-1],
+                         "  exit 0: all 14 card(s) scored, no errors")
+
+    def test_each_competition_lists_its_own_rubbers_and_no_others(self):
+        monday, = self.warned("monday-division-a", "set-unfinished")
+        tuesday, = self.warned("tuesday-division-b", "set-unfinished")
+        self.assertTrue(monday["message"].endswith(
+            "so nobody is credited them: R1 westfield-hawks v northside-nets d2 "
+            "4-3 and R2 westfield-hawks v eastwood-bears d2 1-0."),
+            monday["message"])
+        self.assertTrue(tuesday["message"].endswith(
+            "so nobody is credited them: R4 lakeside-spinners v "
+            "parkview-wanderers d2 4-2 and R4 riverside-rockets v hilltop-aces "
+            "d2 5-4."), tuesday["message"])
+
+    def test_a_competition_with_one_such_rubber_is_told_it_as_before(self):
+        tied, = self.warned("monday-division-a", "set-tied")
+        where = "R1 eastwood-bears v bramble-finches d2"
+        self.assertEqual(tied["message"],
+                         f"{where}: level at 2-2, so nobody won the set and "
+                         "nothing on the card says why it stopped.")
+        self.assertEqual(tied["subject"], where)
+        self.assertTrue(tied["subject_said"])
+        listed, = self.warned("tuesday-division-b", "set-tied")
+        self.assertTrue(listed["message"].startswith("2 rubbers were left level"),
+                        listed["message"])
+
+    def test_the_report_prints_each_competitions_list_once_within_the_width(self):
+        block = printed_finding(self, self.built.text, "set-unfinished")
+        told = [line.split(":")[0].strip() for line in block[1:]
+                if re.match(r" {6}\S", line)]
+        self.assertEqual(told, ["monday-division-a", "tuesday-division-b"])
+        for rule in ("set-unfinished", "set-tied", "set-no-games"):
+            with self.subTest(rule=rule):
+                self.assertFalse([line for line in
+                                  printed_finding(self, self.built.text, rule)
+                                  if "subject:" in line])
+        self.assertEqual(past_the_width(self.built.text.splitlines()), [])
+        self.assertIn("== 7 warnings ==", self.built.text)
 
 
 class TestADeclaredNumberIsNotQuestioned(ShortOfResultCase):
@@ -22111,11 +23798,18 @@ class TestAForfeitNightBuildsCleanAndIsPaidAlikeHoweverTheCardTellsIt(
     ticking the rows, could not show.
 
     Now all three build at exit 0, with nothing said about any of them, and each
-    preset pays them the same: games-bonus 4.0/2.0, and rubbers 4.0/0.0.
+    preset pays them the same: games-bonus 6.4/0.0, and rubbers 4.0/0.0.
+
+    4.420 moved games-bonus from 4.0/2.0: a match given up whole is paid the
+    preset's full-games award, a win with every rubber a love set and 0 to the
+    side that gave it up, however the card tells it (Match.given_up_by). Measured
+    on the tree before this (/tmp/mcf/scratch/CANCEL/probe/describe.py): 4.0/2.0
+    for every telling, the default award being as-played.
     """
 
     TELLINGS = ("box", "box, nobody named", "rubbers")
-    PRESETS = {"games-bonus": (4.0, 2.0), "rubbers": (4.0, 0.0)}
+    # 4.420 moved this: games-bonus pays a forfeit 6.4 and 0, where it paid 4.0/2.0.
+    PRESETS = {"games-bonus": (6.4, 0.0), "rubbers": (4.0, 0.0)}
     MATCH_ID = "4000010"
 
     @classmethod
@@ -22186,6 +23880,259 @@ class TestAForfeitNightBuildsCleanAndIsPaidAlikeHoweverTheCardTellsIt(
                 with self.subTest(preset=preset, telling=telling):
                     self.assertEqual(self.paid(self.runs[preset, telling]),
                                      expected)
+
+
+class TestACancelledNightBuildsAsTheWalkoverOrWashoutItsTotalRowSays(
+        unittest.TestCase):
+    """The season, plus a round-four walkover and a washout naming a winner.
+
+    Both cards tick Match Cancelled and a Match Winner box. The rockets v aces
+    card is the owner's walkover over play: 2-6, 6-4, 3-6 and 0-0, home ticked,
+    DEFEATS, and a TOTAL row of every rubber to home as a love set, 4-0 and
+    24-0. The spinners v wanderers card is a washout: 6-2, 6-4, 2-3 and 0-0,
+    home ticked, DEFEATS, its TOTAL row its rows, 2-0 and 14-9. Built under each
+    of the [rules] forfeit_award settings (4.420), and refused where the config
+    asks for a price it does not give.
+
+    Measured on the tree before this (/tmp/mcf/scratch/CANCEL/probe/cli_cancel.py,
+    run on both trees): exit 1 under every setting, the two cards each the
+    ``no-result`` error "A match called off has no winner, so the card
+    contradicts itself", and every ``forfeit_award`` and ``forfeit_points`` line
+    a warning that it is "not a setting this program understands and was
+    ignored". Now the walkover is the forfeit by the aces its TOTAL row
+    describes, paid what the config says a forfeit is worth, told once that its
+    rows hold games the TOTAL row does not count; the washout is no result, told
+    once that its cancelled tick decides; and the build exits 0. Under
+    ``as-played`` the walkover is paid as a match the rockets won on the games
+    its rows print, 5.1 and 3.6, which is what that award says. Rejected: the
+    walkover priced from its TOTAL row, which is Match Centre's arithmetic and
+    not the club's price (4.420: the price comes from config alone).
+    """
+
+    MATCH_ID, WASHOUT_ID = "4000010", "4000011"
+    CONFIGS = {
+        "left off": "",
+        "full-games": 'forfeit_award = "full-games"\n',
+        "fixed": 'forfeit_award = "fixed"\nforfeit_points = 5\n',
+        "as-played": 'forfeit_award = "as-played"\n',
+        "points unread": "forfeit_points = 5\n",
+        "fixed, no points": 'forfeit_award = "fixed"\n',
+        "an award it does not know": 'forfeit_award = "full-game"\n',
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        _, rockets = TEAMS["riverside-rockets"]
+        _, aces = TEAMS["hilltop-aces"]
+        _, spinners = TEAMS["lakeside-spinners"]
+        _, wanderers = TEAMS["parkview-wanderers"]
+        cls.runs = {}
+        for index, (name, rules) in enumerate(cls.CONFIGS.items()):
+            cwd = base / f"run-{index}"
+            write_season_cards(cwd / "data")
+            folder = cwd / "data" / "Round4"
+            folder.mkdir(parents=True, exist_ok=True)
+            cardwriter.write_card_file(folder / "walkover.pdf", short_spec(
+                "riverside-rockets", "hilltop-aces", court="10",
+                match_id=cls.MATCH_ID,
+                rows=rows_for(((2, 6), (6, 4), (3, 6), (0, 0)), rockets, aces),
+                cancelled=True, winner="home", verb="DEFEATS",
+                totals=(4, 24, 0, 0)))
+            cardwriter.write_card_file(folder / "washout.pdf", short_spec(
+                "lakeside-spinners", "parkview-wanderers", court="11",
+                match_id=cls.WASHOUT_ID,
+                rows=rows_for(((6, 2), (6, 4), (2, 3), (0, 0)), spinners,
+                              wanderers),
+                cancelled=True, winner="home", verb="DEFEATS",
+                totals=(2, 14, 9, 0)))
+            (cwd / "config.toml").write_text(
+                f'[rules]\nscoring = "games-bonus"\n{rules}', encoding="utf-8")
+            done = subprocess.run(
+                (sys.executable, str(BUILD), "--generated", STAMP), cwd=cwd,
+                capture_output=True, text=True, timeout=600,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+            cls.runs[name] = Run(done.returncode, done.stdout, done.stderr, cwd)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def match(self, name: str, match_id: str) -> dict:
+        path, = (self.runs[name].cwd / "site").rglob("season.json")
+        found, = [m for m in json.loads(path.read_text(encoding="utf-8"))["matches"]
+                  if m["id"] == match_id]
+        return found
+
+    def paid(self, name: str) -> tuple:
+        found = self.match(name, self.MATCH_ID)
+        return found["status"], found["home_points"], found["away_points"]
+
+    def test_each_setting_it_can_price_builds_at_exit_0(self):
+        for name in ("left off", "full-games", "fixed", "as-played",
+                     "points unread"):
+            with self.subTest(config=name):
+                run = self.runs[name]
+                self.assertEqual(run.code, 0, run.text[-3000:])
+                self.assertNotIn("contradicts itself", flat(run.text))
+                self.assertNotIn("not a setting this program understands",
+                                 flat(run.text))
+
+    def test_the_walkover_is_paid_what_the_config_says_a_forfeit_is_worth(self):
+        for name, paid in (("left off", (6.4, 0.0)), ("full-games", (6.4, 0.0)),
+                           ("fixed", (5.0, 0.0)), ("points unread", (6.4, 0.0)),
+                           ("as-played", (4.0 + 0.1 * 11, 2.0 + 0.1 * 16))):
+            with self.subTest(config=name):
+                status, home, away = self.paid(name)
+                self.assertEqual(status, "forfeit")
+                self.assertNotIn(None, (home, away))
+                self.assertAlmostEqual(home, paid[0])
+                self.assertAlmostEqual(away, paid[1])
+
+    def test_the_report_says_what_a_forfeit_is_paid_in_its_scoring_row(self):
+        for name, said in (
+                ("left off", "a match forfeited whole pays the side that turned up "
+                             "a win with every rubber a love set, and the side "
+                             "that gave it up 0"),
+                ("fixed", "a match forfeited whole pays the side that turned up 5 "
+                          "points, and the side that gave it up 0")):
+            with self.subTest(config=name):
+                self.assertIn(said, flat(self.runs[name].out))
+        self.assertNotIn("a match forfeited whole", flat(self.runs["as-played"].out))
+
+    def test_the_washout_is_no_result_and_said_once_to_be_decided_by_its_tick(self):
+        for name in ("left off", "fixed"):
+            with self.subTest(config=name):
+                found = self.match(name, self.WASHOUT_ID)
+                self.assertEqual((found["status"], found["home_points"],
+                                  found["away_points"]), ("cancelled", None, None))
+                words = flat(self.runs[name].out)
+                self.assertEqual(words.count("the Match Cancelled tick decides"), 1)
+                self.assertIn("The card also ticks home as Match Winner and the "
+                              "verb 'DEFEATS' means home won; the Match Cancelled "
+                              "tick decides.", words)
+
+    def test_the_walkover_s_rows_are_told_once_as_a_warning(self):
+        words = flat(self.runs["left off"].out)
+        self.assertEqual(words.count("walkover-rows-played"), 1)
+        self.assertIn("but its set rows hold games 11-16 that the TOTAL row does "
+                      "not count", words)
+
+    def test_points_no_fixed_award_reads_are_said_not_to_have_been_read(self):
+        self.assertIn('[rules] forfeit_points = 5 was not read: it prices a forfeit '
+                      'only where forfeit_award = "fixed", and forfeit_award is '
+                      '"full-games" here.', flat(self.runs["points unread"].text))
+
+    def test_a_price_it_cannot_read_is_refused_before_anything_is_built(self):
+        for name, said in (
+                ("fixed, no points",
+                 '[rules] forfeit_award = "fixed" pays a flat forfeit_points, and '
+                 'no forfeit_points is set. Add one: the points a match forfeited '
+                 'whole pays the side that turned up.'),
+                ("an award it does not know",
+                 '[rules] forfeit_award = "full-game" is not "as-played", '
+                 '"full-games" or "fixed". Did you mean full-games?')):
+            with self.subTest(config=name):
+                run = self.runs[name]
+                self.assertEqual(run.code, 2, run.text[-3000:])
+                self.assertIn(said, flat(run.err))
+                self.assertFalse((run.cwd / "site").exists())
+
+
+class TestACardOfRubbersNotPlayedOutBuildsAsItsTotalRowCountsThem(
+        unittest.TestCase):
+    """The season, plus a round-four night with rubbers awarded off the court.
+
+    Two tellings of the rockets v aces night. One ticks the away Forfeit box on
+    d1, s2 and d2 of rows 2-6, 6-2, 1-6 and 3-6, DEFEATS, and totals the rows as
+    Match Centre does, every forfeited rubber a love set to home: 4-0 and 24-2. The
+    other prints 6-3, 6-0, 6-4 and 5-1, the away Retired box ticked on d2, DEFEATS,
+    and totals 4-0 and 24-8, the retired set raised to 6-1. Measured through
+    ``build.py`` on the tree before this (/tmp/mcf/scratch/RUBBER/probe/probe.py,
+    before.txt): the first exit 1, ``totals-mismatch`` and ``verb-mismatch``, the
+    night 12-20 to the aces and paid 3.2/6.0, with three
+    ``set-forfeit-contradicted`` warnings; the second exit 1, ``totals-mismatch``,
+    23-8 and the retired set nobody's. Now both build at exit 0, saying nothing of
+    the night, and are paid 6.4/2.2 and 6.4/2.8 under ``games-bonus``.
+    """
+
+    MATCH_ID = "4000010"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        base = Path(cls._tmp.name)
+        _, rockets = TEAMS["riverside-rockets"]
+        _, aces = TEAMS["hilltop-aces"]
+        _, spinners = TEAMS["lakeside-spinners"]
+        _, wanderers = TEAMS["parkview-wanderers"]
+
+        def marked(scores, status, *rows):
+            built = list(rows_for(scores, rockets, aces))
+            for index in rows:
+                built[index] = dataclasses.replace(built[index], status=status,
+                                                   status_side="away")
+            return tuple(built)
+
+        cards = {
+            "forfeited": dict(rows=marked(((2, 6), (6, 2), (1, 6), (3, 6)),
+                                          SetStatus.FORFEIT, 0, 2, 3),
+                              totals=(4, 24, 2, 0)),
+            "retired": dict(rows=marked(((6, 3), (6, 0), (6, 4), (5, 1)),
+                                        SetStatus.RETIRED, 3),
+                            totals=(4, 24, 8, 0)),
+        }
+        cls.runs = {}
+        for name, fields in cards.items():
+            cwd = base / name
+            write_season_cards(cwd / "data")
+            folder = cwd / "data" / "Round4"
+            folder.mkdir(parents=True, exist_ok=True)
+            cardwriter.write_card_file(folder / "awarded.pdf", short_spec(
+                "riverside-rockets", "hilltop-aces", court="10",
+                match_id=cls.MATCH_ID, verb="DEFEATS", winner="home", **fields))
+            cardwriter.write_card_file(folder / "played.pdf", short_spec(
+                "lakeside-spinners", "parkview-wanderers", court="11",
+                match_id="4000011",
+                rows=rows_for(((6, 3), (3, 6), (6, 4), (6, 2)), spinners,
+                              wanderers)))
+            done = subprocess.run(
+                (sys.executable, str(BUILD), "--generated", STAMP), cwd=cwd,
+                capture_output=True, text=True, timeout=600,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+            cls.runs[name] = Run(done.returncode, done.stdout, done.stderr, cwd)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def match(self, name: str) -> dict:
+        path, = (self.runs[name].cwd / "site").rglob("season.json")
+        match, = [m for m in json.loads(path.read_text(encoding="utf-8"))["matches"]
+                  if m["id"] == self.MATCH_ID]
+        return match
+
+    def test_each_builds_at_exit_0_saying_nothing_about_the_night(self):
+        for name, run in self.runs.items():
+            with self.subTest(card=name):
+                self.assertEqual(run.code, 0, run.text[-3000:])
+                words = flat(run.text)
+                for needle in ("totals-mismatch", "verb-mismatch",
+                               "set-forfeit-contradicted", "awarded.pdf"):
+                    self.assertNotIn(needle, words)
+
+    def test_each_is_paid_and_totalled_as_its_total_row_counts_it(self):
+        for name, scored, printed, paid in (
+                ("forfeited", (24, 2), (12, 20), (6.4, 2.2)),
+                ("retired", (24, 8), (23, 8), (6.4, 2.8))):
+            with self.subTest(card=name):
+                match = self.match(name)
+                self.assertEqual((match["home_games"], match["away_games"]), scored)
+                self.assertEqual((match["printed_home_games"],
+                                  match["printed_away_games"]), printed)
+                self.assertEqual((match["home_points"], match["away_points"]), paid)
+                self.assertEqual(match["result"], "home")
 
 
 class TestARubbersBuildSaysWhatItPaidTheNightTheAwaySideSentNobody(
@@ -22685,11 +24632,16 @@ def deleting_the_hashes(report: str, text: str) -> tuple[str, list[str]]:
     front of each deleted, a list written over several lines whole, and a line
     already live left as it is. Returned with every key the file does not hold
     under that header, which a test asserts is none: the item's advice was false.
+
+    Moved by 4.465: an item that says "type there ..., then delete the #" has the
+    value :data:`TYPED` holds typed after its bare ``key =``, as a club types the
+    length its association's draw gives, and then the ``#`` deleted.
     """
     lines = text.splitlines()
     unfound = []
     for subject, status, toml in review_items(report):
-        if "delete the # to adopt it" not in status:
+        to_type = ", then delete the #" in status
+        if "delete the # to adopt it" not in status and not to_type:
             continue
         header = None
         for entry in toml:
@@ -22698,7 +24650,19 @@ def deleting_the_hashes(report: str, text: str) -> tuple[str, list[str]]:
                 if header not in lines and f"# {header}" in lines:
                     lines[lines.index(f"# {header}")] = header
                 continue
+            bare = re.fullmatch(r"(\S+) =", entry)
+            if to_type and bare and header in lines:
+                start = lines.index(header)
+                end = next((i for i in range(start + 1, len(lines))
+                            if lines[i].startswith(("[", "# ["))), len(lines))
+                held = [i for i in range(start + 1, end) if lines[i] == f"# {entry}"]
+                if held:
+                    lines[held[0]] = f"{entry} {TYPED[bare.group(1)]}"
+                    continue
             key = re.match(r"(\S.*?) = ", entry)
+            if to_type and bare:
+                unfound.append(f"{subject}: {entry} under {header}")
+                continue
             if key is None or header is None:
                 continue
             if header not in lines:
@@ -22766,7 +24730,943 @@ def write_unnamed_shape_competition(folder: Path) -> list[Path]:
 
 ADOPT = "commented out; delete the # to adopt it"
 NOT_IN_IT = "not in it; add the lines below to adopt it"
+# What a club types after the bare `key =` of a value the review leaves to it:
+# the length its association's draw gives the season, and the season's name.
+TYPED = {"rounds_total": "18", "season": '"Winter 2026"'}
+LENGTH_TO_TYPE = "the number of rounds your association's draw gives the season"
 REPORT_ONLY = "not in it, and in this report only"
+TYPED_BEHIND_A_HASH = "in config.toml: commented out, with nothing after the =:"
+
+
+SEVEN_OF_TEN_TEAMS = {
+    "HILLTOP ACES": ("Ada Quill", "Bea Rook", "Cal Moss"),
+    "BRAMBLE FINCHES": ("Cy Wren", "Di Lark", "Eve Tern"),
+    "CORVID LANE": ("Fay Kite", "Gus Owl", "Hal Crane"),
+    "RIVERSIDE ROCKETS": ("Ivy Pike", "Jo Ray", "Kit Eel"),
+}
+
+
+def write_seven_of_ten_rounds(data: Path) -> None:
+    """Rounds 1 to 7 of four teams' Tuesday Division B, and empty folders 8 to 10.
+
+    Two cards a round, a week apart from 2026-07-07, each team meeting each other
+    once every three rounds; the folders are the ones a club makes ahead for the
+    weeks to come, which no card is in.
+    """
+    names = list(SEVEN_OF_TEN_TEAMS)
+    pairings = (((0, 1), (2, 3)), ((0, 2), (1, 3)), ((0, 3), (1, 2)))
+    for rnd in range(1, 8):
+        folder = data / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        played = (date(2026, 7, 7) + timedelta(weeks=rnd - 1)).isoformat()
+        for court, (home_at, away_at) in enumerate(pairings[(rnd - 1) % 3]):
+            home, away = names[home_at], names[away_at]
+            ours, theirs = (SEVEN_OF_TEN_TEAMS[home][:2],
+                            SEVEN_OF_TEN_TEAMS[away][:2])
+            cardwriter.write_card_file(folder / f"r{rnd}-{court}.pdf", cardwriter.CardSpec(
+                date=played, round_label=str(rnd), division="B",
+                match_id=f"40{rnd:02d}{court}", court=f"0{court + 1}",
+                home_name=home, away_name=away,
+                rows=(cardwriter.SetRow(6, 2, True, ours, theirs),
+                      cardwriter.SetRow(6, 3, False, ours[:1], theirs[:1]),
+                      cardwriter.SetRow(2, 6, False, ours[1:], theirs[1:]),
+                      cardwriter.SetRow(6, 1, True, ours, theirs)),
+                home_roster=tuple(cardwriter.RosterRow(name, 2.5, 2.5, captain=not at)
+                                  for at, name in enumerate(SEVEN_OF_TEN_TEAMS[home])),
+                away_roster=tuple(cardwriter.RosterRow(name, 2.5, 2.5, captain=not at)
+                                  for at, name in enumerate(SEVEN_OF_TEN_TEAMS[away]))))
+    for rnd in (8, 9, 10):
+        (data / f"Round{rnd}").mkdir(parents=True, exist_ok=True)
+
+
+class TestTheFirstRunOffersNoNumberForTheSeasonsLength(ShortOfResultCase):
+    """4.465: the season's length is offered with nothing after its =.
+
+    The first run wrote ``# rounds_total = {played}`` under "Remove the # to use
+    it", and the review offered the same number with "commented out; delete the #
+    to adopt it", so a club that did as it was told declared its season over at the
+    round it had reached, the predecessor's 100% the same report warns of.
+    Measured through build.py on cardwriter cards of rounds 1 to 7 with empty
+    folders for 8 to 10 (/tmp/mcf/scratch/STUB/out-before-rounds.txt): the file
+    and the review offered 7; with the # deleted the report read "rounds 7 of 7
+    played" and the page "Round 7 of 7" over "100% of the declared rounds"; round
+    8's cards then stopped the run on F3. Now the file writes ``# rounds_total =``
+    under a comment saying to type the association's length after the =, naming
+    the rounds played as a count only, and the review prints ``rounds_total =``
+    with a status of its own; the bare line does not load until a number is typed.
+    Rejected: the played count kept behind the # (adopted as told it is next
+    week's F3); a warning beside it, one deleted # from live, as 4.139 rejected
+    for the draw; 0 or another placeholder, which loads; the highest round-named
+    folder, which reads a folder's name as the length (README: nothing is read
+    from a folder's name) and is wrong for a folder made ahead for a final.
+    """
+
+    HEADER = "[competitions.tuesday-division-b]"
+    TO_TYPE = ("in config.toml: commented out, with nothing after the =: type there "
+               "the number of rounds your association's draw gives the season, "
+               "then delete the #")
+
+    @classmethod
+    def runs(cls):
+        cwd = cls.base / "seven"
+        write_seven_of_ten_rounds(cwd / "data")
+        cls.first = cls.run_build(cwd)
+        cls.written = (cwd / "config.toml").read_text(encoding="utf-8")
+        cls.second = cls.run_build(cwd)
+        # As the file says: the # in front of the length's line deleted, and no
+        # more.
+        (cwd / "config.toml").write_text(
+            re.sub(r"(?m)^# (rounds_total =.*)$", r"\1", cls.written, count=1),
+            encoding="utf-8")
+        cls.uncommented = cls.run_build(cwd)
+        # And as it means: the length typed after the =.
+        (cwd / "config.toml").write_text(
+            re.sub(r"(?m)^# rounds_total =.*$", "rounds_total = 10", cls.written,
+                   count=1), encoding="utf-8")
+        cls.typed = cls.run_build(cwd)
+        cls.typed_season = json.loads(
+            (cwd / "site" / "tuesday-division-b" / "season.json").read_text(
+                encoding="utf-8"))
+
+    def length_item(self, run: Run) -> tuple[str, list[str]]:
+        found = [(status, [line for line in toml if line])
+                 for subject, status, toml in review_items(run.text)
+                 if subject.startswith("the season length for ")]
+        self.assertEqual(len(found), 1, run.text[-3000:])
+        return found[0]
+
+    def test_the_file_offers_the_line_with_nothing_after_the_equals(self):
+        self.assertEqual(self.first.code, 0, self.first.text[-2000:])
+        self.assertRegex(self.written, r"(?m)^# rounds_total =$")
+        self.assertNotRegex(self.written, r"(?m)^#? ?rounds_total = *\d")
+        said = written_flat(self.written)
+        self.assertIn('Without it the dashboard says "7 rounds played" and shows no '
+                      "percentage, rather than implying the season is over. Type "
+                      "after the = the number of rounds your association's draw "
+                      "gives the season, then remove the #.", said)
+        self.assertTrue(all(len(line) <= 78 for line in self.written.splitlines()))
+
+    def test_the_review_offers_it_with_a_status_of_its_own_on_every_run(self):
+        for run in (self.first, self.second):
+            self.assertEqual(run.code, 0, run.text[-2000:])
+            status, toml = self.length_item(run)
+            self.assertEqual(toml, [self.HEADER, "rounds_total ="])
+            self.assertEqual(status, self.TO_TYPE)
+            self.assertNotIn("delete the # to adopt it", status)
+            self.assertNotIn("best left so", status)
+            # Nor is a folder made ahead read or named: nothing is read from a
+            # folder's name, and the three no card is in stood for no round.
+            for folder in ("Round8", "Round9", "Round10"):
+                self.assertNotIn(folder, run.text)
+
+    def test_deleting_its_hash_alone_stops_the_next_run_until_the_length_is_typed(self):
+        run = self.uncommented
+        self.assertEqual(run.code, 2, run.text[-2000:])
+        at = self.written.splitlines().index("# rounds_total =") + 1
+        self.assertIn(f"config.toml: not valid TOML", run.err)
+        self.assertIn(f"(at line {at}, column 15)", run.err)
+        self.assertNotIn("of the declared rounds", run.text)
+        # And the length typed after the = is the season's.
+        self.assertEqual(self.typed.code, 0, self.typed.text[-2000:])
+        self.assertIn("rounds 7 of 10 played", flat(self.typed.text))
+        meta = self.typed_season["meta"]
+        self.assertEqual((meta["rounds_total"], meta["provenance"]["rounds_total"]),
+                         (10, "declared"))
+
+
+# Each round's two nights of Tuesday Division B: the home team, the away team and
+# the court the card prints.
+HOME_COURT_NIGHTS = (
+    (("HILLTOP ACES", "BRAMBLE FINCHES", 3), ("CORVID LANE", "RIVERSIDE ROCKETS", 2)),
+    (("BRAMBLE FINCHES", "CORVID LANE", 5), ("HILLTOP ACES", "RIVERSIDE ROCKETS", 3)),
+    (("CORVID LANE", "HILLTOP ACES", 4), ("BRAMBLE FINCHES", "RIVERSIDE ROCKETS", 5)),
+    (("CORVID LANE", "BRAMBLE FINCHES", 2), ("HILLTOP ACES", "RIVERSIDE ROCKETS", 3)),
+)
+
+
+def write_home_court_rounds(data: Path) -> None:
+    """Four rounds of Tuesday Division B whose cards print each home team's court.
+
+    HILLTOP ACES's three home cards print court 03 and BRAMBLE FINCHES's two print
+    05; CORVID LANE's print 02 twice and 04 once, the 04 a washout; RIVERSIDE
+    ROCKETS has no home card. Two cards a round, a week apart from 2026-07-07, the
+    first name on each roster carrying the (C), as in
+    :func:`write_seven_of_ten_rounds`.
+    """
+    for rnd, nights in enumerate(HOME_COURT_NIGHTS, start=1):
+        folder = data / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        played = (date(2026, 7, 7) + timedelta(weeks=rnd - 1)).isoformat()
+        for at, (home, away, court) in enumerate(nights):
+            ours, theirs = (SEVEN_OF_TEN_TEAMS[home][:2],
+                            SEVEN_OF_TEN_TEAMS[away][:2])
+            washout = (rnd, at) == (3, 0)
+            scores = (((6, 2), (6, 1), (0, 0), (0, 0)) if washout
+                      else ((6, 2), (6, 3), (2, 6), (6, 1)))
+            sides = ((ours, theirs), (ours[:1], theirs[:1]), (ours[1:], theirs[1:]),
+                     (ours, theirs))
+            rows = tuple(cardwriter.SetRow(won, lost, doubles, *pair)
+                         for (won, lost), doubles, pair
+                         in zip(scores, (True, False, False, True), sides))
+            rained = (dict(cancelled=True, verb="VS", winner=cardwriter.NO_TICK)
+                      if washout else {})
+            cardwriter.write_card_file(folder / f"r{rnd}-{at}.pdf", cardwriter.CardSpec(
+                date=played, round_label=str(rnd), division="B",
+                match_id=f"50{rnd:02d}{at}", court=f"{court:02d}",
+                home_name=home, away_name=away, rows=rows,
+                home_roster=tuple(cardwriter.RosterRow(name, 2.5, 2.5, captain=not n)
+                                  for n, name in enumerate(SEVEN_OF_TEN_TEAMS[home])),
+                away_roster=tuple(cardwriter.RosterRow(name, 2.5, 2.5, captain=not n)
+                                  for n, name in enumerate(SEVEN_OF_TEN_TEAMS[away])),
+                **rained))
+
+
+def table_block(text: str, header: str) -> list[str]:
+    """The lines of a written file's *header* table: the header, down to the
+    blank line or the next table that ends it."""
+    lines = text.splitlines()
+    block = [header]
+    for line in lines[lines.index(header) + 1:]:
+        if not line or line.startswith(("[", "# [")):
+            break
+        block.append(line)
+    return block
+
+
+PROPOSAL_MARKER = "# matchcentre-dashboard: a proposed config, which nothing reads"
+PROPOSAL_RULE = "# " + "-" * 76
+
+
+def proposal_said(cwd: Path, name: str = "config.proposed.toml") -> str:
+    """The header of the proposal ``--discover`` wrote in *cwd*, its words joined.
+
+    4.431: what the refusal of ``--discover`` over a config said on stderr, of what
+    a rewrite loses, the proposal it now writes beside the config says above its
+    row of dashes. The header alone, so a word of the file under it cannot pass.
+    """
+    text = (cwd / name).read_text(encoding="utf-8")
+    return " ".join(written_flat(text.split(f"\n{PROPOSAL_RULE}\n", 1)[0]).split())
+
+
+def proposal_of(case: "CliCase", *argv: str) -> str:
+    """``--discover`` over the config in *case*'s folder, whatever it exits, and
+    the header of the proposal it wrote beside it, by :func:`proposal_said`.
+
+    4.431: where the pinned tests read the refusal's stderr for what a rewrite
+    loses, they read this instead, which says it in the same words.
+    """
+    case.build("--discover", *argv, expect=None)
+    return proposal_said(case.cwd)
+
+
+class TestTheFirstRunOffersEachTeamTheCourtItsHomeCardsPrint(ShortOfResultCase):
+    """4.469: each team's home court is offered from the court its home cards print.
+
+    The writer's own comment said "Courts and codes are printed on no card", and
+    so the courts table offered one line, the first team's, with the court 1 that
+    no card gave: measured on four teams whose home cards print courts 3, 5, and 2
+    twice and 4 once (/tmp/mcf/scratch/CONFIG/probes/out-before.txt), the file
+    wrote ``# "Bramble Finches" = 1``, and on tools/demo.py's season
+    ``# "Brindle Bunyips" = 1`` of a team whose cards print courts 2 and 3. Every
+    card prints a court; on a real season of 201 cards all 201 do, 52 of the 54
+    teams with a home card print one court at home and 2 print two, and the court
+    printed most is the court the club typed for all 54. Now each team with a home
+    card is offered the court those cards print most, commented, in the captains'
+    words; where they print more than one a comment names each and how often, and
+    a tie is offered no court; a team with no home card gets no line, and a declared
+    line stays live and is not offered again. Every card filed counts, a washout
+    with the rest: it names the court the night was drawn on. The page's court
+    stays the declared one. Rejected: the cards' court on the page as derived (the
+    match page shows each card's court already, and a provenance aspect would
+    change every season.json); a live offer, which reads the cards' court back as
+    the club's; and codes read from cards, which print none.
+    """
+
+    COURTS = "[competitions.tuesday-division-b.courts]"
+
+    @classmethod
+    def runs(cls):
+        cwd = cls.base / "courts"
+        write_home_court_rounds(cwd / "data")
+        cls.first = cls.run_build(cwd)
+        cls.written = (cwd / "config.toml").read_text(encoding="utf-8")
+        cls.first_courts = cls.home_courts(cwd)
+        # One court adopted as the file says, by deleting its #, and another
+        # typed over: the club plays Bramble Finches on court 6 now.
+        path = cwd / "config.toml"
+        path.write_text(cls.written.replace('# "Hilltop Aces" = 3', '"Hilltop Aces" = 3')
+                        .replace('# "Bramble Finches" = 5', '"Bramble Finches" = 6'),
+                        encoding="utf-8")
+        cls.declared = cls.run_build(cwd)
+        cls.declared_courts = cls.home_courts(cwd)
+        cls.rewrite = cls.run_build(cwd, "--discover", "--force")
+        cls.rewritten = path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def home_courts(cwd: Path) -> dict:
+        season = json.loads((cwd / "site" / "tuesday-division-b" / "season.json")
+                            .read_text(encoding="utf-8"))
+        return {team["name"]: team["home_court"] for team in season["teams"]}
+
+    def courts(self, text: str) -> tuple[list[str], str]:
+        """The courts table's lines with a value, and its comments' words."""
+        block = table_block(text, self.COURTS)
+        return ([line for line in block if '" = ' in line],
+                written_flat("\n".join(line for line in block[1:]
+                                       if '" = ' not in line)))
+
+    def test_each_team_is_offered_the_court_its_home_cards_print_behind_a_hash(self):
+        self.assertEqual(self.first.code, 0, self.first.text[-2000:])
+        offered, said = self.courts(self.written)
+        self.assertEqual(offered, ['# "Bramble Finches" = 5', '# "Corvid Lane" = 2',
+                                   '# "Hilltop Aces" = 3'])
+        self.assertIn("Read from the court printed on each team's home cards. Correct "
+                      "a line if it reads wrongly and remove the # to use it.", said)
+        self.assertNotIn("printed on no card", self.written)
+        self.assertEqual([line for line in self.written.splitlines()
+                          if len(line) > 78], [])
+
+    def test_two_courts_at_home_are_offered_as_the_one_printed_more_and_named(self):
+        # The washout's 4 counted with the rest: the night was drawn on court 4.
+        block = table_block(self.written, self.COURTS)
+        at = block.index('# "Corvid Lane" = 2')
+        self.assertEqual(written_flat(block[at - 1]),
+                         "The home cards of Corvid Lane print court 2 on 2 cards and "
+                         "court 4 on 1.")
+        # And a team whose home cards print one court is offered it with no count.
+        self.assertNotIn("The home cards of Hilltop Aces", self.courts(self.written)[1])
+
+    def test_a_team_with_no_home_card_is_given_no_line(self):
+        self.assertNotIn("Riverside Rockets",
+                         "\n".join(table_block(self.written, self.COURTS)))
+        # A team of the competition all the same, its captain offered.
+        self.assertIn('# "Riverside Rockets" = "Ivy Pike"', self.written)
+
+    def test_a_declared_court_stays_live_and_is_not_offered_again(self):
+        self.assertEqual(self.rewrite.code, self.declared.code, self.rewrite.text[-2000:])
+        offered, said = self.courts(self.rewritten)
+        self.assertEqual(offered, ['"Bramble Finches" = 6', '# "Bramble Finches" = 5',
+                                   '# "Corvid Lane" = 2', '"Hilltop Aces" = 3'])
+        self.assertIn("As this file had them, with any others read from the court "
+                      "printed on each team's home cards written with a # in front. "
+                      "Remove the # to use one.", said)
+        self.assertIn("The home cards of Bramble Finches print court 5 on 2 cards. To "
+                      "use court 5, delete the line above and the # below.", said)
+        courts = tomllib.loads(self.rewritten)["competitions"]["tuesday-division-b"]
+        self.assertEqual(courts["courts"], {"Bramble Finches": 6, "Hilltop Aces": 3})
+        self.assertEqual([line for line in self.rewritten.splitlines()
+                          if len(line) > 78], [])
+
+    def test_the_page_shows_a_court_once_it_is_declared_and_not_before(self):
+        self.assertEqual(self.first_courts, dict.fromkeys(
+            ("Bramble Finches", "Corvid Lane", "Hilltop Aces", "Riverside Rockets")))
+        self.assertEqual(self.declared_courts,
+                         {"Bramble Finches": 6, "Corvid Lane": None, "Hilltop Aces": 3,
+                          "Riverside Rockets": None})
+
+
+# A config a club typed by hand: a closed list that leaves out a team its cards
+# name, a captain the (C) marks do not give, and a court the home cards do not print.
+TYPED_CONFIG = """\
+# Typed by the club's secretary from the association's sheet.
+[club]
+name = "Example Lawn Tennis Club"
+
+[build]
+seasons = "single"
+
+[competitions.tuesday-division-b]
+label = "Tuesday Division B"
+day = "Tuesday"
+division = "B"
+rounds_total = 10
+teams = ["Hilltop Aces", "Bramble Finches", "Corvid Lane"]
+
+[competitions.tuesday-division-b.captains]
+"Hilltop Aces" = "Cal Moss"
+"Bramble Finches" = "Cy Wren"
+
+[competitions.tuesday-division-b.courts]
+"Hilltop Aces" = 3
+"Bramble Finches" = 6
+"""
+
+
+class TestDiscoverOverAConfigWritesAProposalBesideIt(ShortOfResultCase):
+    """4.431: ``--discover`` over a config writes config.proposed.toml beside it.
+
+    It refused, exit 2, before reading a card: measured on cardwriter cards with the
+    first run's file (/tmp/mcf/scratch/CONFIG/probes/out-before.txt) it printed
+    "config.toml already exists and --discover would overwrite it" and said to add
+    --force, which writes the file fresh and drops the draw and every comment; so a
+    club with a config it typed, as one with a real season of 201 cards typed 57
+    court lines, had no way to ask the cards what they would write short of losing
+    what it had. Now the run builds as a plain run does, exit and all, leaves
+    config.toml byte for byte, and writes beside it the file ``--discover --force``
+    would write, under a header that says which run wrote it, that nothing reads it,
+    how to adopt it and what adopting it whole loses; the review section counts what
+    it offers that config.toml lacks, each with its lines. It writes over a proposal
+    of its own and refuses, exit 2, a file of that name it did not write.
+    ``--discover --force`` is unchanged and ``--check --discover`` writes nothing.
+    Rejected: the proposal under --out (the site is published); a --propose flag, a
+    second flag for what the command a club types first now does safely; and keeping
+    the refusal, whose exit 2 only a script could depend on, and no script in this
+    project does.
+    """
+
+    PROPOSED = "config.proposed.toml"
+    # The typed file with every value the review lists declared as well, the
+    # season's name, the format and the draw, so the review has none to list.
+    WHOLE = (TYPED_CONFIG.replace(
+        'seasons = "single"\n',
+        'seasons = "single"\n\n[rules]\nformat = "doubles-singles-doubles"\n').replace(
+        "rounds_total = 10\n", 'rounds_total = 10\nseason = "Season 1"\n')
+        + "".join(
+            f'\n[[competitions.tuesday-division-b.rounds]]\nnumber = "{rnd}"\n'
+            f'date = "{date(2026, 7, 7) + timedelta(weeks=rnd - 1)}"\nfixtures = ['
+            + ", ".join(f'["{home.title()}", "{away.title()}"]'
+                        for home, away, _ in nights) + "]\n"
+            for rnd, nights in enumerate(HOME_COURT_NIGHTS, start=1)))
+    UNREAD = "\ufeffOur own draft for next season.\n".encode("utf-16-le")
+    MARKED = PROPOSAL_MARKER + " (edited)\n# Our own notes.\n"
+    # The typed file with its list taken out and round 1's draw declared, which
+    # names the three teams it lists and so closes the list as it did.
+    DRAWN = (TYPED_CONFIG.replace(
+        'teams = ["Hilltop Aces", "Bramble Finches", "Corvid Lane"]\n', "")
+        + '\n[[competitions.tuesday-division-b.rounds]]\nnumber = "1"\n'
+          'fixtures = [["Hilltop Aces", "Bramble Finches"]]\nbye = "Corvid Lane"\n')
+    KEYED = TYPED_CONFIG.replace(
+        '"Hilltop Aces" = "Cal Moss"\n"Bramble Finches" = "Cy Wren"\n',
+        '"hilltop-aces" = "Cal Moss"\n"Bramble Finches" = ""\n').replace(
+        '"Hilltop Aces" = 3\n"Bramble Finches" = 6\n', '"bramble-finches" = 6\n')
+
+    @staticmethod
+    def stamp(path: Path) -> int | None:
+        return path.stat().st_mtime_ns if path.is_file() else None
+
+    @classmethod
+    def typed_project(cls, name: str, config: str = "config.toml") -> Path:
+        cwd = cls.base / name
+        write_home_court_rounds(cwd / "data")
+        (cwd / config).parent.mkdir(parents=True, exist_ok=True)
+        (cwd / config).write_text(TYPED_CONFIG, encoding="utf-8")
+        return cwd
+
+    @classmethod
+    def runs(cls):
+        cls.cwd = cls.typed_project("club")
+        cls.plain = cls.run_build(cls.cwd)
+        cls.proposing = cls.run_build(cls.cwd, "--discover")
+        cls.proposal = cls.read(cls.cwd / cls.PROPOSED)
+        cls.kept = (cls.cwd / "config.toml").read_bytes()
+        # Asked again a week on, over the same cards and config: a later
+        # --generated wins over the one run_build gives.
+        cls.held_since = cls.stamp(cls.cwd / cls.PROPOSED)
+        cls.held = cls.run_build(cls.cwd, "--discover", "--generated", LATER_NIGHT)
+        cls.held_proposal = cls.read(cls.cwd / cls.PROPOSED)
+        cls.held_until = cls.stamp(cls.cwd / cls.PROPOSED)
+        # The proposal edited, as a club might, and the run asked for again.
+        if cls.proposal:
+            (cls.cwd / cls.PROPOSED).write_text(cls.proposal + "# edited by hand\n",
+                                                encoding="utf-8")
+        cls.again = cls.run_build(cls.cwd, "--discover")
+        cls.rewritten_proposal = cls.read(cls.cwd / cls.PROPOSED)
+        # And edited again, and asked for a week on.
+        if cls.rewritten_proposal:
+            (cls.cwd / cls.PROPOSED).write_text(
+                cls.rewritten_proposal + "# edited by hand\n", encoding="utf-8")
+        cls.redated = cls.run_build(cls.cwd, "--discover", "--generated", LATER_NIGHT)
+        cls.redated_proposal = cls.read(cls.cwd / cls.PROPOSED)
+
+        forced = cls.typed_project("forced")
+        cls.forced_run = cls.run_build(forced, "--discover", "--force")
+        cls.forced = cls.read(forced / "config.toml")
+        cls.forced_files = sorted(p.name for p in forced.iterdir())
+
+        checked = cls.typed_project("checked")
+        cls.check_plain = cls.run_build(checked, "--check")
+        cls.checking = cls.run_build(checked, "--check", "--discover")
+        cls.checked_files = sorted(p.name for p in checked.iterdir())
+
+        clubs = cls.typed_project("clubs")
+        (clubs / cls.PROPOSED).write_text("# Our own draft for next season.\n",
+                                          encoding="utf-8")
+        cls.check_refused = cls.run_build(clubs, "--check", "--discover")
+        cls.refused = cls.run_build(clubs, "--discover")
+        cls.clubs = clubs
+        # One of that name saved as UTF-16, which no reading of it as text gets
+        # past its first byte.
+        unread = cls.typed_project("unread")
+        (unread / cls.PROPOSED).write_bytes(cls.UNREAD)
+        cls.unread = cls.run_build(unread, "--discover")
+        cls.unread_cwd = unread
+        # One begun with the marker's words and more on that line, as a club
+        # might begin its own notes after copying the header.
+        marked = cls.typed_project("marked")
+        (marked / cls.PROPOSED).write_text(cls.MARKED, encoding="utf-8")
+        cls.marked = cls.run_build(marked, "--discover")
+        cls.marked_cwd = marked
+
+        # The list closed by the declared draw, and not by a `teams =` line: F8
+        # names Riverside Rockets all the same.
+        drawn = cls.typed_project("drawn")
+        (drawn / "config.toml").write_text(cls.DRAWN, encoding="utf-8")
+        cls.drawn = cls.run_build(drawn, "--discover")
+        cls.drawn_proposal = cls.read(drawn / cls.PROPOSED)
+
+        # A captain declared blank, and keys typed as the teams' slugs.
+        keyed = cls.typed_project("keyed")
+        (keyed / "config.toml").write_text(cls.KEYED, encoding="utf-8")
+        cls.keyed = cls.run_build(keyed, "--discover")
+        cls.keyed_proposal = cls.read(keyed / cls.PROPOSED)
+
+        # The file declares a competition no card reached, and not the one the
+        # cards reach.
+        apart = cls.base / "apart"
+        write_home_court_rounds(apart / "data")
+        (apart / "config.toml").write_text(
+            '[competitions.monday-division-a]\nlabel = "Monday Division A"\n',
+            encoding="utf-8")
+        cls.apart = cls.run_build(apart, "--discover")
+
+        # Ten teams of the demo's, to see a group stop at the review's limit: a
+        # list of one of them declared, and no list at all.
+        for name, teams in (("listed", 'teams = ["Brindle Bilbies"]\n'),
+                            ("unlisted", "")):
+            cwd = cls.base / name
+            said = io.StringIO()
+            with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                code = demo_mod.main(["--out", str(cwd / "data"), "--teams", "10",
+                                      "--rounds", "3"])
+            if code != 0:
+                raise AssertionError(said.getvalue())
+            (cwd / "config.toml").write_text(
+                '[competitions.wednesday-division-3]\n'
+                'label = "Wednesday Division 3"\n' + teams, encoding="utf-8")
+            setattr(cls, name, cls.run_build(cwd, "--discover"))
+
+        other = cls.typed_project("other", "other.toml")
+        cls.other_run = cls.run_build(other, "--discover", "--config", "other.toml")
+        cls.other = other
+
+        same = cls.base / "same"
+        write_home_court_rounds(same / "data")
+        cls.run_build(same)
+        cls.same_config = (same / "config.toml").read_bytes()
+        cls.nothing = cls.run_build(same, "--discover")
+        cls.same = same
+
+        whole = cls.base / "whole"
+        write_home_court_rounds(whole / "data")
+        (whole / "config.toml").write_text(cls.WHOLE, encoding="utf-8")
+        cls.whole = cls.run_build(whole, "--discover")
+
+    @staticmethod
+    def read(path: Path) -> str:
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    def summary(self, run: Run) -> str:
+        """The review section down to its first item, flattened."""
+        return flat("\n".join(line for block in self.summary_lines(run)
+                               for line in block))
+
+    def test_it_builds_as_a_plain_run_does_and_leaves_the_config_byte_for_byte(self):
+        # Exit 1, as the plain run: Riverside Rockets is not on the list (F8).
+        self.assertEqual(self.plain.code, 1, self.plain.text[-2000:])
+        self.assertEqual(self.proposing.code, self.plain.code,
+                         self.proposing.text[-3000:])
+        self.assertEqual(self.kept, TYPED_CONFIG.encode("utf-8"))
+        self.assertTrue(self.proposal, self.proposing.files("."))
+        self.assertIn("index.html", self.proposing.files("site"))
+        result = self.proposing.out.split("\n== result", 1)[1]
+        self.assertRegex(result, r"(?m)^  proposed +config\.proposed\.toml$")
+
+    def test_the_proposal_is_what_force_writes_under_a_header_that_says_so(self):
+        self.assertTrue(self.proposal.startswith(PROPOSAL_MARKER + "\n"),
+                        self.proposal[:400])
+        head, body = self.proposal.split(f"\n{PROPOSAL_RULE}\n", 1)
+        self.assertEqual(body, self.forced)
+        said = written_flat(head)
+        # Which run wrote it: the build, the date it was given, and the cards.
+        self.assertRegex(" ".join(said.split()),
+                         r"Written by `python3 build\.py --discover` "
+                         r"\(matchcentre-dashboard [^ )]+\) on 10 Sep 2026, "
+                         r"12:00pm, from the 8 scorecards it read\.")
+        for words in ("Written by `python3 build.py --discover`",
+                      "config.toml already exists, so it was left as it was",
+                      "No run reads this file.",
+                      "copy it over config.toml and delete these lines, down to and "
+                      "including the row of dashes",
+                      "Everything you have declared in it is written back.",
+                      "The file is written fresh, so a comment you added to it goes."):
+            self.assertIn(words, said)
+        declared = tomllib.loads(self.proposal)["competitions"]["tuesday-division-b"]
+        self.assertEqual((declared["teams"], declared["captains"], declared["courts"]),
+                         (["Hilltop Aces", "Bramble Finches", "Corvid Lane"],
+                          {"Hilltop Aces": "Cal Moss", "Bramble Finches": "Cy Wren"},
+                          {"Hilltop Aces": 3, "Bramble Finches": 6}))
+        self.assertEqual([line for line in self.proposal.splitlines()
+                          if len(line) > 78], [])
+
+    def offers(self, run: Run) -> dict[str, list[str]]:
+        """The summary's groups: each one's words, flattened, and the lines under it,
+        their six columns taken off."""
+        groups = {}
+        for block in self.summary_lines(run):
+            if re.match(r"    \S", block[0]):
+                groups[flat("\n".join(line for line in block
+                                       if re.match(r"    \S", line)))] = [
+                    line[6:] for line in block if line.startswith(" " * 6)]
+        return groups
+
+    @staticmethod
+    def summary_lines(run: Run) -> list[list[str]]:
+        """The review section down to its first item, in blocks between blank lines."""
+        section = run.out.split("\n== review", 1)[1].split("\n== ", 1)[0].splitlines()
+        first = next((i for i in range(len(section) - 1)
+                      if re.match(r"  \S", section[i])
+                      and section[i + 1].startswith("      why: ")), len(section))
+        blocks: list[list[str]] = [[]]
+        for line in section[1:first]:
+            if line:
+                blocks[-1].append(line)
+            elif blocks[-1]:
+                blocks.append([])
+        return [block for block in blocks if block]
+
+    def test_the_report_counts_what_it_offers_that_the_config_lacks(self):
+        said = self.summary(self.proposing)
+        self.assertIn("config.proposed.toml has been written beside config.toml",
+                      said)
+        self.assertIn("Against config.toml, it offers:", said)
+        self.assertNotIn("offers nothing", said)
+        groups = self.offers(self.proposing)
+        teams = groups.pop("1 team(s) the cards name that a declared list lacks, "
+                           "Riverside Rockets, with the list that adds it:")
+        self.assertEqual(
+            tomllib.loads("\n".join(teams))["competitions"]["tuesday-division-b"],
+            {"teams": ["Hilltop Aces", "Bramble Finches", "Corvid Lane",
+                       "Riverside Rockets"]})
+        captains = "[competitions.tuesday-division-b.captains]"
+        courts = "[competitions.tuesday-division-b.courts]"
+        for words, lines in (
+                ("1 captain(s) the (C) marks give where config.toml names none:",
+                 [captains, '"Corvid Lane" = "Fay Kite"']),
+                ("1 captain(s) the (C) marks give where config.toml names another:",
+                 [captains, '# in place of "Hilltop Aces" = "Cal Moss"',
+                  '"Hilltop Aces" = "Ada Quill"']),
+                ("1 home court(s) the home cards print where config.toml declares "
+                 "none:", [courts, '"Corvid Lane" = 2']),
+                ("1 home court(s) the home cards print where config.toml declares "
+                 "another:", [courts, '# in place of "Bramble Finches" = 6',
+                              '"Bramble Finches" = 5'])):
+            self.assertEqual(groups.pop(words), lines)
+        # The values below the file does not hold at all, by their subjects, and
+        # the items themselves read as they did.
+        lacking = [subject for subject, status, _ in review_items(self.proposing.out)
+                   if status.startswith("in config.toml: not in it;")]
+        self.assertEqual(len(lacking), 2, self.proposing.out[-4000:])
+        self.assertEqual(groups, {
+            f"2 other value(s) config.toml does not hold at all, each listed below "
+            f"and behind a # in config.proposed.toml: {lacking[0]} and "
+            f"{lacking[1]}.": []})
+        review = self.proposing.out.split("\n== review", 1)[1].split("\n== ", 1)[0]
+        self.assertEqual([line for line in review.splitlines() if len(line) > 78], [])
+
+    def test_each_offer_is_in_the_proposal_behind_a_hash(self):
+        for line in ('# "Hilltop Aces" = "Ada Quill"', '# "Corvid Lane" = "Fay Kite"',
+                     '# "Corvid Lane" = 2', '# "Bramble Finches" = 5'):
+            self.assertIn(line, self.proposal.splitlines())
+        said = written_flat(self.proposal)
+        self.assertIn("The cards also name Riverside Rockets, which the list above "
+                      "lacks.", said)
+        # The list that adds it, behind a # on each of its lines.
+        lines = self.proposal.splitlines()
+        start = lines.index("# teams = [")
+        block = lines[start:lines.index("# ]", start) + 1]
+        self.assertEqual(tomllib.loads("\n".join(line[2:] for line in block)),
+                         {"teams": ["Hilltop Aces", "Bramble Finches", "Corvid Lane",
+                                    "Riverside Rockets"]})
+
+    def test_a_second_run_writes_over_its_own_proposal(self):
+        self.assertEqual(self.again.code, self.proposing.code, self.again.text[-2000:])
+        self.assertTrue(self.rewritten_proposal.startswith(PROPOSAL_MARKER + "\n"),
+                        self.again.text[-2000:])
+        self.assertEqual(self.rewritten_proposal, self.proposal)
+        self.assertNotIn("edited by hand", self.rewritten_proposal)
+
+    def test_a_run_over_the_same_cards_and_config_leaves_the_proposal_as_it_was(self):
+        # Dated by each run, a --discover without --generated wrote the file again
+        # with the clock's minute, 9:35am and then 9:36am over the same cards and
+        # config (/tmp/mcf/scratch/CONFIG/fixup/before.txt), in a run that said
+        # all 9 files of the site already held what it would write. Kept as the
+        # site's pages are, date and all, and not written at all.
+        self.assertEqual(self.held.code, self.proposing.code, self.held.text[-2000:])
+        self.assertEqual(self.held_proposal, self.proposal)
+        self.assertIn("on 10 Sep 2026, 12:00pm, from the 8 scorecards",
+                      written_flat(self.held_proposal))
+        self.assertIsNotNone(self.held_since)
+        self.assertEqual(self.held_until, self.held_since)
+        self.assertIn("config.proposed.toml, beside config.toml, already held what "
+                      "this run would write, so it was left as it was: the file "
+                      "--discover --force would write over config.toml",
+                      self.summary(self.held))
+        result = self.held.out.split("\n== result", 1)[1]
+        self.assertRegex(result, r"(?m)^  proposed +config\.proposed\.toml$")
+
+    def test_a_proposal_changed_since_is_dated_by_the_run_that_writes_it(self):
+        # The date it was written on is kept only with the rest of it: a file
+        # edited by hand is this run's to write, and to date.
+        self.assertEqual(self.redated.code, self.proposing.code,
+                         self.redated.text[-2000:])
+        self.assertNotIn("edited by hand", self.redated_proposal)
+        self.assertIn("on 17 Sep 2026, 7:40pm, from the 8 scorecards",
+                      written_flat(self.redated_proposal))
+        self.assertIn("config.proposed.toml has been written beside config.toml",
+                      self.summary(self.redated))
+
+    def test_a_file_of_that_name_the_club_wrote_is_refused(self):
+        self.assertEqual(self.refused.code, 2, self.refused.text[-2000:])
+        self.assertIn("error: config.proposed.toml is there, and this program did "
+                      "not write it.", self.refused.err)
+        self.assertIn(PROPOSAL_MARKER, self.refused.err)
+        self.assertIn("Rename it or move it, and run this again.", flat(self.refused.err))
+        self.assertEqual(self.read(self.clubs / self.PROPOSED),
+                         "# Our own draft for next season.\n")
+        self.assertEqual(self.read(self.clubs / "config.toml"), TYPED_CONFIG)
+        self.assertFalse((self.clubs / "site").exists())
+
+    def test_a_file_of_that_name_in_another_encoding_is_refused_as_the_clubs(self):
+        # Not begun as each proposal is, so not one to write over: the club's
+        # draft would be lost to a file of the program's.
+        self.assertEqual(self.unread.code, 2, self.unread.text[-2000:])
+        self.assertIn("error: config.proposed.toml is there, and this program did "
+                      "not write it.", self.unread.err)
+        self.assertEqual((self.unread_cwd / self.PROPOSED).read_bytes(), self.UNREAD)
+
+    def test_a_file_begun_with_the_marker_and_more_on_its_line_is_refused(self):
+        # The marker's words are a line of their own in each proposal; a club's
+        # notes begun with them and more are the club's.
+        self.assertEqual(self.marked.code, 2, self.marked.text[-2000:])
+        self.assertIn("error: config.proposed.toml is there, and this program did "
+                      "not write it.", self.marked.err)
+        self.assertEqual(self.read(self.marked_cwd / self.PROPOSED), self.MARKED)
+
+    @unittest.skipIf(os.name == "nt", "needs a symbolic link")
+    def test_a_link_to_nothing_at_that_name_is_refused_and_nothing_made_at_its_end(self):
+        # A name a file is not at may still be a link to one, and writing there
+        # makes that file wherever the link points: outside the project here.
+        cwd = self.typed_project("linked")
+        (cwd / "elsewhere").mkdir()
+        os.symlink(Path("elsewhere") / "target.toml", cwd / self.PROPOSED)
+        run = self.run_build(cwd, "--discover")
+        self.assertEqual(run.code, 2, run.text[-2000:])
+        self.assertIn("error: config.proposed.toml is there, and this program did "
+                      "not write it.", run.err)
+        self.assertEqual(list((cwd / "elsewhere").iterdir()), [])
+        self.assertTrue((cwd / self.PROPOSED).is_symlink())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0,
+                     "needs a file this account may not read")
+    def test_a_file_of_that_name_it_cannot_read_is_refused_for_that_reason(self):
+        # Its own proposal, made unreadable, was refused as one "this program did
+        # not write" and the club sent to rename it (/tmp/mcf/scratch/CONFIG/
+        # fixup/before.txt): a claim about whose the file is, made from a file
+        # nothing was read of, and advice past the trouble, its permissions.
+        cwd = self.typed_project("sealed")
+        self.run_build(cwd, "--discover")
+        written = (cwd / self.PROPOSED).read_bytes()
+        self.assertTrue(written.startswith(PROPOSAL_MARKER.encode("utf-8")))
+        (cwd / self.PROPOSED).chmod(0)
+        self.addCleanup((cwd / self.PROPOSED).chmod, 0o644)
+        checked = self.run_build(cwd, "--check", "--discover")
+        run = self.run_build(cwd, "--discover")
+        self.assertEqual(run.code, 2, run.text[-2000:])
+        self.assertIn("error: config.proposed.toml: cannot be read — Permission "
+                      "denied", run.err)
+        self.assertNotIn("did not write it", run.err)
+        said = flat(run.err)
+        self.assertIn("So this run cannot tell whether it wrote that file.", said)
+        self.assertIn("Make it readable by you, or move it aside, and run this "
+                      "again.", said)
+        self.assertNotIn("Rename it", said)
+        self.assertIn("A file of that name is there already that this run cannot "
+                      "read, so a run without --check would refuse to write over "
+                      "it.", self.summary(checked))
+        (cwd / self.PROPOSED).chmod(0o644)
+        self.assertEqual((cwd / self.PROPOSED).read_bytes(), written)
+
+    def test_check_says_a_file_in_the_way_would_be_refused_and_offers_all_the_same(self):
+        self.assertEqual(self.check_refused.code, self.check_plain.code,
+                         self.check_refused.text[-2000:])
+        said = self.summary(self.check_refused)
+        self.assertIn("--check writes nothing, so config.proposed.toml was not "
+                      "written.", said)
+        self.assertIn("A file of that name is there already that this program did "
+                      "not write, so a run without --check would refuse to write "
+                      "over it.", said)
+        self.assertIn("Against config.toml, it would offer:", said)
+        self.assertIn('"Corvid Lane" = 2', said)
+
+    def test_a_list_the_draw_closes_is_said_to_be_the_draws_and_lacks_what_f8_names(self):
+        # Closed by a declared draw and not by `teams =`, the list was "as read
+        # from the cards" and lacked Riverside Rockets, which F8 named on the
+        # same run, and the summary named no team (/tmp/mcf/scratch/CONFIG/fixup/
+        # before.txt). The cards name every team only where nothing closes it.
+        self.assertEqual(self.drawn.code, 1, self.drawn.text[-2000:])
+        self.assertIn("is not in the declared team list", flat(self.drawn.out))
+        said = written_flat(self.drawn_proposal)
+        self.assertIn("The full list of teams in this competition, as your declared "
+                      "draw names them.", said)
+        self.assertNotIn("as read from the cards", said)
+        self.assertIn("The cards also name Riverside Rockets, which the list above "
+                      "lacks.", said)
+        offered = ["Bramble Finches", "Corvid Lane", "Hilltop Aces",
+                   "Riverside Rockets"]
+        lines = self.drawn_proposal.splitlines()
+        start = lines.index("# teams = [")
+        block = lines[start:lines.index("# ]", start) + 1]
+        self.assertEqual(tomllib.loads("\n".join(line[2:] for line in block)),
+                         {"teams": offered})
+        teams = self.offers(self.drawn)[
+            "1 team(s) the cards name that a declared list lacks, Riverside Rockets, "
+            "with the list that adds it:"]
+        self.assertEqual(
+            tomllib.loads("\n".join(teams))["competitions"]["tuesday-division-b"],
+            {"teams": offered})
+
+    def test_a_captain_declared_blank_is_one_the_file_names_none_for(self):
+        # A captain typed as "" names nobody. It was offered as one the file
+        # "names another" for, `# in place of "Bramble Finches" = ""`, and with
+        # its line it is offered among those the file names none for.
+        self.assertEqual(self.keyed.code, 1, self.keyed.text[-2000:])
+        captains = "[competitions.tuesday-division-b.captains]"
+        groups = self.offers(self.keyed)
+        self.assertEqual(
+            groups["2 captain(s) the (C) marks give where config.toml names none:"],
+            [captains, '# in place of "Bramble Finches" = ""',
+             '"Bramble Finches" = "Cy Wren"', '"Corvid Lane" = "Fay Kite"'])
+        self.assertEqual(
+            groups["1 captain(s) the (C) marks give where config.toml names "
+                   "another:"],
+            [captains, '# in place of hilltop-aces = "Cal Moss"',
+             'hilltop-aces = "Ada Quill"'])
+
+    def test_the_captains_comment_names_the_team_as_the_courts_comment_does(self):
+        # Keyed as the club typed it, the captain's comment said "the cards of
+        # hilltop-aces" where the court's beside it said "Bramble Finches".
+        said = written_flat(self.keyed_proposal)
+        self.assertIn("The (C) marks on the cards of Hilltop Aces name Ada Quill.",
+                      said)
+        self.assertIn("The home cards of Bramble Finches print court 5", said)
+        self.assertNotIn("cards of hilltop-aces", said)
+        self.assertIn('# hilltop-aces = "Ada Quill"', self.keyed_proposal.splitlines())
+
+    def test_a_competition_only_one_side_has_is_named_by_its_header(self):
+        groups = list(self.offers(self.apart).items())
+        self.assertEqual(len(groups), 3, self.apart.out[-4000:])
+        self.assertEqual(groups[0], (
+            "1 competition(s) the cards reach that config.toml does not declare:",
+            ["[competitions.tuesday-division-b]"]))
+        # The competition is the offer: no value of its own section besides.
+        self.assertTrue(groups[1][0].startswith("2 other value(s) config.toml does "
+                                                "not hold at all,"), groups[1][0])
+        self.assertEqual(groups[2], (
+            "1 competition(s) config.toml declares that no card reached this run, "
+            "which config.proposed.toml writes back as config.toml has them:",
+            ["[competitions.monday-division-a]"]))
+
+    def test_a_group_stops_at_the_reviews_limit_and_counts_the_rest(self):
+        groups = self.offers(self.listed)
+        teams = [words for words in groups if words.startswith("9 team(s)")]
+        self.assertEqual(len(teams), 1, list(groups))
+        self.assertIn(" and 1 more, with the list that adds them:", teams[0])
+        self.assertEqual(teams[0].count("Brindle "), build_mod.REVIEW_LIMIT)
+        captains = self.offers(self.unlisted)[
+            "10 captain(s) the (C) marks give where config.toml names none:"]
+        self.assertEqual(captains[0], "[competitions.wednesday-division-3.captains]")
+        self.assertEqual(len(captains), 1 + build_mod.REVIEW_LIMIT + 1, captains)
+        self.assertEqual(captains[-1], "# and 2 more")
+
+    def test_a_group_of_the_limit_exactly_is_said_whole(self):
+        limit = build_mod.REVIEW_LIMIT
+        teams = [f"Team {n}" for n in range(limit + 1)]
+        self.assertEqual(build_mod._capped(teams[:limit]), teams[:limit])
+        self.assertEqual(build_mod._capped(teams), [*teams[:limit], "1 more"])
+
+    def test_force_still_rewrites_the_config_and_writes_no_proposal(self):
+        self.assertEqual(self.forced_run.code, self.plain.code,
+                         self.forced_run.text[-2000:])
+        self.assertNotEqual(self.forced, TYPED_CONFIG)
+        self.assertIn('"Hilltop Aces" = "Cal Moss"', self.forced.splitlines())
+        self.assertNotIn(self.PROPOSED, self.forced_files)
+
+    def test_check_with_discover_writes_nothing(self):
+        self.assertEqual(self.checking.code, self.check_plain.code,
+                         self.checking.text[-2000:])
+        self.assertEqual(self.checked_files, ["config.toml", "data"])
+        said = self.summary(self.checking)
+        self.assertIn("--check writes nothing, so config.proposed.toml was not "
+                      "written.", said)
+        self.assertIn('"Corvid Lane" = 2', said)
+
+    def test_another_config_file_has_a_proposal_named_after_it(self):
+        self.assertEqual(self.other_run.code, self.plain.code,
+                         self.other_run.text[-2000:])
+        self.assertEqual(self.read(self.other / "other.toml"), TYPED_CONFIG)
+        self.assertFalse((self.other / self.PROPOSED).exists())
+        self.assertIn("copy it over other.toml",
+                      proposal_said(self.other, "other.proposed.toml"))
+
+    def test_a_proposal_that_offers_nothing_new_says_so(self):
+        self.assertEqual(self.nothing.code, 0, self.nothing.text[-2000:])
+        self.assertEqual((self.same / "config.toml").read_bytes(), self.same_config)
+        self.assertIn("config.proposed.toml offers nothing config.toml lacks.",
+                      self.summary(self.nothing))
+
+    def test_a_config_declaring_every_value_the_review_lists_still_hears_the_offers(self):
+        # The summary is the review's question asked of the whole file, so a file
+        # leaving the review no value to list is still told what the cards give
+        # besides: Corvid Lane's captain and court are said nowhere else.
+        review = self.whole.out.split("\n== review", 1)[1].split("\n== ", 1)[0]
+        self.assertTrue(review.startswith(": 0 value(s) worked out, not declared ="),
+                        self.whole.out[-4000:])
+        self.assertEqual(review_items(self.whole.out), [])
+        # Under the heading, with no paragraph of the values' own above it.
+        self.assertTrue(review.splitlines()[1].startswith(
+            "  config.proposed.toml has been written beside config.toml"), review)
+        groups = self.offers(self.whole)
+        self.assertEqual(
+            groups["1 captain(s) the (C) marks give where config.toml names none:"],
+            ["[competitions.tuesday-division-b.captains]", '"Corvid Lane" = "Fay Kite"'])
+        self.assertEqual(
+            groups["1 home court(s) the home cards print where config.toml declares "
+                   "none:"],
+            ["[competitions.tuesday-division-b.courts]", '"Corvid Lane" = 2'])
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0,
+                     "needs a folder this account may not write to")
+    def test_a_proposal_that_cannot_be_written_is_refused_as_the_config_would_be(self):
+        cwd = self.typed_project("locked", "conf/config.toml")
+        (cwd / "conf").chmod(0o555)
+        self.addCleanup((cwd / "conf").chmod, 0o755)
+        run = self.run_build(cwd, "--discover", "--config", "conf/config.toml")
+        self.assertEqual(run.code, 2, run.text[-2000:])
+        self.assertIn("error: conf/config.proposed.toml: cannot be written", run.err)
+        self.assertIn("conf/config.proposed.toml not written", flat(run.out))
+        self.assertEqual(self.read(cwd / "conf" / "config.toml"), TYPED_CONFIG)
+        self.assertIn("index.html", run.files("site"))
+        # The advice is the proposal's, on stderr and in the report: the config's
+        # ends in --config, which names the file the proposal is beside, and says
+        # the file is the program's suggestion, which conf/config.toml is not.
+        result = flat(run.out.split("\n== result", 1)[1])
+        for said in (flat(run.err), result):
+            self.assertIn("this program is not allowed to write in the folder "
+                          "conf/config.toml is in, and the proposal is written "
+                          "beside it. Check who owns the folder.", said)
+            self.assertNotIn("--config", said)
+        self.assertIn("Nothing you entered is at stake: conf/config.toml was only "
+                      "read, and is as it was.", result)
 
 
 class TestTheRunAfterTheFileWasWrittenSaysWhereEachValueIsInIt(ShortOfResultCase):
@@ -22798,7 +25698,9 @@ class TestTheRunAfterTheFileWasWrittenSaysWhereEachValueIsInIt(ShortOfResultCase
         cls.second = cls.run_build(cwd)
         # The club deletes the season's line and changes the length behind its #.
         cls.adopt(cwd, '# season = "Season 1"\n', "")
-        cls.adopt(cwd, "# rounds_total = 5\n", "# rounds_total = 18\n")
+        # Moved by 4.465: the length's line is written with nothing after the =,
+        # and the club types its own behind the #, which is not the line written.
+        cls.adopt(cwd, "# rounds_total =\n", "# rounds_total = 18\n")
         cls.edited = cls.run_build(cwd)
         # Cards that print every player in capitals, whose spellings no file holds.
         write_pairs_competition(cls.base / "shouted" / "data" / "Pairs")
@@ -22814,6 +25716,11 @@ class TestTheRunAfterTheFileWasWrittenSaysWhereEachValueIsInIt(ShortOfResultCase
                       "or not in it at all.", flat(self.first.text))
         said = self.statuses(self.first)
         self.assertEqual(len(said), 6, said)
+        # Moved by 4.465: the length is behind a # with nothing after its =, and
+        # deleting the # alone does not adopt it.
+        self.assertEqual(said.pop("the season length for wednesday-division-3"),
+                         f"in config.toml: commented out, with nothing after the "
+                         f"=: type there {LENGTH_TO_TYPE}, then delete the #")
         for subject, status in said.items():
             if not subject.startswith("the draw for "):
                 self.assertEqual(status, f"in config.toml: {ADOPT}", subject)
@@ -22840,12 +25747,14 @@ class TestTheRunAfterTheFileWasWrittenSaysWhereEachValueIsInIt(ShortOfResultCase
     def test_a_line_the_club_took_out_or_changed_is_not_in_it(self):
         self.assertEqual(self.edited.code, 0, self.edited.text[-2000:])
         said = self.statuses(self.edited)
-        for subject in ("the season name for wednesday-division-3",
-                        "the season length for wednesday-division-3"):
+        # Moved by 4.465: the length's lines are added with its number typed.
+        for subject, typed in (("the season name for wednesday-division-3", ","),
+                               ("the season length for wednesday-division-3",
+                                f", with {LENGTH_TO_TYPE} typed after the =,")):
             self.assertEqual(said[subject],
-                             "in config.toml: not in it; add the lines below to the "
-                             "[competitions.wednesday-division-3] it has already, "
-                             "to adopt it", subject)
+                             f"in config.toml: not in it; add the lines below to the "
+                             f"[competitions.wednesday-division-3] it has "
+                             f"already{typed} to adopt it", subject)
         self.assertEqual(said["the team list for wednesday-division-3"],
                          f"in config.toml: {ADOPT}")
 
@@ -23303,6 +26212,9 @@ def following_the_review(report: str, text: str, *, only: str = "") -> str:
     file's own; and "under the same [x] as any other value here you adopt" by
     adding them under the one the file has by then, or with it at the end where it
     has none. *only* adopts that one item and no other.
+
+    Moved by 4.465: "with ... typed after the =" by typing the value :data:`TYPED`
+    holds after each bare ``key =`` of the lines it adds.
     """
     if not only:
         text, unfound = deleting_the_hashes(report, text)
@@ -23312,8 +26224,12 @@ def following_the_review(report: str, text: str, *, only: str = "") -> str:
         if only and subject != only:
             continue
         toml = [line for line in toml if line.strip()]
+        if " typed after the =," in status:
+            toml = [f"{line} {TYPED[line[:-2]]}" if re.fullmatch(r"\S+ =", line)
+                    else line for line in toml]
         header, body = toml[0].strip(), toml[1:]
-        if status.endswith(f": {NOT_IN_IT}"):
+        if re.search(r": not in it; add the lines below(, with .* typed after the "
+                     r"=,)? to adopt it$", status):
             lines += ["", *toml]
         elif f"to the {header} it has already" in status:
             at = lines.index(header)
@@ -23417,13 +26333,15 @@ class TestDoingWhatTheReviewSaysOfEachValueLeavesAFileThatLoads(ShortOfResultCas
                                  f"to the {table} {ALREADY}")
 
     def test_values_that_share_a_table_the_file_lacks_are_told_to_share_it(self):
-        for subject in ("the team list for wednesday-division-3",
-                        "the season length for wednesday-division-3",
-                        "the season name for wednesday-division-3"):
+        # Moved by 4.465: the length's lines are added with its number typed.
+        for subject, typed in (("the team list for wednesday-division-3", ""),
+                               ("the season length for wednesday-division-3",
+                                f", with {LENGTH_TO_TYPE} typed after the =,"),
+                               ("the season name for wednesday-division-3", "")):
             with self.subTest(subject=subject):
                 self.assertEqual(self.status(self.stub["report"], subject),
-                                 f"in config.toml: not in it; add the lines below "
-                                 f"to adopt it, under the same "
+                                 f"in config.toml: not in it; add the lines below"
+                                 f"{typed} to adopt it, under the same "
                                  f"[competitions.wednesday-division-3] {SHARED}")
 
     def test_doing_what_each_value_says_builds_every_card(self):
@@ -23453,23 +26371,33 @@ class TestDoingWhatTheReviewSaysOfEachValueLeavesAFileThatLoads(ShortOfResultCas
             with self.subTest(cards=label):
                 said = [status for _, status, _ in review_items(rewritten.text)]
                 adoptable = [status for status in said if REPORT_ONLY not in status]
-                landed = sum(1 for status in adoptable if status.endswith(ADOPT))
+                # Moved by 4.465: a length behind a # with nothing after its = has
+                # landed too, and is adopted by typing its number there as well.
+                typed = sum(1 for status in adoptable
+                            if status.startswith(TYPED_BEHIND_A_HASH))
+                landed = sum(1 for status in adoptable
+                             if status.endswith(ADOPT)) + typed
                 self.assertEqual(rewritten.code, 0, rewritten.text[-3000:])
                 self.assertEqual(len(said), len(review_items(offered.text)))
                 offer = flat(offered.text)
                 self.assertIn("Or have them written for you.", offer)
                 self.assertNotIn("each value above", offer)
+                self.assertEqual(typed, 1)
+                then = ("; any of those with nothing after the = needs its value "
+                        "typed there too.")
                 if label == "demo":
                     self.assertEqual(landed, len(adoptable))
                     self.assertIn("and each value below that can be adopted lands "
                                   "in it commented out, so adopting one is deleting "
-                                  "a # rather than typing the line yourself.", offer)
+                                  "a # rather than typing the line yourself" + then,
+                                  offer)
                 else:
                     self.assertLess(landed, len(adoptable))
                     self.assertIn(f"and {landed} of the {len(adoptable)} values "
                                   f"below that can be adopted land in it commented "
                                   f"out, so adopting one of those is deleting a # "
-                                  f"rather than typing the line yourself.", offer)
+                                  f"rather than typing the line yourself{then}",
+                                  offer)
 
 
 class TestARunWithNoFileSaysOfEveryValueWhatToDoWithIt(ShortOfResultCase):
@@ -23509,10 +26437,14 @@ class TestARunWithNoFileSaysOfEveryValueWhatToDoWithIt(ShortOfResultCase):
                         "6 team name(s) un-shouted from the cards"):
             with self.subTest(subject=subject):
                 self.assertEqual(said.pop(subject), f"in config.toml: {NOT_IN_IT}")
+        # Moved by 4.465: the length's lines are added with its number typed.
+        typed = {"the season length for wednesday-division-3":
+                 f", with {LENGTH_TO_TYPE} typed after the =,"}
         for subject, status in said.items():
             with self.subTest(subject=subject):
                 self.assertEqual(status, f"in config.toml: not in it; add the lines "
-                                         f"below to adopt it, under the same "
+                                         f"below{typed.get(subject, '')} to adopt "
+                                         f"it, under the same "
                                          f"[competitions.wednesday-division-3] "
                                          f"{SHARED}")
 
@@ -24123,8 +27055,10 @@ class TestADisagreeingSheetIsAWarningAndTheBuildStillPasses(SheetCliCase):
     def test_the_one_file_page_carries_the_warning(self):
         self.typed(DISAGREEING_TABLE)
         self.build("--single-file", "--generated", self.LATER)
+        # Moved by 4.430: the careers page at the root is not a fold.
         found = sorted(p for p in (self.cwd / "site").rglob("*.html")
-                       if p.name != "index.html")
+                       if p.name != "index.html"
+                       and p != self.cwd / "site" / site.CAREERS_PAGE)
         self.assertEqual(len(found), 1, found)
         page = page_parts(found[0].read_text(encoding="utf-8"))
         document = json.loads(island_json(page.scripts[0]))
@@ -24161,7 +27095,9 @@ class TestASheetThatAgreesChangesNoByte(SheetCliCase):
         changed = sorted(name for name in after if after[name] != built.get(name))
         # The competition's document, and the picker, which counts every season's
         # warnings and dates it: one more warning is news the index has to carry.
-        self.assertEqual(changed, ["site/index.html", "site/picker-data.js",
+        # Moved by 4.430: and the careers page, which carries the stamp.
+        self.assertEqual(changed, ["site/careers.html", "site/index.html",
+                                   "site/picker-data.js",
                                    f"site/{self.COMP}/season-data.js",
                                    f"site/{self.COMP}/season.json"])
         self.assertEqual(self.season()["meta"]["generated"], self.LATEST)
@@ -24292,7 +27228,8 @@ class TestDiscoverWritesTheSheetTemplateAndKeepsATypedSheet(SheetCliCase):
         self.assertEqual(self.state(), before)
 
     def refusal(self) -> str:
-        return " ".join(self.build("--discover", expect=2).err.split())
+        # Moved by 4.431: what the refusal said, the proposal's header says.
+        return proposal_of(self)
 
     def test_a_table_with_no_round_is_named_and_is_what_force_drops(self):
         self.typed(self.NO_ROUND)
@@ -24368,7 +27305,9 @@ class TestTheRefusalNamesASheetLineForceWouldDrop(SheetCliCase):
     """
 
     WHERE = f"[competitions.{SheetCliCase.COMP}.expected]"
-    ALONE = (f"Add --force if that is what you want. Everything you have declared "
+    # Moved by 4.431: the proposal's header says it, without "Add --force if that
+    # is what you want." in front, which the refusal said.
+    ALONE = (f"Everything you have declared "
              f"in it is written back except what no build could compare in the "
              f"'Hilltop Aces' line of the {WHERE} table: put it right first, as a "
              f"run without --discover says how. The file is written fresh, so a "
@@ -24381,7 +27320,8 @@ class TestTheRefusalNamesASheetLineForceWouldDrop(SheetCliCase):
 
     def refusal(self, *lines: str) -> str:
         self.typed(self.table(*lines))
-        return " ".join(self.build("--discover", expect=2).err.split())
+        # Moved by 4.431: what the refusal said, the proposal's header says.
+        return proposal_of(self)
 
     def written(self) -> str:
         return (self.cwd / "config.toml").read_text(encoding="utf-8")
@@ -24435,7 +27375,7 @@ class TestTheRefusalNamesASheetLineForceWouldDrop(SheetCliCase):
         self.typed(self.table('"Hilltop Aces" = { points = "lots" }'))
         with (self.cwd / "config.toml").open("a", encoding="utf-8") as config:
             config.write(f'\n[[competitions.{self.COMP}.rounds]]\nnumber = "1"\n')
-        said = " ".join(self.build("--discover", expect=2).err.split())
+        said = proposal_of(self)  # moved by 4.431: the proposal's header
         self.assertIn(f"except the draw and what no build could compare in the "
                       f"'Hilltop Aces' line of the {self.WHERE} table: no card records",
                       said)
@@ -24494,7 +27434,7 @@ class TestTheRefusalNamesASheetLineForceWouldDrop(SheetCliCase):
         self.typed(f"{self.WHERE}\n"
                    '"Riverside Rockets"  = { points = 19.0, played = 3 }\n'
                    '"Hilltop Aces" = { points = "lots" }\n')
-        said = " ".join(self.build("--discover", expect=2).err.split())
+        said = proposal_of(self)  # moved by 4.431: the proposal's header
         self.assertIn(f"except the {self.WHERE} table. No build could compare a line "
                       f"of it as typed", said)
         self.assertNotIn("Hilltop Aces", said)
@@ -24511,8 +27451,14 @@ class TestTheRefusalNamesASheetLineForceWouldDrop(SheetCliCase):
 
     def test_it_fits_the_report_width(self):
         self.typed(self.table('"Hilltop Aces" = { points = "lots" }'))
-        err = self.build("--discover", expect=2).err
-        self.assertEqual([line for line in err.splitlines()
+        # Moved by 4.431: what the refusal said of the line, the proposal's header
+        # says, so the header is measured with the run's own words.
+        run = self.build("--discover", expect=None)
+        header = (self.cwd / "config.proposed.toml").read_text(
+            encoding="utf-8").split(f"\n{PROPOSAL_RULE}\n", 1)[0]
+        self.assertIn("no build could compare", " ".join(written_flat(header).split()))
+        said = run.err + "\n" + header
+        self.assertEqual([line for line in said.splitlines()
                           if len(line) > build_mod.WIDTH], [])
 
 
@@ -24852,6 +27798,1017 @@ class TestEverySentenceThatNamesTheConfigNamesTheOneTheBuildRead(CliCase):
             with self.subTest(rule=rule):
                 self.assertIn('Set seasons = "multi" under [build] in other.toml '
                               'and give each season a folder of its own', message)
+
+
+class TestANightPrintingUnspecifiedPlayerBuildsWithItToldOnce(unittest.TestCase):
+    """The season, plus a played night and a walkover printing the placeholder.
+
+    Both round-four cards print Match Centre's 'Unspecified player' in three
+    away cells, the second of each pair and the s2 cell, the away side named by
+    one player on d1, s1 and d2. Riverside Rockets v Hilltop Aces was played
+    6-1, 6-2, 6-3, 6-4; the Lakeside Spinners v the Parkview Wanderers is the
+    owner's 3-cell walkover, 0-0 rows, Match Cancelled ticked beside the home
+    tick, DEFEATS and a TOTAL row of 4-0 and 24-0. Built through build.py, each
+    card then read by tools/doctor.py.
+
+    Measured on the tree before this (/tmp/mcf/scratch/UNSPEC/probe/probe.py,
+    cases played-away-placeholder and wo-three): 5 warnings and 4 on the two
+    builds, the placeholder told by ``players-unrecorded``, by two
+    ``set-player-count`` on each and, on the played night, by
+    ``set-players-missing``; each match carries two Parse notes, "row 1: read 1
+    away player name(s) from a row its own marker '1&2' says is doubles" and row
+    4's, which the doctor prints twice, 4 lines a card. Now each card's
+    placeholder is told once, by ``players-unrecorded``, and no reader's note.
+    """
+
+    PLAYED_ID, WALKOVER_ID = "4000010", "4000011"
+    PLACE = "Unspecified player"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cwd = Path(cls._tmp.name) / "run"
+        write_season_cards(cwd / "data")
+        folder = cwd / "data" / "Round4"
+        folder.mkdir(parents=True, exist_ok=True)
+
+        def placed(home, away, scores):
+            out, count = [], 0
+            for row in rows_for(scores, TEAMS[home][1], TEAMS[away][1]):
+                names = []
+                for name in row.away_players:
+                    count += 1
+                    names.append(cls.PLACE if count in (2, 4, 6) else name)
+                out.append(dataclasses.replace(row, away_players=tuple(names)))
+            return tuple(out)
+        cls.cards = {
+            "played": cardwriter.write_card_file(folder / "played.pdf", short_spec(
+                "riverside-rockets", "hilltop-aces", court="10",
+                match_id=cls.PLAYED_ID,
+                rows=placed("riverside-rockets", "hilltop-aces",
+                            ((6, 1), (6, 2), (6, 3), (6, 4))))),
+            "walkover": cardwriter.write_card_file(
+                folder / "walkover.pdf", short_spec(
+                    "lakeside-spinners", "parkview-wanderers", court="11",
+                    match_id=cls.WALKOVER_ID,
+                    rows=placed("lakeside-spinners", "parkview-wanderers",
+                                ((0, 0),) * 4),
+                    cancelled=True, winner="home", verb="DEFEATS",
+                    totals=(4, 24, 0, 0)))}
+        (cwd / "config.toml").write_text('[rules]\nscoring = "games-bonus"\n',
+                                         encoding="utf-8")
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        done = subprocess.run((sys.executable, str(BUILD), "--generated", STAMP),
+                              cwd=cwd, capture_output=True, text=True,
+                              timeout=600, env=env)
+        cls.run_ = Run(done.returncode, done.stdout, done.stderr, cwd)
+        cls.doctor = {name: subprocess.run(
+            (sys.executable, str(ROOT / "tools" / "doctor.py"), str(path)),
+            cwd=cwd, capture_output=True, text=True, timeout=600, env=env).stdout
+            for name, path in cls.cards.items()}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def match(self, match_id: str) -> dict:
+        path, = (self.run_.cwd / "site").rglob("season.json")
+        found, = [m for m in json.loads(path.read_text(encoding="utf-8"))["matches"]
+                  if m["id"] == match_id]
+        return found
+
+    def test_it_builds_and_no_name_unread_is_told(self):
+        self.assertEqual(self.run_.code, 0, self.run_.text[-3000:])
+        for rule in ("set-player-count", "set-players-missing"):
+            with self.subTest(rule=rule):
+                self.assertNotIn(rule, self.run_.out)
+        self.assertEqual(self.run_.out.count("players-unrecorded"), 1)
+
+    def test_the_report_tells_each_card_its_placeholder_side_by_side(self):
+        words = flat(self.run_.out)
+        self.assertIn("data/Round4/played.pdf: 3 name cell(s) across 3 of 4 "
+                      "rubber(s) print Match Centre's 'Unspecified player' "
+                      "placeholder rather than a person, so no name was recorded "
+                      "for them; those rubbers have games but nobody to credit "
+                      "them to on the away side of rubber(s) 3, and only one "
+                      "player of the pair to credit on the away side of "
+                      "rubber(s) 1 and 4, so half of those games are credited to "
+                      "nobody.", words)
+        self.assertIn("data/Round4/walkover.pdf: 3 name cell(s) across 3 of 4 "
+                      "rubber(s) print Match Centre's 'Unspecified player' "
+                      "placeholder rather than a person, so no name was recorded "
+                      "for them; this match was forfeited whole, so nobody "
+                      "played those rubbers.", words)
+        self.assertEqual(words.count("3 placeholder cell(s): away in rubber(s) "
+                                     "1, 3, 4"), 2)
+        self.assertLessEqual(max(map(len, self.run_.out.splitlines())), 78)
+
+    def test_neither_match_carries_a_reader_s_note_of_names(self):
+        for name, match_id in (("played", self.PLAYED_ID),
+                               ("walkover", self.WALKOVER_ID)):
+            with self.subTest(card=name):
+                found = self.match(match_id)
+                self.assertEqual([n for n in found.get("warnings") or ()
+                                  if "player name(s)" in n], [])
+                # The one name on each pair is still credited.
+                self.assertEqual([len(s["away_players"]) for s in found["sets"]],
+                                 [1, 1, 0, 1])
+
+    def test_the_doctor_prints_no_note_of_names_on_either_card(self):
+        for name, text in self.doctor.items():
+            with self.subTest(card=name):
+                self.assertIn("(1 cell(s) print no player, only Match Centre's "
+                              "placeholder)", flat(text))
+                self.assertNotIn("player name(s)", flat(text))
+
+
+# --- 4.428, 4.438, 4.439, 4.440: the ladder's state, its leader, the rounds, results
+
+
+def report_ladder(text: str) -> list[tuple[str, str]]:
+    """The report's ladder table, as each row's place and team."""
+    names = "|".join(re.escape(name.title()) for name, _ in TEAMS.values())
+    return re.findall(rf"^ {{3}} *(\S+)  ({names})\b", text, re.M)
+
+
+def pick_leads(page: str) -> list[str]:
+    """What each linked card on the front page says about who leads."""
+    return re.findall(r'<span class="pick-lead">(.*?)</span>', page)
+
+
+class TestALadderWithNothingCountedSaysItHasNotStarted(CliCase):
+    """Round 1 rained off on both courts, and the build calls it what it is.
+
+    Measured on the base (/tmp/mcf/scratch/EMPTY/before.txt, wash1): the report's
+    ``ladder       in progress: teams have played unequal numbers of matches`` over a
+    table placing the teams 1 to 4 by name on 0 matches, and over its own F10, ``no
+    team has a counted match yet``; and the front page's ``Ladder in progress —
+    teams have played unequal numbers of matches``. Every team had played the same
+    number, none. Now both say that no regular-season match has been counted, from
+    ``meta.ladder_state``, and the table places nobody. Rejected: the same words for
+    a ladder in progress and one not started, which tells a club whose first night
+    was rained off that some of its teams are behind.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.cwd / "data")
+        write_washed_out_round(self.cwd / "data")
+        self.run_ = self.build()
+
+    def test_the_report_says_the_ladder_has_not_started(self):
+        lines = self.section(self.run_.out, self.COMP).splitlines()
+        self.assertIn("  ladder       not started: no regular-season match has "
+                      "been counted yet", lines)
+
+    def test_the_report_s_table_places_nobody(self):
+        self.assertEqual(report_ladder(self.section(self.run_.out, self.COMP)),
+                         [("-", "Hilltop Aces"), ("-", "Lakeside Spinners"),
+                          ("-", "Parkview Wanderers"), ("-", "Riverside Rockets")])
+
+    def test_the_front_page_says_so_and_crowns_nobody(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page),
+                         ["No regular-season match has been counted yet"])
+        self.assertIsNone(picker_entries(self.cwd / "site")[self.COMP]["leader"])
+
+
+class TestAFinalAloneSaysItsLadderHasNotStartedToo(CliCase):
+    """A semi-final's card and nothing else: a night played, and no ladder yet.
+
+    The one competition where the two part: ``meta.matches_played`` 1 (4.440) and
+    ``meta.ladder_state`` empty, so the report's line and the card's are asked of the
+    ladder's state, and not of whether a night was played. Measured on the base
+    (/tmp/mcf/scratch/EMPTY/fixup/base.txt, final alone): the report's ``ladder
+    in progress: teams have played unequal numbers of matches`` over the Spinners 1st
+    and the Rockets 2nd, the final's loser above its winner, and the card's ``Ladder
+    in progress — teams have played unequal numbers of matches``. Rejected: saying
+    not started only of a competition with no night played, which gives a final
+    alone those words back.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.cwd / "data")
+        write_semi_final(self.cwd / "data")
+        self.run_ = self.build()
+
+    def test_the_report_says_the_ladder_has_not_started_and_places_nobody(self):
+        section = self.section(self.run_.out, self.COMP)
+        self.assertIn("  ladder       not started: no regular-season match has "
+                      "been counted yet", section.splitlines())
+        self.assertEqual(report_ladder(section),
+                         [("-", "Lakeside Spinners"), ("-", "Riverside Rockets")])
+
+    def test_the_front_page_says_so_and_crowns_nobody(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page),
+                         ["No regular-season match has been counted yet"])
+        self.assertIsNone(picker_entries(self.cwd / "site")[self.COMP]["leader"])
+
+
+class TestNobodyMovesOutOfALadderThatHadNotStarted(CliCase):
+    """Round 2 played after a washed-out round 1 is no team changing places.
+
+    Measured on the base (/tmp/mcf/scratch/EMPTY/before.txt, wash then R2): the
+    second build's report said ``Riverside Rockets 4th -> 1st``, ``Hilltop Aces 1st
+    -> 2nd`` and ``Lakeside Spinners 2nd -> 4th``, moves out of places the first
+    build had given by name on nothing. A document this release writes for a ladder
+    that has not started places nobody, so it has no move to report; one an earlier
+    release wrote places every team, and ``changes`` reads its ladder as not started
+    by ``meta.ladder_state`` or, without that, by every team's ``counted`` at 0. Any
+    other state, in progress among them, keeps its places, and its moves are said.
+    Rejected: trusting the old places, which are name order; and the format number,
+    which 0.1.0's documents and this release's share (``SEASON_FORMAT`` 4).
+    """
+
+    LATER = "2026-09-24T07:30:00"
+    COMP = "tuesday-division-b"
+    HEAD = "since the last build"
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.cwd / "data"
+        shutil.rmtree(self.data)
+
+    def round_two(self) -> None:
+        for index, (rnd, home, away, scores) in enumerate(FIXTURES, start=1):
+            if rnd == "2":
+                write_fixture_card(self.data, rnd, home, away, scores, index=index)
+
+    def document(self) -> Path:
+        return self.cwd / "site" / self.COMP / "season.json"
+
+    def as_an_earlier_release_wrote_it(self, **meta) -> None:
+        """The document on disk with 4.428's keys taken out and its places put back.
+
+        Placed as the base placed them, by name, which is what a 0.1.0 build left for a
+        ladder whose every team had counted nothing, and for any other ladder its own
+        order: the places of a ladder that had started are kept as written.
+        """
+        doc = json.loads(self.document().read_text(encoding="utf-8"))
+        for key in ("ladder_state", "leader", "matches_played"):
+            doc["meta"].pop(key)
+        if all(row["position"] is None for row in doc["teams"]):
+            for place, row in enumerate(sorted(doc["teams"],
+                                               key=lambda row: row["name"]), start=1):
+                row["position"] = place
+        doc["meta"].update(meta)
+        self.document().write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+    def moves(self, run: Run) -> list[str]:
+        section = self.section(run.out, self.HEAD).splitlines()
+        self.assertIn(f"  {self.COMP}", section)
+        return [line.split(None, 1)[1] for line in section
+                if line.strip().startswith("ladder ")]
+
+    def test_a_round_played_after_a_washed_out_one_moves_nobody(self):
+        write_washed_out_round(self.data)
+        self.build()
+        self.round_two()
+        self.assertEqual(self.moves(self.build("--generated", self.LATER)), [])
+        # Nor is the washed-out round a place on anybody's history once round 2 is:
+        # asked of the rounds through it, and not of the season.
+        doc = json.loads(self.document().read_text(encoding="utf-8"))
+        self.assertEqual({row["slug"]: [point["round"]
+                                        for point in row["ladder_history"]]
+                          for row in doc["teams"]}, {slug: ["2"] for slug in TEAMS})
+
+    def test_nor_out_of_the_same_ladder_as_an_earlier_release_placed_it(self):
+        write_washed_out_round(self.data)
+        self.build()
+        self.as_an_earlier_release_wrote_it()
+        self.round_two()
+        self.assertEqual(self.moves(self.build("--generated", self.LATER)), [])
+
+    def test_a_document_that_says_its_ladder_had_not_started_is_taken_at_its_word(self):
+        write_washed_out_round(self.data)
+        self.build()
+        self.as_an_earlier_release_wrote_it(ladder_state="empty")
+        doc = json.loads(self.document().read_text(encoding="utf-8"))
+        for row in doc["teams"]:
+            row["counted"] = 1
+        self.document().write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        self.round_two()
+        self.assertEqual(self.moves(self.build("--generated", self.LATER)), [])
+
+    def round_one_on_one_court(self) -> None:
+        # Round 1 played on one court and rained off on the other: the Rockets and the
+        # Aces 1st and 2nd, the Spinners and the Wanderers 3rd and 4th on nothing, by
+        # name, as the tiebreak places them. Round 2 takes the Wanderers to 2nd on 4.9.
+        rnd, home, away, scores = FIXTURES[0]
+        write_fixture_card(self.data, rnd, home, away, scores, index=1)
+        write_washout(self.data, "1", "lakeside-spinners", "parkview-wanderers",
+                      index=2)
+
+    def test_a_ladder_that_had_started_still_has_its_moves_said(self):
+        self.round_one_on_one_court()
+        self.build()
+        self.as_an_earlier_release_wrote_it()
+        self.round_two()
+        self.assertEqual(self.moves(self.build("--generated", self.LATER)),
+                         ["Parkview Wanderers 4th -> 2nd", "Hilltop Aces 2nd -> 3rd",
+                          "Lakeside Spinners 3rd -> 4th"])
+
+    def test_and_so_does_one_whose_document_says_it_is_in_progress(self):
+        # This release's own document, left as written: the state it says is taken at
+        # its word whichever it is, and only "empty" is a ladder with no places.
+        self.round_one_on_one_court()
+        self.build()
+        doc = json.loads(self.document().read_text(encoding="utf-8"))
+        self.assertEqual(doc["meta"]["ladder_state"], "in-progress")
+        self.round_two()
+        self.assertEqual(self.moves(self.build("--generated", self.LATER)),
+                         ["Parkview Wanderers 4th -> 2nd", "Hilltop Aces 2nd -> 3rd",
+                          "Lakeside Spinners 3rd -> 4th"])
+
+    def test_a_document_that_does_not_say_what_its_teams_counted_keeps_its_places(self):
+        # Neither the state nor every team's count: nothing to read the ladder as
+        # not started by, so its places are taken as written and the moves said.
+        write_washed_out_round(self.data)
+        self.build()
+        self.as_an_earlier_release_wrote_it()
+        doc = json.loads(self.document().read_text(encoding="utf-8"))
+        del doc["teams"][0]["counted"]
+        self.document().write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        self.round_two()
+        self.assertEqual(self.moves(self.build("--generated", self.LATER)),
+                         ["Riverside Rockets 4th -> 1st", "Hilltop Aces 1st -> 2nd",
+                          "Lakeside Spinners 2nd -> 4th"])
+
+
+class TestTheFrontPageAndTheOverviewNameOneLeaderOrNone(CliCase):
+    """One leader for the season, named where both pages read it, or nobody.
+
+    The front page's card crowned a team only on a settled ladder and the overview's
+    hero crowned whichever row was on top (4.438). Measured on the base with round
+    3's Rockets v Wanderers missing (/tmp/mcf/scratch/EMPTY/before.txt, prog): the
+    card said ``Ladder in progress`` and its entry named no leader, and the hero
+    said ``6.30 | Riverside Rockets · 12.6 points from 2 matches``. The front page
+    now reads ``meta.leader`` and makes no rule of its own; the overview reads it too
+    (``test_web_assets``). Rejected: the front page testing ``ladder_complete`` and
+    finding position 1 itself, which is the second copy of the rule that let the
+    two pages disagree.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def test_a_settled_ladder_names_the_same_team_and_figure_on_both(self):
+        self.build()
+        leader = self.season()["meta"]["leader"]
+        self.assertEqual(leader["slug"], "riverside-rockets")
+        self.assertEqual(picker_entries(self.cwd / "site")[self.COMP]["leader"],
+                         {"name": "Riverside Rockets", "value": leader["value"]})
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page), ["<strong>Riverside Rockets</strong> "
+                                            f"lead on {leader['value']:.2f}"])
+
+    def test_a_ladder_with_a_match_still_to_come_names_none_on_either(self):
+        self.cards[4].unlink()
+        self.build()
+        self.assertIsNone(self.season()["meta"]["leader"])
+        self.assertIsNone(picker_entries(self.cwd / "site")[self.COMP]["leader"])
+
+    def test_the_front_page_names_the_team_the_document_names(self):
+        # Not one it works out again: a document naming the Aces is the Aces, whoever
+        # sits first in its rows, and a document naming nobody names nobody. The
+        # figure is the leader's too, and not read again off the Aces' row, which is
+        # given another here so that the two can be told apart.
+        season = {"meta": {"ladder_complete": True,
+                           "leader": {"slug": "hilltop-aces", "value": 5.25}},
+                  "teams": [{"slug": "riverside-rockets", "name": "Riverside Rockets",
+                             "short": "Rockets", "position": 1,
+                             "points_average": 6.3, "points": 18.9},
+                            {"slug": "hilltop-aces", "name": "Hilltop Aces",
+                             "short": "Aces", "position": 2,
+                             "points_average": 5.2, "points": 15.6}]}
+        self.assertEqual(site._leader(season), {"name": "Aces", "value": 5.25})
+        season["meta"]["leader"] = None
+        self.assertIsNone(site._leader(season))
+
+    def test_a_document_without_the_key_names_no_leader(self):
+        season = {"meta": {"ladder_complete": True},
+                  "teams": [{"slug": "riverside-rockets", "name": "Riverside Rockets",
+                             "position": 1, "points_average": 6.3}]}
+        self.assertIsNone(site._leader(season))
+
+    def test_a_leader_the_document_does_not_list_is_nobody(self):
+        # No build writes one, its leader being a row of its own table; a document a
+        # hand or another program wrote can, and the front page names nobody for it
+        # rather than stopping (StopIteration, measured, before this was guarded).
+        season = {"meta": {"ladder_complete": True,
+                           "leader": {"slug": "hilltop-aces", "value": 5.25}},
+                  "teams": [{"slug": "riverside-rockets", "name": "Riverside Rockets",
+                             "short": "Rockets", "position": 1,
+                             "points_average": 6.3, "points": 18.9}]}
+        self.assertIsNone(site._leader(season))
+
+
+class TestARoundCountWithGapsIsSaidAsACount(CliCase):
+    """Cards for rounds 2, 3 and 5 of ten are 3 of 10 rounds played, not Round 3 of 10.
+
+    ``rounds_played`` counts the regular rounds with cards (4.69), and the front
+    page's card put that count in the shape of a round's label. Measured on the base
+    (/tmp/mcf/scratch/EMPTY/before.txt, gap): the card's ``Round 3 of 10`` with its
+    bar at 30%, where the latest card is round 5's, and the report's ``3 of 10
+    played``. Now the card says ``3 of 10 rounds played``, and the count, the bar and
+    the report are as they were. Rejected: the latest round's label, ``Round 5 of
+    10`` at 50%, since a label is text and not an ordinal and it hides the round with
+    no card; and both numbers, two figures for one bar.
+    """
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.cwd / "data")
+        for index, (rnd, home, away, scores) in enumerate(FIXTURES, start=1):
+            label = "5" if rnd == "1" else rnd
+            write_fixture_card(self.cwd / "data", label, home, away, scores,
+                               index=index, date="2026-09-15" if rnd == "1" else None)
+        (self.cwd / "config.toml").write_text(
+            '[competitions.tuesday-b]\nday = "Tuesday"\ndivision = "B"\n'
+            'rounds_total = 10\n', encoding="utf-8")
+        self.run_ = self.build()
+
+    def test_the_card_says_how_many_rounds_of_how_many_were_played(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(picker_progress(page), (["3 of 10 rounds played"], ["30"]))
+
+    def test_the_count_and_the_report_are_unchanged(self):
+        meta = self.season()["meta"]
+        self.assertEqual((meta["rounds_played"], meta["rounds_total"],
+                          meta["rounds_present"]), (3, 10, ["2", "3", "5"]))
+        self.assertIn("rounds 3 of 10 played", flat(self.run_.out))
+
+
+class TestARoundCountAgainstALengthAgreesWithTheLength(unittest.TestCase):
+    """``1 of 10 rounds played``: the noun is the length's, as the page's is.
+
+    The front page's card says its count by ``competition.rounds_played_words``, and
+    the overview's progress box by ``plural(total, 'round')`` (4.439), so "1 of 10"
+    is rounds and "1 of 1" a round. No season the classes above build has one round
+    played of a length other than one, so the words are asked here directly.
+    Rejected: the noun agreeing with the count, ``1 of 10 round played``, which is
+    one sentence on the card and another in the box beneath it.
+    """
+
+    def test_the_noun_agrees_with_the_length_it_counts_against(self):
+        from matchcentre.competition import rounds_played_words
+        for count, total, said in ((1, 10, "1 of 10 rounds played"),
+                                   (1, 1, "1 of 1 round played"),
+                                   (3, 10, "3 of 10 rounds played"),
+                                   (1, None, "1 round played"),
+                                   (3, None, "3 rounds played")):
+            with self.subTest(count=count, total=total):
+                self.assertEqual(rounds_played_words(count, total), said)
+
+
+class TestALengthOfNoughtIsSaidAsNoLengthOnTheCard(CliCase):
+    """``rounds_total = 0`` and a semi-final alone: ``0 rounds played``, and no bar.
+
+    The front page's card says a length only where it draws a bar against it
+    (4.439), and it draws none against a length of nought. A season whose one card
+    is a final has no regular round past such a length, so F3 lets it stand and the
+    document says ``rounds_total`` 0 (/tmp/mcf/scratch/EMPTY/probe_zero.py), the one
+    document where a length and no bar meet. Rejected: ``0 of 0 rounds played``, a
+    length the card has no bar for.
+    """
+
+    def test_the_card_counts_the_rounds_and_draws_no_bar(self):
+        shutil.rmtree(self.cwd / "data")
+        write_semi_final(self.cwd / "data")
+        (self.cwd / "config.toml").write_text(
+            '[competitions.tuesday-b]\nday = "Tuesday"\ndivision = "B"\n'
+            'rounds_total = 0\n', encoding="utf-8")
+        self.build()
+        meta = self.season()["meta"]
+        self.assertEqual((meta["rounds_played"], meta["rounds_total"]), (0, 0))
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(picker_progress(page), (["0 rounds played"], []))
+
+
+def division_c_card(folder: Path, rnd: str, date: str, scores, *, index: int,
+                    **spec) -> Path:
+    """One card of :class:`DeclaredCase`'s second division, its two teams' own."""
+    home = ("ALICE ABLE", "BETH BAKER", "CARA COOK", "DANA DALE")
+    away = ("EVE EAST", "FAY FORD", "GAIL GREY", "HOPE HALL")
+
+    def roster(names):
+        return tuple(cardwriter.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                          captain=(i == 0))
+                     for i, n in enumerate(names))
+
+    folder.mkdir(parents=True, exist_ok=True)
+    card = cardwriter.CardSpec(
+        date=date, round_label=rnd, division="C", court=f"{index:02d}",
+        match_id=f"440{index:04d}", home_name="NORTHSIDE NETS",
+        away_name="SOUTHSIDE SETS", rows=rows_for(scores, home, away),
+        home_roster=roster(home), away_roster=roster(away), **spec)
+    return cardwriter.write_card_file(folder / f"c-{rnd}-{index}.pdf", card)
+
+
+class TestACompetitionOfWashoutsIsNotOneWithResults(DeclaredCase):
+    """A division whose one card was rained off has a dashboard and no results.
+
+    The counters counted ``has_data``, a document, and a folder of washouts writes
+    one. Measured on the base (/tmp/mcf/scratch/EMPTY/before.txt, results): beside
+    the suite's season, ``2 of 2 competitions with results`` and ``2 of 2 with
+    results``, and alone ``1 of 1 competition with results``. Now they count the
+    nights played, ``meta.matches_played``, and the card is still a link: its
+    dashboard is where the washout is explained. Rejected: turning ``has_data`` off,
+    which unlinks that page.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.declare()
+        division_c_card(self.cwd / "data" / "division-c", "1", "2026-07-21",
+                        ((0, 0),) * 4, index=1, cancelled=True, verb="VS",
+                        winner=cardwriter.NO_TICK)
+        self.build()
+
+    def test_the_subtitle_counts_it_as_without_results(self):
+        self.assertEqual(self.subtitle(), "1 of 2 competitions with results")
+
+    def test_and_so_does_the_heading_it_is_listed_under(self):
+        self.assertIn('Tuesday<span class="count">1 of 2 with results</span>',
+                      self.front_page())
+
+    def test_its_card_is_still_a_link_to_its_dashboard(self):
+        self.assertIn(f'href="{self.SECTION}/index.html"', self.card_for(self.LABEL))
+        entry = self.entries()[self.SECTION]
+        self.assertEqual((entry["has_data"], entry["has_results"]), (True, False))
+
+    def test_alone_it_is_none_of_one(self):
+        for rnd in ("Round1", "Round2", "Round3"):
+            shutil.rmtree(self.cwd / "data" / rnd)
+        shutil.rmtree(self.cwd / "site")
+        self.build()
+        self.assertEqual(self.subtitle(), "0 of 1 competition with results")
+        self.assertIn('Tuesday<span class="count">0 of 1 with results</span>',
+                      self.front_page())
+
+
+class TestAForfeitOrAFinalIsAResult(DeclaredCase):
+    """A night given up, or a final alone, is a night with a result (4.440).
+
+    A forfeit was decided, and a final was played: both are nights played. Rejected:
+    counting the regular fixtures played, which leaves a competition of finals with
+    no results, and ``meta.ladder_state``, which is empty for it.
+    """
+
+    def built(self, *cards) -> None:
+        self.declare()
+        for rnd, scores, spec in cards:
+            division_c_card(self.cwd / "data" / "division-c", rnd, "2026-07-21",
+                            scores, index=1, **spec)
+        self.build()
+
+    def test_a_forfeit_counts(self):
+        self.built(("1", ((0, 0),) * 4, {"forfeited_by": "away"}))
+        self.assertEqual(self.subtitle(), "2 of 2 competitions with results")
+
+    def test_a_final_alone_counts(self):
+        self.built(("SF", ((6, 3), (6, 4), (6, 2), (6, 1)), {}))
+        self.assertEqual(self.season(self.SECTION)["meta"]["regular_fixtures"]
+                         ["played"], 0)
+        self.assertEqual(self.subtitle(), "2 of 2 competitions with results")
+
+
+
+# --- 4.458, 4.459, 4.460: a ladder counted on rounds its P column does not show ---
+
+
+AVERAGE = '[rules]\nunplayed = "average"\n'
+THREE_DECLARED = ('\n[competitions.tuesday-division-b]\nteams = ["Riverside Rockets", '
+                  '"Hilltop Aces", "Lakeside Spinners"]\n')
+
+
+def report_table(case: unittest.TestCase, section: str) -> list[str]:
+    """The report's ladder table under its ladder line: the header and every row."""
+    lines = section.splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if re.match(r" {4}# {2}team ", line)), None)
+    case.assertIsNotNone(start, f"this section printed no ladder table:\n{section}")
+    table = [lines[start]]
+    for line in lines[start + 1:]:
+        # Ended by a blank line, or by the next field at two spaces ("  problems").
+        if not re.match(r" {3}", line):
+            break
+        table.append(line)
+    return table
+
+
+class TestAReportCountingAWashedOutRoundSaysCountedWhereItSaidPlayed(CliCase):
+    """Round 2's Rockets v Spinners rained off and its other card not in (4.458, 4.459).
+
+    Under ``unplayed = "average"`` the washed-out pair are credited the round and
+    the others are not. Measured on the base (/tmp/mcf/scratch/LADDER/before2.txt,
+    mirror-average, the same nights over four declared teams, and these tests run
+    on the base): the report's ``ladder       in progress: teams have played
+    unequal numbers of matches`` over a table whose P column read 1 for every team,
+    F10 saying the same over its own counts 2, 2, 1 and 1, and the front page's
+    ``Ladder in progress — teams have played unequal numbers of matches``. Nothing
+    printed the counts the sentence compared. All three now say
+    the counts are unequal, in ``stats.ladder_detail``'s words, and the table prints
+    them as ``cnt``. Rejected: rewording the report's line alone, which leaves F10
+    and the front page saying it the old way; and counted in place of P, which takes
+    the matches decided out of a table whose W, L and D add up to them.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def setUp(self):
+        super().setUp()
+        from test_pipeline import write_washout_beside_a_card_not_in
+        shutil.rmtree(self.cwd / "data")
+        write_washout_beside_a_card_not_in(self.cwd / "data")
+        (self.cwd / "config.toml").write_text(AVERAGE, encoding="utf-8")
+        self.run_ = self.build()
+
+    def test_the_ladder_line_says_the_counts_are_unequal(self):
+        lines = self.section(self.run_.out, self.COMP).splitlines()
+        at = lines.index("  ladder       in progress: teams have unequal numbers of "
+                         "matches counted,")
+        self.assertEqual(lines[at + 1], "               byes and washouts included")
+
+    def test_f10_says_it_in_the_same_words(self):
+        self.assertIn(
+            f"{self.COMP}: the ladder is in progress — teams have unequal numbers of "
+            f"matches counted, byes and washouts included, so the order is not "
+            f"settled. hilltop-aces and parkview-wanderers have fewer than the 2 "
+            f"counted by the rest.",
+            flat("\n".join(printed_finding(self, self.run_.out, "F10"))))
+
+    def test_the_front_page_says_it_too(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page),
+                         ["Ladder in progress &mdash; teams have unequal numbers of "
+                          "matches counted, byes and washouts included"])
+
+    def test_the_table_prints_the_counts_between_points_and_average(self):
+        self.assertEqual(report_table(self, self.section(self.run_.out, self.COMP)), [
+            "    #  team                 P  W  L  D     pts cnt    avg      games",
+            "    1  Riverside Rockets    1  1  0  0    12.8   2   6.40    24-6",
+            "    2  Lakeside Spinners    1  1  0  0    12.2   2   6.10    21-15",
+            "    3  Parkview Wanderers   1  0  1  0     3.5   1   3.50    15-21",
+            "    4  Hilltop Aces         1  0  1  0     2.6   1   2.60     6-24"])
+
+
+class TestAReportSettledOnCreditedByesSaysWhatItCounted(CliCase):
+    """Three declared teams, the Spinners resting twice, ``average`` (4.458, 4.459).
+
+    Measured on the base (/tmp/mcf/scratch/LADDER/before.txt,
+    order-games-bonus-average): ``ladder       complete: every team has played the
+    same number`` over P 1, 3 and 2, the Spinners first on ``18.0`` points and
+    ``6.00`` from one match, with the 3 each was counted on printed nowhere in the
+    report. The line now says every team has 3 matches counted, and the table prints
+    the 3 as ``cnt`` between ``pts`` and ``avg``, which is the order points ÷ counted
+    = average reads in. Rejected: a sentence under the table saying the averages
+    divide by more than P, which leaves a reader to work out by how much for each
+    team.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def write_project(self, extra: str = "") -> Run:
+        from test_pipeline import POINTS_FIRST
+        shutil.rmtree(self.cwd / "data")
+        for index, (rnd, home, away, scores) in enumerate(POINTS_FIRST, start=1):
+            write_fixture_card(self.cwd / "data", rnd, home, away, scores, index=index)
+        (self.cwd / "config.toml").write_text(AVERAGE + THREE_DECLARED + extra,
+                                              encoding="utf-8")
+        return self.build()
+
+    def test_the_ladder_line_says_every_team_has_the_same_count(self):
+        lines = self.section(self.write_project().out, self.COMP).splitlines()
+        at = lines.index("  ladder       complete: every team has 3 matches counted, "
+                         "byes and washouts")
+        self.assertEqual(lines[at + 1], "               credited their average")
+
+    def test_the_table_prints_what_each_average_divides_by(self):
+        section = self.section(self.write_project().out, self.COMP)
+        self.assertEqual(report_table(self, section), [
+            "    #  team                P  W  L  D     pts cnt    avg      games",
+            "    1  Lakeside Spinners   1  1  0  0    18.0   3   6.00    20-12",
+            "    2  Riverside Rockets   3  2  1  0    16.0   3   5.33    60-44",
+            "    3  Hilltop Aces        2  0  2  0     9.6   3   3.20    24-48"])
+
+    def test_at_the_widest_name_the_table_is_the_report_s_width(self):
+        # The team column stops at 28, where the table was 74 wide: the count's three
+        # and its space are the four columns left.
+        run = self.write_project('\n[team_names]\nriverside-rockets = '
+                                 '"Riverside Rockets Tuesday Night Second"\n')
+        table = report_table(self, self.section(run.out, self.COMP))
+        self.assertEqual(len(table[0]), 78, table[0])
+        self.assertEqual(table[2], "    2  Riverside Rockets Tuesday Ni   3  2  1  0"
+                                   "    16.0   3   5.33    60-44")
+        for line in table:
+            with self.subTest(line=line):
+                self.assertLessEqual(len(line), 78)
+
+
+class TestAReportUnderAverageWithNoRoundCreditedIsTheTableItWas(CliCase):
+    """The suite's season under ``unplayed = "average"``, no bye and no washout (4.459).
+
+    Every team's counted is its P, so the count is a column of P's figures again,
+    and the line says played, as F10 under the default does. Rejected: printing the
+    column whenever the rules average, which under the owner's ``zero`` never and
+    under ``average`` on most nights repeats P to every reader.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def test_no_count_is_printed_and_the_line_says_played(self):
+        (self.cwd / "config.toml").write_text(AVERAGE, encoding="utf-8")
+        section = self.section(self.build().out, self.COMP)
+        self.assertIn("  ladder       complete: every team has played the same number",
+                      section.splitlines())
+        self.assertEqual(report_table(self, section)[0],
+                         "    #  team                 P  W  L  D     pts    avg"
+                         "      games")
+
+
+class TestTheDocsSayAveragingCanReorderALadderRankedOnPoints(unittest.TestCase):
+    """Every place that said a credited round never changes the ladder order (4.460).
+
+    The README, config.example.toml, the config.toml a first run writes, and
+    ``scoring.unplayed_detail``'s docstring, which the comment beside it is the
+    source of. Measured on the base (/tmp/mcf/scratch/LADDER/before.txt): under
+    simple the Rockets lead the Spinners 6.0 to 3.0 under ``zero`` and trail them
+    9.0 to 6.0 under ``average``, sets-first the same; under games-bonus two teams
+    level on 3.20 swap, their second key being points. And the FAQ for an order
+    that does not match the association's named the two lines that decide it and
+    not the third. Rejected: rewording the README alone, which leaves the file a
+    club is told to edit saying the opposite.
+
+    And config.example.toml's ``average`` option, and the comment beside the modes
+    in scoring.py, said a credited round counts as a match played, the words 2.6
+    took out of ``unplayed_detail`` for contradicting the ``P`` column; the comment
+    added that only the points total differs. Measured on this unit's tree
+    (/tmp/mcf/scratch/LADDER/fixup/docs-before.txt). Rejected: leaving them, when
+    the report built under that option prints a ``P`` of 1 beside a ``cnt`` of 3.
+    """
+
+    BYE = "### What a bye is worth"
+    FAQ = "### The ladder order does not match my association's published one"
+
+    @staticmethod
+    def readme_section(heading: str) -> str:
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        rest = text[text.index(heading) + len(heading):]
+        end = re.search(r"(?m)^#", rest)
+        return flat(rest[:end.start()] if end else rest)
+
+    def test_the_readme_says_points_first_presets_can_reorder(self):
+        section = self.readme_section(self.BYE)
+        self.assertNotIn("never changes the ladder order", section)
+        self.assertIn("**It can change the ladder order.** `simple`, `sets-first` and "
+                      "`rubbers` rank on points first", section)
+        self.assertIn("this is the first line to try", section)
+
+    def test_the_readme_says_the_report_prints_the_count(self):
+        self.assertIn("The run report's ladder prints the same figure as `cnt`, "
+                      "between `pts` and `avg`", self.readme_section(self.BYE))
+
+    def test_the_faq_names_unplayed(self):
+        self.assertIn("`unplayed`", self.readme_section(self.FAQ))
+
+    def test_config_example_says_it_too(self):
+        text = written_flat((ROOT / "config.example.toml").read_text(encoding="utf-8"))
+        self.assertNotIn("never changes the ladder order", text)
+        self.assertIn("rank on points first", text)
+
+    def test_config_example_says_a_credited_round_is_counted_and_not_played(self):
+        text = written_flat((ROOT / "config.example.toml").read_text(encoding="utf-8"))
+        self.assertNotIn("counts as a match played", text)
+        self.assertIn("the round counts in that average but not in P, the matches "
+                      "played", text)
+
+    def test_the_config_a_first_run_writes_says_it_too(self):
+        text = written_flat(config_mod.render(config_mod.Config(
+            path=Path("config.toml"))))
+        self.assertNotIn("never the ladder order", text)
+        self.assertIn("rank on points first", text)
+        self.assertIn("under games-bonus it can reorder teams level on average", text)
+
+    def test_the_docstring_the_comment_is_from_says_it_too(self):
+        doc = " ".join(scoring.unplayed_detail.__doc__.split())
+        self.assertNotIn("cannot move any team's average, so only the points column "
+                         "changes", doc)
+        self.assertIn("rank on points first", doc)
+
+    def test_the_comment_beside_the_modes_says_it_too(self):
+        source = (ROOT / "matchcentre" / "scoring.py").read_text(encoding="utf-8")
+        comment = written_flat(source[:source.index('UNPLAYED_AVERAGE = "average"')]
+                               .rsplit("\n\n", 1)[1])
+        self.assertNotIn("counts as played", comment)
+        self.assertNotIn("only its points total differs", comment)
+        self.assertIn("the round counts in that average but not in P", comment)
+        self.assertIn("ranked on points first", comment)
+
+
+class TestACompetitionsCardOnTheFrontPageSaysItsDateIsWhenItWasGenerated(CliCase):
+    """The date ending a competition's facts line is labelled ``generated`` (4.441).
+
+    Before, each linked card ended ``4 teams · 6 cards · 10 Sep``, a bare date. It
+    is the stamp of the run that last changed that competition's figures
+    (``site._dated_as_last_changed``): not tonight's run, not the night of the last
+    match and not the night the last card was entered, and beside "6 cards" it
+    reads as that last. Measured before on a fictional season of three
+    competitions built on 7 Oct whose last card was played on 25 Aug
+    (/tmp/mcf/scratch/CLUB/measure/before.txt): ``2 teams &middot; 2 cards
+    &middot; 7 Oct`` on all three cards, and nothing on the page saying which date
+    it was. Now ``generated 7 Oct``: the word that competition's dashboard
+    already prints in its header ("generated 2026-10-07 20:15:00") and footer for
+    the same stamp. The footer under the cards ("Generated by build.py ... · 7
+    Oct, 8:15pm") says it too, of the newest of the cards' stamps, which is the
+    site's: on a front page whose competitions changed on different nights a
+    card's date is its own and the footer's is the latest, so the site has one
+    word for one kind of date, never one date for every card. Rejected:
+    "updated", a second word for that kind of date, and one that reads as the
+    cards changing; "figures as of", which says the same in more columns on a
+    card 360 pixels wide; and the year, which the footer leaves off its own date
+    and a club's season does not need.
+    """
+
+    def linked_facts(self) -> list[str]:
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        return re.findall(r'<a class="pick" href="[^"]*">.*?'
+                          r'<span class="pick-facts">(.*?)</span>', page, re.S)
+
+    def footer(self) -> str:
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        return re.search(r"<footer[^>]*>(.*?)</footer>", page, re.S).group(1)
+
+    def test_the_date_is_labelled_as_when_the_figures_were_generated(self):
+        self.build()
+        self.assertEqual(self.linked_facts(),
+                         ["4 teams &middot; 6 cards &middot; generated 10 Sep"])
+
+    def test_a_rebuild_with_nothing_new_keeps_the_date_the_footer_gives(self):
+        self.build()
+        self.build("--generated", LATER_NIGHT)
+        self.assertEqual(self.linked_facts(),
+                         ["4 teams &middot; 6 cards &middot; generated 10 Sep"])
+        self.assertTrue(self.footer().startswith("Generated by "), self.footer())
+        self.assertTrue(self.footer().endswith(" &middot; 10 Sep, 12:00pm"),
+                        self.footer())
+
+    def test_each_card_gives_its_own_date_and_the_footer_the_newest(self):
+        """Changed on two nights: each card its own date, the footer the later.
+
+        Measured on a first build of one competition on 10 Sep and a second on 17
+        Sep that adds another (/tmp/mcf/scratch/CLUB/fix/twonights.txt): the first
+        competition's card keeps ``generated 10 Sep``, since nothing in it moved,
+        the new one's says ``generated 17 Sep``, and the footer ends ``17 Sep,
+        7:40pm``. A card dated with the footer's stamp would tell the club the
+        first competition's figures moved on the 17th.
+        """
+        self.build()
+        write_second_competition(self.cwd / "data" / "division-c")
+        self.build("--generated", LATER_NIGHT)
+        self.assertEqual(
+            sorted(self.linked_facts()),
+            ["2 teams &middot; 2 cards &middot; generated 17 Sep",
+             "4 teams &middot; 6 cards &middot; generated 10 Sep"])
+        self.assertTrue(self.footer().endswith(" &middot; 17 Sep, 7:40pm"),
+                        self.footer())
+
+    def test_the_dashboards_header_and_footer_say_generated_too(self):
+        app = jslint.without_comments(
+            (Path(__file__).resolve().parents[1] / "matchcentre" / "web" / "app.js")
+            .read_text(encoding="utf-8"))
+        self.assertRegex(app, r"\?\s*'generated '\s*\+\s*String\(m\.generated\)")
+        self.assertRegex(app, r"' · generated ' \+\s*\(m\.generated \|\| '—'\)")
+
+
+class TestABuildTellsANightWithNothingOnItOnce(unittest.TestCase):
+    """The season through build.py, plus two blank nights and a VS night played.
+
+    Row 4.424. In round 4, rockets v aces ticks Match Cancelled over ``VS``, no
+    tick and 0-0 rows with Match Centre's ``Unspecified player`` in every name
+    cell; spinners v wanderers ticks nothing, prints ``VS``, no TOTAL row and no
+    names over 0-0 rows. In round 5, rockets v spinners prints ``VS`` over three
+    rubbers finished and a fourth 0-0, which is scored from its rows.
+
+    Measured by this class on the tree before this: exit 0, ``0 error(s), 9
+    warning(s)``, the first card told ``no-result`` and ``players-unrecorded``,
+    the second ``no-result``, F6 and ``totals-missing``. Now each is told its
+    ``no-result`` alone, the second with what its rows read and what to do if it
+    was played, and the report counts 6 warnings; the played card is told
+    ``verb-absent`` as before.
+    """
+
+    PLACE = "Unspecified player"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cwd = Path(cls._tmp.name)
+        write_season_cards(cwd / "data")
+        _, rockets = TEAMS["riverside-rockets"]
+        _, aces = TEAMS["hilltop-aces"]
+        _, spinners = TEAMS["lakeside-spinners"]
+        _, wanderers = TEAMS["parkview-wanderers"]
+        blank = ((0, 0),) * 4
+        for rnd, name, home, away, rows, fields in (
+                ("4", "called-off", "riverside-rockets", "hilltop-aces",
+                 tuple(dataclasses.replace(
+                     row, home_players=(cls.PLACE,) * len(row.home_players),
+                     away_players=(cls.PLACE,) * len(row.away_players))
+                     for row in rows_for(blank, rockets, aces)),
+                 dict(cancelled=True)),
+                ("4", "unentered", "lakeside-spinners", "parkview-wanderers",
+                 tuple(dataclasses.replace(row, home_players=(), away_players=())
+                       for row in rows_for(blank, spinners, wanderers)),
+                 dict(omit_totals=True)),
+                ("5", "played", "riverside-rockets", "lakeside-spinners",
+                 rows_for(((6, 2), (3, 6), (6, 4), (0, 0)), rockets, spinners),
+                 {})):
+            folder = cwd / "data" / f"Round{rnd}"
+            folder.mkdir(parents=True, exist_ok=True)
+            cardwriter.write_card_file(folder / f"{name}.pdf", short_spec(
+                home, away, date=SHORT_OF_RESULT_DATES[rnd], round_label=rnd,
+                court=f"1{rnd}", match_id=f"41000{rnd}{len(name)}", rows=rows,
+                verb="VS", winner=cardwriter.NO_TICK, **fields))
+        done = subprocess.run(
+            (sys.executable, str(BUILD), "--generated", STAMP), cwd=cwd,
+            capture_output=True, text=True, timeout=600,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        cls.built = Run(done.returncode, done.stdout, done.stderr, cwd)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def warned(self) -> list[str]:
+        """The rule of each warning the report prints, once a warning."""
+        lines = self.built.out.splitlines()
+        start = next(at for at, line in enumerate(lines)
+                     if re.match(r"== \d+ warnings? =", line))
+        rules, rule = [], None
+        for line in lines[start + 1:]:
+            if line.startswith("== "):
+                break
+            if re.fullmatch(r"  \S+", line):
+                rule = line.strip()
+            elif re.match(r" {6}\S", line):
+                rules.append(rule)
+        return rules
+
+    def test_it_builds_at_exit_0_and_counts_6_warnings_where_it_counted_9(self):
+        self.assertEqual(self.built.code, 0, self.built.text[-3000:])
+        self.assertIn("problems 0 error(s), 6 warning(s)", flat(self.built.out))
+        self.assertEqual(len(self.warned()), 6)
+
+    def test_each_blank_night_is_one_no_result_and_nothing_beside_it(self):
+        warned = self.warned()
+        self.assertEqual(warned.count("no-result"), 2)
+        for rule in ("F6", "totals-missing", "players-unrecorded"):
+            with self.subTest(rule=rule):
+                self.assertNotIn(rule, warned)
+
+    def test_the_night_not_called_off_is_told_what_to_do_if_it_was_played(self):
+        self.assertIn(
+            "R4 lakeside-spinners v parkview-wanderers: recorded as unplayed, so it "
+            "is not counted in the ladder. Every set row reads 0-0: if the match "
+            "was played, enter its result in Match Centre and export the card "
+            "again. data/Round4/unentered.pdf", flat(self.built.out))
+
+    def test_the_night_called_off_is_told_only_that_it_was(self):
+        self.assertIn(
+            "R4 riverside-rockets v hilltop-aces: recorded as cancelled, so it is "
+            "not counted in the ladder. data/Round4/called-off.pdf",
+            flat(self.built.out))
+
+    def test_the_vs_night_with_play_is_still_told_it_was_scored_from_its_rows(self):
+        self.assertIn("verb-absent", self.warned())
+
+    def test_the_readme_quotes_the_finding_this_run_printed(self):
+        lines = self.built.out.splitlines()
+        start = lines.index("  no-result")
+        quoted = readme_block(
+            self, "### A round was called off, and its card has scores on it",
+            contains="lakeside-spinners v parkview-wanderers: recorded")
+        self.assertEqual(quoted, lines[start:start + len(quoted)])
+        # The whole finding, down to the advice, and not a prefix of it, in a
+        # report that keeps to its width with the advice in it.
+        self.assertTrue(quoted[-1].endswith("export the card again."), quoted)
+        self.assertEqual(past_the_width(lines), [])
+
+    def test_the_page_notes_nothing_of_either_blank_night(self):
+        # From the review: the reader's note that nothing on the unentered card
+        # confirms its rows still reached the season.json build.py wrote, as
+        # that match's one parse note, where the report says nothing of it.
+        found = sorted((self.built.cwd / "site").rglob("season.json"))
+        self.assertEqual(len(found), 1, found)
+        season = json.loads(found[0].read_text(encoding="utf-8"))
+        notes = {m["id"]: m["warnings"] for m in season["matches"]}
+        self.assertEqual((notes["4100049"], notes["41000410"]), ([], []))
 
 
 if __name__ == "__main__":

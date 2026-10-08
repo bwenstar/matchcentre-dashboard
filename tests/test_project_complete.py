@@ -13,6 +13,7 @@ cannot run anywhere else has still failed.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import re
 import subprocess
 import sys
@@ -606,6 +607,66 @@ class TestTheCopyWithoutNamesIsNeitherCommittedNorScanned(unittest.TestCase):
         self.assertEqual({"NOT_SHIPPED": sorted(folders - NOT_SHIPPED),
                           "SKIP_DIRS": sorted(folders - skipped)},
                          {"NOT_SHIPPED": [], "SKIP_DIRS": []})
+
+
+class TestGitIgnoresTheProposalDiscoverWritesBesideAConfig(unittest.TestCase):
+    """The proposal ``--discover`` writes beside a config is ignored, as it is.
+
+    The proposal is the file ``--discover --force`` would write, so it holds every
+    captain, spelling and alias the config beside it holds, and the captains the
+    (C) marks give besides; it is beside ``config.toml``, and beside
+    ``public.toml`` for the README's copy without names. Measured before this,
+    ``.gitignore`` had no line naming a proposal (/tmp/mcf/scratch/CONFIG/fixup/
+    before.txt), so the first ``git add .`` after a ``--discover`` committed the
+    members' names ``/config.toml`` is ignored for. Rejected: a line for each of
+    ``/config.proposed.toml`` and ``/public.proposed.toml``, which misses a
+    config named with ``--config`` anywhere else, ``conf/club.toml`` among them.
+    """
+
+    CONFIGS = ("config.toml", "public.toml", "conf/club.toml")
+
+    @staticmethod
+    def ignored_by_its_lines(path: str) -> bool:
+        """Whether .gitignore's lines ignore the file *path*, read as git reads
+        them: a pattern with no slash in it matches a file of that name in any
+        folder, one with a slash the path from the root, and the last to match
+        decides."""
+        ignored = False
+        for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or line.endswith("/"):
+                continue
+            pattern = line.lstrip("!")
+            if "/" in pattern:
+                matched = fnmatch.fnmatchcase(path, pattern.lstrip("/"))
+            else:
+                matched = fnmatch.fnmatchcase(Path(path).name, pattern)
+            if matched:
+                ignored = not line.startswith("!")
+        return ignored
+
+    def test_git_ignores_the_proposal_beside_each_config_a_club_names(self):
+        from matchcentre import config
+        proposals = [config.proposal_path(name).as_posix() for name in self.CONFIGS]
+        self.assertEqual(proposals, ["config.proposed.toml", "public.proposed.toml",
+                                     "conf/club.proposed.toml"])
+        if not under_git():
+            # Read off the file, as for the copy without names.
+            for path in proposals:
+                with self.subTest(path=path):
+                    self.assertTrue(self.ignored_by_its_lines(path),
+                                    f"{path} is not gitignored")
+            self.assertFalse(self.ignored_by_its_lines("config.example.toml"))
+            return
+        for path in proposals:
+            with self.subTest(path=path):
+                result = subprocess.run(("git", "check-ignore", "-q", path),
+                                        cwd=ROOT, capture_output=True)
+                self.assertEqual(result.returncode, 0,
+                                 f"{path} is not gitignored, so a club would "
+                                 f"publish its members' names on the next "
+                                 f"`git add .`")
+        self.assertEqual(git("ls-files", f"*{config.PROPOSAL_SUFFIX}").split(), [])
 
 
 class TestTheReadmeQuotesTheScheduleAsItRuns(unittest.TestCase):
@@ -2539,6 +2600,100 @@ class TestTheExampleSaysWhatNamesASeasonInEachCase(unittest.TestCase):
         self.assertIn(f'"{export.season_label("", "2026-winter")}" of 2026-winter',
                       said)
         self.assertNotIn("shown by its folder name", said)
+
+
+class TestTheExampleAndTheReadmeNameTheTeamNameGuessesTheFirstRunNames(
+        unittest.TestCase):
+    """``config.example.toml`` and the README name the guesses the first run does.
+
+    The note a first run writes over ``[team_names]`` names the two guesses most
+    likely to need a human, an acronym of four letters or more read as a word and
+    a letter A read as the word a. The example's ``[team_names]`` comment and the
+    README's section on reviewing the file named neither (measured on the base,
+    /tmp/mcf/scratch/CASE/before.txt), so a club reading either was told every
+    offer was a guess and not which to read first. Each now quotes the same two,
+    held to the writer's words here, and each of the three is held to the rule:
+    every length it states is the cut's, each guess is said in the rule's terms,
+    and each example reads as ``display_name`` gives it. Held to its examples
+    alone, a note saying "five letters or more", or an A "kept as a team letter"
+    beside its own lowered example, passed (/tmp/mutate626.py).
+    Rejected: sending the example's reader to the README, which a club editing
+    this file has not got open.
+    """
+
+    GUESS = re.compile(r'\b([A-Z]{2,}(?: [A-Z]+)*) is offered as ["`]([^"`]+)["`]')
+    # A length stated, which is the cut's on its side: kept at three or fewer,
+    # read as a word at four or more.
+    CUT = re.compile(r"\b(\w+) letters or (fewer|more)\b", re.I)
+    NUMBERS = ("no", "one", "two", "three", "four", "five", "six")
+    # Each guess in the terms of the rule that makes it.
+    ACRONYM = re.compile(r"\b[Aa]n acronym of \w+ letters or more is read as a word, "
+                         r'so ([A-Z]+) is offered as ["`]([^"`]+)["`]')
+    ARTICLE = re.compile(r'\bA before another word can be read as the word "a", '
+                         r'so ([A-Z]+(?: [A-Z]+)+) is offered as ["`]([^"`]+)["`]')
+
+    def said(self, text: str) -> str:
+        return " ".join(text.replace("#", " ").split())
+
+    def named(self, text: str) -> list[tuple[str, str]]:
+        from matchcentre import slugs
+        said = self.said(text)
+        cuts = self.CUT.findall(said)
+        self.assertTrue(cuts, f"no length stated in {said}")
+        for number, side in cuts:
+            self.assertEqual(number.casefold(), self.NUMBERS[
+                slugs._ACRONYM_MAX + (side.casefold() == "more")], said)
+        guesses = []
+        for rule in (self.ACRONYM, self.ARTICLE):
+            found = rule.findall(said)
+            self.assertEqual(len(found), 1, f"{rule.pattern!r} in {said}")
+            guesses.extend(found)
+        self.assertEqual(self.GUESS.findall(said), guesses, said)
+        for shouted, reading in guesses:
+            self.assertEqual(slugs.display_name(shouted), reading, said)
+        return guesses
+
+    def written(self) -> list[tuple[str, str]]:
+        from matchcentre import config as config_mod
+        text = config_mod.render(config_mod.Config(path=Path("config.toml")))
+        start = text.index("[team_names]\n")
+        return self.named(text[start:text.index("\n[", start)])
+
+    def readme(self) -> str:
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        start = text.index("\n## Reviewing `config.toml`\n")
+        return text[start:text.index("\n## ", start + 1)]
+
+    def test_the_example_s_team_names_comment_names_the_same_two(self):
+        text = (ROOT / "config.example.toml").read_text(encoding="utf-8")
+        start = text.index("# [team_names] —")
+        self.assertEqual(self.named(text[start:text.index("# [player_names] —")]),
+                         self.written())
+
+    def test_the_readme_s_section_on_reviewing_the_file_names_the_same_two(self):
+        self.assertEqual(self.named(self.readme()), self.written())
+
+    def test_the_readme_says_the_cut_keeps_a_word_of_three_letters_too(self):
+        """The README says the cut's cost the other way, in words the rule keeps.
+
+        A shouted word of three letters is kept as an abbreviation is, so OLD TOWN
+        ACE is offered as ``OLD Town ACE`` and NET SETTERS as ``NET Setters``
+        (/tmp/mcf/scratch/CASE/three.txt). Said only as "four are not, because ACES
+        and NETS are words", the cut read as though no word had three letters. It
+        is not one of the two guesses the note names, since it shows in capitals in
+        an offer where those two read as names. Rejected: a cut of two, which makes
+        RTC ``Rtc``; and title-casing a short word that holds a vowel, which makes
+        an abbreviation such as ABC ``Abc``.
+        """
+        from matchcentre import slugs
+        kept = re.findall(r"\bso is a word of (\w+) letters such as ([A-Z]+) or "
+                          r"([A-Z]+)\b", self.said(self.readme()))
+        self.assertEqual(len(kept), 1, kept)
+        number, *words = kept[0]
+        self.assertEqual(number, self.NUMBERS[slugs._ACRONYM_MAX])
+        for word in words:
+            with self.subTest(word):
+                self.assertEqual(slugs.display_name(word), word)
 
 
 class TestALeakFromADashboardWithoutNamesHasSomewhereToGo(unittest.TestCase):

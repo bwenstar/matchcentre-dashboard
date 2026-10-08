@@ -18,6 +18,7 @@ uses rather than pulling in a general emitter.
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 import textwrap
@@ -26,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, NamedTuple
 
+from . import __version__
 from . import format as fmt_mod
 from . import scoring
 from .card import round_key
@@ -50,6 +52,16 @@ DEFAULT_PATH = "config.toml"
 DEMO_CONFIG = "demo-seasons.toml"
 DEMO_MARKER = "# Written by tools/demo.py"
 
+# What `build.py --discover` writes beside a config that exists, rather than over
+# it (4.431): the file `--discover --force` would write, under a header of its own,
+# named after the config and known as this program's by its first line, as the
+# demo's is. Nothing reads it, and it is written again on every such run, so a file
+# of that name that does not begin so is a club's, and is never written over.
+PROPOSAL_SUFFIX = ".proposed.toml"
+PROPOSAL_MARKER = "# matchcentre-dashboard: a proposed config, which nothing reads"
+# Stands for a space that a paragraph is not to be broken at, while it is flowed.
+_GLUE = "\0"
+
 SEASON_MODES = ("single", "multi")
 
 # What `[build] players` may say: whether the dashboards print the players' names,
@@ -57,7 +69,7 @@ SEASON_MODES = ("single", "multi")
 PLAYER_MODES = ("names", "initials", "numbered")
 
 RULES_SETTINGS = ("scoring", "sets", "unplayed", "draws", "format", "slots",
-                  "min_sets_for_result")
+                  "min_sets_for_result", "forfeit_award", "forfeit_points")
 """Every setting ``[rules]`` accepts, and every one a competition may override.
 
 Named once because four places have to agree about it: the two ``_reject_unknown``
@@ -177,14 +189,17 @@ class CompetitionConfig:
     format: str = ""
     slots: tuple[str, ...] = ()
     min_sets_for_result: int | None = None
+    forfeit_award: str = ""
+    forfeit_points: float | None = None
     expected: ExpectedSheet | None = None
     # A sheet table with something typed in it that the loader could compare no line
     # of: no usable after_round, or every line refused. ``expected`` says nothing of
-    # it, and ``--discover --force`` writes none of it back, so its refusal names it.
+    # it, and ``--discover --force`` writes none of it back, so the header of the
+    # proposal ``--discover`` writes beside the file names it.
     expected_unusable: bool = False
     # The lines, by key, of a table it does compare that had a figure refused, or
     # that were typed as no table of figures at all. The table is written back as
-    # it was read, so what was refused goes, and the refusal names the line.
+    # it was read, so what was refused goes, and that header names the line.
     expected_refused: tuple[str, ...] = ()
 
     @property
@@ -283,6 +298,10 @@ class Config:
     format: str = ""
     slots: tuple[str, ...] = ()
     min_sets_for_result: int | None = None
+    # What a match forfeited whole is worth (4.420): '' and None are "the preset
+    # decides", as for unplayed and draws; points are read only under "fixed".
+    forfeit_award: str = ""
+    forfeit_points: float | None = None
     season_labels: dict[str, str] = field(default_factory=dict)
     team_names: dict[str, str] = field(default_factory=dict)
     # Each [team_names] key as typed -> the slugs the loader filed it under, so
@@ -299,17 +318,17 @@ class Config:
     # --- rules ----------------------------------------------------------
 
     def ruleset_for(self, comp: CompetitionConfig | None = None) -> scoring.Ruleset:
-        """The preset, with ``unplayed`` and ``draws`` applied over it.
+        """The preset, with ``unplayed``, ``draws`` and the forfeit award over it.
 
-        Each preset carries an opinion about what a bye is worth, and about whether
-        a night can end level, and both are only opinions: two associations running
-        identical points schemes routinely differ on either line, so they have to be
-        settable without inventing a preset per pairing. Left unset, the preset's own
-        values stand.
+        Each preset carries an opinion about what a bye is worth, about whether a
+        night can end level, and about what a forfeit pays, and each is only an
+        opinion: two associations running identical points schemes routinely differ
+        on any of the three, so they have to be settable without inventing a preset
+        per pairing. Left unset, the preset's own values stand.
 
-        Both clauses are applied, not one or the other. An early return after the
-        first would silently drop the second, and which one got dropped would depend
-        on the order they happen to be read in.
+        Every clause is applied, not one or another. An early return after the
+        first would silently drop the rest, and which got dropped would depend on
+        the order they happen to be read in.
         """
         base = scoring.ruleset(self._declared_rule(comp, "scoring")
                                or scoring.DEFAULT_RULESET)
@@ -322,15 +341,32 @@ class Config:
         draws = self.draws if comp is None or comp.draws is None else comp.draws
         if draws is False:
             base = replace(base, draw=None)
+        # What a forfeit is worth (4.420): the award as declared, and the points
+        # only where the award is "fixed", the one that reads them; load has
+        # refused a "fixed" with no points and warned of points nothing reads.
+        award = self._declared_rule(comp, "forfeit_award")
+        if award:
+            base = replace(base, forfeit_award=award,
+                           forfeit_points=(self._forfeit_points(comp)
+                                           if award == "fixed" else None))
         return base
+
+    def _forfeit_points(self, comp: CompetitionConfig | None) -> float | None:
+        """``forfeit_points`` as declared: the section's, else [rules]'s, else None.
+
+        Asked with ``is None`` and never for truth, as ``draws`` is: 0 is a price.
+        """
+        if comp is not None and comp.forfeit_points is not None:
+            return comp.forfeit_points
+        return self.forfeit_points
 
     def set_rule_for(self, comp: CompetitionConfig | None = None) -> fmt_mod.SetRule:
         return fmt_mod.set_rule(self._declared_rule(comp, "sets")
                                 or fmt_mod.DEFAULT_SET_RULE)
 
     def _declared_rule(self, comp: CompetitionConfig | None, key: str) -> str:
-        """``scoring``, ``sets`` or ``unplayed`` as declared: the section's, else
-        [rules]'s, else ''."""
+        """``scoring``, ``sets``, ``unplayed`` or ``forfeit_award`` as declared: the
+        section's, else [rules]'s, else ''."""
         return getattr(comp, key) if comp and getattr(comp, key) else getattr(self, key)
 
     def rules_left_to_default(self, comp: CompetitionConfig | None = None
@@ -518,6 +554,74 @@ def written_by_demo(path: Path, text: str) -> bool:
     return path.name == DEMO_CONFIG and text.startswith(DEMO_MARKER)
 
 
+def proposal_path(path: str | Path) -> Path:
+    """Where ``--discover`` proposes a config for the one at *path*: beside it,
+    named after it, so ``other.toml`` has ``other.proposed.toml``. Beside it and
+    not under ``--out``, which is published."""
+    path = Path(path)
+    return path.with_name(f"{path.stem}{PROPOSAL_SUFFIX}")
+
+
+def written_as_proposal(text: str) -> bool:
+    """Whether *text* is a proposal this program wrote: begun as each one is."""
+    return text.startswith(PROPOSAL_MARKER + "\n")
+
+
+def proposal_written(text: str) -> str | None:
+    """The date the header of the proposal *text* says it was written on, as it
+    says it, or ``None`` for a text that is not one, or names none: what a run
+    renders the proposal with to ask whether the file holds it already."""
+    if not written_as_proposal(text):
+        return None
+    header = []
+    for line in text.splitlines()[1:]:
+        if line == _PROPOSAL_RULE:
+            break
+        header.append(line[2:])
+    said = re.search(r"\) on (.+?), from the \d+ scorecards? it read\.",
+                     " ".join(header))
+    return said.group(1) if said else None
+
+
+def proposal(rendered: str, *, config_name: str, written: str, cards: int,
+             drops: str) -> str:
+    """The proposal ``--discover`` writes beside *config_name*: *rendered*, the
+    file ``--discover --force`` would write over it, under a header that says so.
+
+    The header says which run wrote it, that nothing reads it, how to adopt a part
+    of it or the whole, and, in *drops*, what adopting it whole loses: the words
+    ``--discover`` used to refuse with, said where they are acted on. *written* is
+    the run's date as the page prints one. The rendered file follows the row of
+    dashes the header ends with, so deleting down to them leaves it whole.
+    """
+    # The date is flowed as one word: split at a space, "on 8" ended one line and
+    # "Oct 2026" began the next, at 13 of 90 lengths of version and date.
+    glued = written.replace(" ", _GLUE)
+    paragraphs = (
+        f"Written by `python3 build.py --discover` (matchcentre-dashboard "
+        f"{__version__}) on {glued}, from the {cards} "
+        f"scorecard{'' if cards == 1 else 's'} it read. {config_name} already "
+        f"exists, so it was left as it was and this was written beside it instead. "
+        f"No run reads this file.",
+        f"It is the file `python3 build.py --discover --force` would write over "
+        f"{config_name}: what {config_name} declares is live, and what the cards "
+        f"offer besides is behind a #. The report of the run that wrote it lists "
+        f"what it offers that {config_name} lacks.",
+        f"To use a part of it, copy those lines into {config_name}. To adopt it "
+        f"whole, copy it over {config_name} and delete these lines, down to and "
+        f"including the row of dashes below. That does to {config_name} what "
+        f"--discover --force does. {drops}",
+        f"The next --discover writes this file again, so make your changes in "
+        f"{config_name} rather than here.",
+    )
+    lines = [PROPOSAL_MARKER]
+    for paragraph in paragraphs:
+        lines.append("#")
+        lines.extend(line.replace(_GLUE, " ") for line in _comment_flow(paragraph))
+    lines.append(_PROPOSAL_RULE)
+    return "\n".join(lines) + "\n" + rendered
+
+
 def load(path: str | Path = DEFAULT_PATH) -> Config:
     """Read the config, or return usable defaults when there is no file.
 
@@ -612,6 +716,10 @@ def _from_raw(raw: dict, path: Path) -> Config:
         slots=tuple(str(s) for s in rules.get("slots", ()) or ()),
         min_sets_for_result=_minimum_sets(rules.get("min_sets_for_result"),
                                           "[rules] min_sets_for_result", path),
+        forfeit_award=_forfeit_award(rules.get("forfeit_award"),
+                                     "[rules] forfeit_award", path),
+        forfeit_points=_forfeit_points(rules.get("forfeit_points"),
+                                       "[rules] forfeit_points", path),
         season_labels=_season_labels(raw.get("seasons"), mode, warnings),
         team_names=_name_map(raw.get("team_names"), "team_names", prefix, warnings,
                              team_keys),
@@ -624,6 +732,7 @@ def _from_raw(raw: dict, path: Path) -> Config:
                                    multi=mode == "multi"),
         warnings=tuple(warnings),
     )
+    config = _priced_forfeits(config, path)
     # Validate the declared format now, for the same reason.
     try:
         config.declared_format()
@@ -883,6 +992,86 @@ def _draws(value: object, label: str, path: Path) -> bool | None:
     return value
 
 
+def _forfeit_award(value: object, label: str, path: Path) -> str:
+    """``[rules] forfeit_award``: ``"as-played"``, ``"full-games"``, ``"fixed"``, or unset.
+
+    Refused rather than warned about, for the reason ``_unplayed`` is: a typo that
+    fell back to the preset would pay every forfeit of the season a price the club
+    had written a line to change (4.420).
+    """
+    if value is None or value == "":
+        return ""
+    award = str(value).strip().casefold()
+    if award not in scoring.FORFEIT_AWARDS:
+        raise ConfigError(
+            f"{path}: {label} = {toml_value(value)} is not "
+            f"{choices(scoring.FORFEIT_AWARDS)}."
+            f"{_did_you_mean(award, scoring.FORFEIT_AWARDS)}")
+    return award
+
+
+def _forfeit_points(value: object, label: str, path: Path) -> float | None:
+    """``[rules] forfeit_points``: the flat price a ``"fixed"`` award pays, or unset.
+
+    A TOML number, 0 or more, and nothing else. ``"5"`` and ``true`` are refused
+    rather than read as 5 and 1, as ``draws`` refuses ``"false"``, and so are a
+    negative number, ``nan`` and ``inf``, which no ladder can add up.
+    """
+    if value is None:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise ConfigError(f"{path}: {label} must be a number of points, 0 or more, "
+                          f"got {value!r}")
+    return float(value)
+
+
+def _priced_forfeits(config: Config, path: Path) -> Config:
+    """*config*, refused where a ``"fixed"`` award has no price, and warned where
+    a ``forfeit_points`` is read by no ``"fixed"`` award.
+
+    Asked of the config whole, because which points a ``"fixed"`` award reads is
+    a question across sections: a competition's own, else [rules]'s. A ``"fixed"``
+    with neither cannot be built into a scheme, so the club is told in its own
+    file's words (4.420); points no award reads change nothing, so the run goes
+    on, and is told the line did nothing, as a misplaced key is. Rejected: reading
+    points as choosing ``"fixed"``, a setting taking effect in a word nobody wrote.
+    """
+    comps = list(config.competitions.values())
+    sections: list[tuple[str, CompetitionConfig | None]] = [("[rules]", None)]
+    sections += [(f"[competitions.{comp.id}]", comp) for comp in comps]
+    fixed = {comp.id for comp in comps
+             if config._declared_rule(comp, "forfeit_award") == "fixed"}
+    for where, comp in sections:
+        declared = config.forfeit_award if comp is None else comp.forfeit_award
+        if declared == "fixed" and config._forfeit_points(comp) is None:
+            there = "" if comp is None else " there or under [rules]"
+            raise ConfigError(
+                f'{path}: {where} forfeit_award = "fixed" pays a flat '
+                f"forfeit_points, and no forfeit_points is set{there}. Add one: "
+                f"the points a match forfeited whole pays the side that turned up.")
+    warnings = list(config.warnings)
+    for where, comp in sections:
+        points = config.forfeit_points if comp is None else comp.forfeit_points
+        if points is None:
+            continue
+        # The award in force there: declared, or the preset's own.
+        award = (config._declared_rule(comp, "forfeit_award")
+                 or scoring.ruleset(config._declared_rule(comp, "scoring")
+                                    or scoring.DEFAULT_RULESET).forfeit_award)
+        if award == "fixed":
+            continue
+        # [rules]'s points are also read by a section whose own "fixed" sets none.
+        if comp is None and any(c.forfeit_points is None for c in comps
+                                if c.id in fixed):
+            continue
+        warnings.append(
+            f"{where} forfeit_points = {toml_value(points)} was not read: it "
+            f'prices a forfeit only where forfeit_award = "fixed", and '
+            f'forfeit_award is "{award}" here.')
+    return replace(config, warnings=tuple(warnings))
+
+
 def _str_map(value: object, name: str, warnings: list[str]) -> dict[str, str]:
     if value is None:
         return {}
@@ -1094,6 +1283,12 @@ def _competitions(value: object, path: Path, prefix: str,
             min_sets_for_result=_minimum_sets(
                 table.get("min_sets_for_result"),
                 f"[competitions.{comp_id}] min_sets_for_result", path),
+            forfeit_award=_forfeit_award(
+                table.get("forfeit_award"),
+                f"[competitions.{comp_id}] forfeit_award", path),
+            forfeit_points=_forfeit_points(
+                table.get("forfeit_points"),
+                f"[competitions.{comp_id}] forfeit_points", path),
             expected=(sheet := _expected_table(table.get("expected"), comp_id,
                                                warnings, refused=(lost := []))),
             expected_unusable=(_sheet_in_use(table.get("expected"))
@@ -1552,6 +1747,9 @@ which is the honest way round -- the alternative was this module reaching for
 ``build`` at runtime and failing in every context except a build.
 """
 
+# The row of dashes a proposal's header ends with, and the file under it begins.
+_PROPOSAL_RULE = "# " + "-" * (WIDTH - 2)
+
 
 def _option_lines(name: str, detail: str, *, pad: int) -> list[str]:
     """One row of an option table: ``#   name    what it does``, wrapped.
@@ -1626,6 +1824,19 @@ def team_list_lines(comp_id: str, names: Iterable[str]) -> list[str]:
     """
     return [f"[competitions.{toml_key(comp_id)}]",
             f"teams = {toml_value(list(names))}"]
+
+
+def listed_teams(comp: "Competition",
+                 declared: CompetitionConfig | None) -> list[str]:
+    """The team list the writer writes for *comp*, which the list that adds the
+    teams the cards name besides is built on, in the file and in the proposal's
+    summary alike: the club's ``teams``, as it spelt and ordered them, and
+    otherwise the competition's teams, which a draw the club declared closes and
+    the cards otherwise name. Keyed on ``teams`` alone, the summary missed a team
+    the cards name that a declared draw lacks."""
+    if declared and declared.teams_declared:
+        return list(declared.teams)
+    return [comp.teams[slug].name for slug in sorted(comp.teams)]
 
 
 def named(path: Path | str) -> str:
@@ -1812,6 +2023,23 @@ def shape_line(fmt: fmt_mod.MatchFormat) -> str:
 _KEY_START = re.compile(r"""\s*(?:"[^"\n]*"|'[^'\n]*'|[A-Za-z0-9_.-]+)\s*=""")
 
 
+# A key with nothing after its `=`: a value written for the club to type, which
+# no TOML reader loads until it is typed. Read as one value of its own, so that
+# the line as written is held where it stands and a line with a value typed
+# behind its # is not that line.
+_BARE_KEY = re.compile(r"\s*([A-Za-z0-9_-]+)\s*=\s*")
+
+
+class _ToType:
+    """The value of a bare ``key =`` line, equal only to itself."""
+
+    def __repr__(self) -> str:
+        return "<to type>"
+
+
+_TO_TYPE = _ToType()
+
+
 def _header_of(line: str) -> tuple[tuple[str, ...], bool] | None:
     """The table a ``[x]`` or ``[[x]]`` line opens, and if it is an array; or None."""
     stripped = line.strip()
@@ -1857,6 +2085,8 @@ def _fragment_blocks(lines: Iterable[str]) -> list[_Block]:
         head = _header_of(line)
         if head is not None:
             blocks.append(_Block(*head, {}))
+        elif blocks and (bare := _BARE_KEY.fullmatch(line)):
+            blocks[-1].values[bare.group(1)] = _TO_TYPE
         elif blocks:
             try:
                 blocks[-1].values.update(tomllib.loads(line))
@@ -1890,6 +2120,10 @@ def _commented_blocks(text: str) -> list[_Block]:
             blocks.append(_Block(*head, {}, behind=body.strip(), line=index))
             continue
         if not _KEY_START.match(body):
+            continue
+        if bare := _BARE_KEY.fullmatch(body):
+            # Read on, it took in the comment under it and held nothing.
+            blocks[-1].values[bare.group(1)] = _TO_TYPE
             continue
         statement, end = body, index
         while True:
@@ -2139,7 +2373,9 @@ def render(config: Config, *, competitions: object = (),
     lines.extend(_chosen_rule_lines(config, comps, "sets", fmt_mod.DEFAULT_SET_RULE))
     lines.append("# What a round a team did not play is worth — a bye, a washout, a")
     lines.append("# week called off. This changes the points column of every team")
-    lines.append("# that has had a week off, and never the ladder order. Options:")
+    lines.append("# that has had a week off, and can change the ladder order: all")
+    lines.append("# the presets but games-bonus rank on points first, and under")
+    lines.append("# games-bonus it can reorder teams level on average. Options:")
     for mode in scoring.UNPLAYED_MODES:
         lines.extend(_option_lines(
             mode, scoring.unplayed_detail(mode == scoring.UNPLAYED_AVERAGE), pad=9))
@@ -2156,6 +2392,21 @@ def render(config: Config, *, competitions: object = (),
         lines.append("# draws = false   # left off: whatever the preset above says")
     else:
         lines.append(f"draws = {toml_value(config.draws)}")
+    # What a forfeit is worth (4.420), live where the club declared it and behind
+    # a # where it did not, as unplayed and draws are.
+    lines.append("# What a match forfeited whole is worth: the Match Forfeited box,")
+    lines.append("# or a walkover Match Centre exported as cancelled. Options:")
+    for award in scoring.FORFEIT_AWARDS:
+        lines.extend(_option_lines(award, scoring.forfeit_detail(award), pad=11))
+    if config.forfeit_award:
+        lines.append(f"forfeit_award = {toml_value(config.forfeit_award)}")
+    else:
+        lines.append(f"# forfeit_award = {toml_value(scoring.DEFAULT_FORFEIT_AWARD)}"
+                     f"   # left off: whatever the preset above says")
+    if config.forfeit_points is not None:
+        lines.append(f"forfeit_points = {toml_value(config.forfeit_points)}")
+    else:
+        lines.append('# forfeit_points = 5   # read only by forfeit_award = "fixed"')
     lines.append("# The shape of a match is read from your scorecards, so you only")
     lines.append("# need these to pin it down or to override what was read. Named")
     lines.append("# shapes:")
@@ -2237,31 +2488,7 @@ def render(config: Config, *, competitions: object = (),
                     config._inheriting(comps, "min_sets_for_result")}
                    if split_minimum else set())
 
-    if config.multi_season or config.season_labels:
-        lines.append("[seasons]")
-        lines.append("# Pretty names for the folders under data/.")
-        # The club's labels live, and each other season's name as its cards give it
-        # commented: written live, that name came back declared, and a rewrite then
-        # made it live in the season's own section too.
-        worked_out: dict[str, str] = {}
-        for comp in comps:
-            if comp.season_key and not config.season_label_keys(comp.season_key):
-                worked_out.setdefault(comp.season_key, comp.season or comp.season_key)
-        if worked_out:
-            lines.extend(_comment_flow(
-                "A line with a # in front is the season's name as this run has it, "
-                "from its cards, its own section or its folder. Remove the # to use "
-                "it."))
-        for key in sorted({**config.season_labels, **worked_out}):
-            if key in config.season_labels:
-                label = config.season_labels[key]
-                lines.append(f"{toml_key(key)} = {toml_value(label)}")
-            else:
-                lines.append(f"# {toml_key(key)} = {toml_value(worked_out[key])}")
-        if not config.season_labels and not worked_out:
-            lines.append('# "2026-winter" = "2026 Winter Season"')
-        lines.append("")
-
+    lines.extend(_seasons_section(config, comps))
     lines.extend(_names_section(config, comps))
     lines.extend(_aliases_section(config))
     lines.extend(_namesakes_section(config, comps))
@@ -2361,10 +2588,15 @@ def _names_section(config: Config, comps: list) -> list[str]:
     # a mixed-case print among them: written live, the next run read each one back
     # as declared and moved the teams' provenance from "derived" to "mixed".
     lines = ["[team_names]"]
+    # The two guesses named are the team rule's judged costs (slugs.display_name),
+    # which a club adopting every line would otherwise take unread.
     lines.extend(_comment_flow(
         "Scorecards shout team names, so a line below with a # in front is this "
-        "program's best guess at how you write one. Correct it if it reads wrongly "
-        "and remove the # to use it."))
+        "program's best guess at how you write one. Two guesses most need checking: "
+        'an acronym of four letters or more is read as a word, so ABCD is offered '
+        'as "Abcd", and a letter A before another word can be read as the word "a", '
+        'so PLAN A ROCKETS is offered as "Plan a Rockets". Correct a line that reads '
+        "wrongly and remove the # to use it."))
     written: dict[str, str] = dict(config.team_names)
     for comp in comps:
         for slug, team in sorted(comp.teams.items()):
@@ -2468,8 +2700,46 @@ def _shared_rosters(comps: list) -> dict[str, list[str]]:
     return out
 
 
+def _seasons_section(config: Config, comps) -> list[str]:
+    """The ``[seasons]`` table, from the club's labels and the seasons found.
+
+    The club's labels live, and each other season's name as its pages show it
+    commented: written live, that name came back declared, and a rewrite then
+    made it live in the season's own section too. Asked of
+    :func:`~matchcentre.export.season_offer`, as every offer of a season's name
+    is: offered as its key stood, ``# 2026-winter = "2026-winter"`` headed the
+    front page "2026-winter" once its # was deleted, where it had read "2026
+    Winter". Nothing where neither mode nor label calls for the table.
+    """
+    from .export import season_offer
+
+    if not (config.multi_season or config.season_labels):
+        return []
+    lines = ["[seasons]", "# Pretty names for the folders under data/."]
+    worked_out: dict[str, str] = {}
+    for comp in comps:
+        if comp.season_key and not config.season_label_keys(comp.season_key):
+            worked_out.setdefault(comp.season_key, season_offer(comp))
+    if worked_out:
+        lines.extend(_comment_flow(
+            "A line with a # in front is the season's name as its pages show it, "
+            "from its cards, its own section or its folder's name made readable. "
+            "Remove the # to use it."))
+    for key in sorted({**config.season_labels, **worked_out}):
+        if key in config.season_labels:
+            label = config.season_labels[key]
+            lines.append(f"{toml_key(key)} = {toml_value(label)}")
+        else:
+            lines.append(f"# {toml_key(key)} = {toml_value(worked_out[key])}")
+    if not config.season_labels and not worked_out:
+        lines.append('# "2026-winter" = "2026 Winter Season"')
+    lines.append("")
+    return lines
+
+
 def _competition_section(config: Config, comp, matches=(), *,
                          own: list[str] | tuple = ()) -> list[str]:
+    from . import export as export_mod
     from .competition import Provenance, rounds_played_words
     from .sheet import rounds_listed
 
@@ -2503,11 +2773,26 @@ def _competition_section(config: Config, comp, matches=(), *,
             "competition a name of its own, which that line then no longer "
             "changes."))
         lines.append(f"# {season_line}")
-    else:
+    elif shown := export_mod.season_label_from(comp):
+        made = ("the year on its cards" if shown == export_mod.SEASON_FROM_DATE
+                else "its folder's name made readable")
+        lines.extend(_comment_flow(
+            f"What your association calls this season. No card prints it, so the "
+            f"dashboard shows {made} until you say, here or by the season's line "
+            f"under [seasons]. Remove the # to use it."))
+        lines.append(f"# season = {toml_value(export_mod.season_offer(comp))}")
+    elif offer := export_mod.season_offer(comp, [match.date for match in matches]):
         lines.append("# What your association calls this season. Scorecards do not")
         lines.append("# reliably print it, so the dashboard leaves it out until you")
         lines.append("# say. Remove the # to use it.")
-        lines.append(f"# season = {toml_value(comp.season or '2026 Season 2')}")
+        lines.append(f"# season = {toml_value(offer)}")
+    else:
+        # No line: a `season = ""` to uncomment declares nothing, and the review
+        # then calls it live and declared.
+        lines.extend(_comment_flow(
+            "What your association calls this season. No card printed it and no "
+            "date gave a year, so the dashboard leaves it out until you say: add "
+            "season = and the name in double quotes."))
 
     # The regular rounds with cards, counted by the function the page's number is.
     # Counted off the draw, a round it lists that nobody has played was a round
@@ -2544,25 +2829,47 @@ def _competition_section(config: Config, comp, matches=(), *,
                 f"round{'' if kept == 1 else 's'}, with a round counted a final "
                 f"only if its label names one, and cards were found for {played} "
                 f"regular rounds, so that length is not written here."))
-        said = rounds_played_words(played)
-        lines.append("# Rounds in the full season. Without it the dashboard says")
-        lines.append(f"# \"{said}\" and shows no percentage, rather")
-        lines.append("# than implying the season is over. Remove the # to use it.")
-        lines.append(f"# rounds_total = {max(played, 1)}")
+        # No number: the rounds played, behind a # the club is told to delete,
+        # declared the season over at the round it had reached, and the next
+        # round's cards then stopped the run on F3. Left bare, the line does not
+        # load until the club types the length, so no deleted # declares one.
+        lines.extend(_comment_flow(
+            f"Rounds in the full season, which no card prints. Without it the "
+            f"dashboard says \"{rounds_played_words(played)}\" and shows no "
+            f"percentage, rather than implying the season is over. Type after the "
+            f"= the number of rounds your association's draw gives the season, "
+            f"then remove the #."))
+        lines.append("# rounds_total =")
 
+    names = listed_teams(comp, declared)
     if declared and declared.teams_declared:
         # As the club spelt and ordered it. Written from the names the page shows, it
         # took in [team_names] too, and "The Rockets" declared a team no card names.
-        names = list(declared.teams)
         lines.extend(toml_lines(f"teams = {toml_value(names)}", width=WIDTH))
     else:
-        names = [comp.teams[slug].name for slug in sorted(comp.teams)]
+        # A list a declared draw closed is the draw's teams, and not the cards':
+        # said to be read from the cards, it left out a team they name.
         block, uncomment = commented_teams(names)
+        source = ("your declared draw names them" if comp.teams_declared
+                  else "read from the cards")
         lines.extend(_comment_flow(
-            "The full list of teams in this competition, as read from the cards. "
-            "Declaring it tells the program the list is complete, which lets it "
-            "handle byes and flag a misspelt team instead of inventing a new one."))
+            f"The full list of teams in this competition, as {source}. "
+            f"Declaring it tells the program the list is complete, which lets it "
+            f"handle byes and flag a misspelt team instead of inventing a new one."))
         lines.extend(_comment_flow(f"Check it, then {uncomment} it to use it."))
+        lines.extend(block)
+    if comp.strangers:
+        # The teams the cards name that the list lacks, which F8 reports, as the
+        # list that adds them: one of them may be another spelling of a team in
+        # it, which an [aliases] line settles instead, so behind a #.
+        block, uncomment = commented_teams([*names, *comp.strangers])
+        many = len(comp.strangers) > 1
+        lines.extend(_comment_flow(
+            f"The cards also name {in_words(comp.strangers)}, which the list "
+            f"above lacks. If {'those are teams' if many else 'that is a team'} "
+            f"of this competition and not another spelling of one in it, this "
+            f"is the list with {'them' if many else 'it'}: delete the list "
+            f"above and {uncomment} this one."))
         lines.extend(block)
     lines.extend(_rule_lines(declared))
     if own:
@@ -2576,13 +2883,11 @@ def _competition_section(config: Config, comp, matches=(), *,
     # for the teams it named nobody for, commented. Built from the teams alone, a
     # declared captain on no card came back as its slug, and one for a team with no
     # card yet did not come back at all. Written live, a mark came back declared.
-    captains = {}
-    for slug in sorted(comp.teams):
-        team = comp.teams[slug]
-        if not team.captain or team.captain_declared:
-            continue
-        player = team.player(team.captain)
-        captains[team.name] = player.name if player else team.captain
+    # Where the marks name another than the club does, that is offered under the
+    # club's line, commented (4.431's proposal says so of each).
+    offers = captain_offers(comp, declared)
+    captains = {offer.key: offer.value for offer in offers if offer.instead is None}
+    instead = {offer.key: offer for offer in offers if offer.instead is not None}
     stated = declared.captains if declared else {}
     captains.update(stated)
     lines.append("")
@@ -2601,6 +2906,15 @@ def _competition_section(config: Config, comp, matches=(), *,
         for team_name in sorted(captains):
             line = f"{toml_key(team_name)} = {toml_value(captains[team_name])}"
             lines.append(line if team_name in stated else f"# {line}")
+            if team_name in instead:
+                # The team as the courts' comment names it, and not the club's key.
+                lines.extend(_comment_flow(
+                    f"The (C) marks on the cards of "
+                    f"{comp.team_by_name(team_name).name} name "
+                    f"{instead[team_name].value}. To use that, delete the line "
+                    f"above and the # below."))
+                lines.append(f"# {toml_key(team_name)} = "
+                             f"{toml_value(instead[team_name].value)}")
     else:
         # "On the cards that count": a washout's (C), or a (C) on a night not yet
         # played, names nobody, so a folder of those alone prints marks and has none.
@@ -2609,17 +2923,9 @@ def _competition_section(config: Config, comp, matches=(), *,
         for team_name in sorted(names):
             lines.append(f"# {toml_key(team_name)} = \"\"")
 
-    # Courts and codes are printed on no card, so all there is of either is what
-    # was declared: written from the declaration, and not from the teams it reached.
-    courts = dict(declared.courts) if declared else {}
-    lines.append("")
-    lines.append(f"[competitions.{toml_key(comp.id)}.courts]")
-    lines.append("# Each team's home court, if your club plays on numbered courts.")
-    for team_name in sorted(courts):
-        lines.append(f"{toml_key(team_name)} = {courts[team_name]}")
-    if not courts:
-        for team_name in sorted(names)[:1]:
-            lines.append(f"# {toml_key(team_name)} = 1")
+    lines.extend(_courts_lines(comp, declared, names))
+    # Codes are printed on no card, so all there is of them is what was declared:
+    # written from the declaration, and not from the teams it reached.
     lines.extend(_table_lines(
         comp.id, "codes", declared.codes if declared else {},
         "# The number your published draw gives each team."))
@@ -2807,6 +3113,149 @@ def _rule_lines(declared: CompetitionConfig | None) -> list[str]:
     lines = ["# Where this competition's rules differ from those under [rules]."]
     for name, value in set_here:
         lines.extend(toml_lines(f"{name} = {toml_value(value)}", width=WIDTH))
+    return lines
+
+
+class Offer(NamedTuple):
+    """A line the cards give one team, as the writer offers it behind a ``#``.
+
+    ``key`` is the line's key: the club's own where its table has a line for the
+    team, and the team's name on the page where it has none. ``value`` is what the
+    cards give, and ``instead`` the club's value it differs from, ``None`` where
+    the club gives none. ``named`` is whether that value names anybody: a captain
+    typed as ``""`` names nobody, so the summary counts the line as one the club
+    names none in, and still shows it, since the offer goes in its place.
+    """
+    key: str
+    value: object
+    instead: object = None
+    named: bool = True
+
+
+def _keyed(comp: "Competition", table: dict) -> dict[str, str]:
+    """Each team of *comp* that a table keyed by team name has a line for: its
+    slug, and the key. Read by the rule discovery reads those tables by, any key
+    that slugs to the team's slug or its name's, so the line offered beside is the
+    line that was read; the first such key, as there."""
+    keyed: dict[str, str] = {}
+    for key in sorted(table):
+        team = comp.team_by_name(key)
+        if team is not None:
+            keyed.setdefault(team.slug, key)
+    return keyed
+
+
+def captain_offers(comp: "Competition",
+                   declared: CompetitionConfig | None) -> list[Offer]:
+    """The captain the (C) marks give each team where the club names none, or
+    another: the one rule the writer writes them by and the proposal's summary
+    counts them by. A declared captain the marks also name is offered nothing."""
+    stated = declared.captains if declared else {}
+    keyed = _keyed(comp, stated)
+    offers = []
+    for slug in sorted(comp.teams):
+        team = comp.teams[slug]
+        key = keyed.get(slug)
+        # Where the club names nobody, the captain is the marks'.
+        if key is None and team.captain and not team.captain_declared:
+            offers.append(Offer(team.name, _player_named(team, team.captain)))
+        elif key is not None and team.captain_marked and (
+                team.captain != team.captain_marked or not team.captain_declared):
+            offers.append(Offer(key, _player_named(team, team.captain_marked),
+                                stated[key], named=bool(team.captain_declared)))
+    return offers
+
+
+def _player_named(team, slug: str) -> str:
+    """A player of *team* by the name the page gives him, else his slug."""
+    player = team.player(slug)
+    return player.name if player else slug
+
+
+def court_offers(comp: "Competition",
+                 declared: CompetitionConfig | None) -> list[Offer]:
+    """The court each team's home cards print most, where the club declares none
+    or another: as :func:`captain_offers` is for the captains."""
+    stated = declared.courts if declared else {}
+    keyed = _keyed(comp, stated)
+    offers = []
+    for slug in sorted(comp.teams):
+        team = comp.teams[slug]
+        court, key = team.court_printed, keyed.get(slug)
+        if court is None:
+            continue
+        if key is None:
+            offers.append(Offer(team.name, court))
+        elif stated[key] != court:
+            offers.append(Offer(key, court, stated[key]))
+    return offers
+
+
+def _courts_printed(team) -> str:
+    """``court 2 on 2 cards and court 4 on 1``: each court a team's home cards
+    print, and on how many of them, the one printed most first."""
+    (court, cards), *rest = team.courts_printed
+    return in_words([f"court {court} on {cards} card{'' if cards == 1 else 's'}",
+                     *(f"court {other} on {more}" for other, more in rest)])
+
+
+def _courts_lines(comp: "Competition", declared: CompetitionConfig | None,
+                  names: list[str]) -> list[str]:
+    """The ``courts`` table: the club's lines live, and the cards' behind a ``#``.
+
+    Its comment said "Courts and codes are printed on no card", and so the table
+    offered no court the cards gave, and the court 1 of the first team, which no
+    card gave. Every card prints the court it was played on, and a team's home
+    cards print its home court, so each team with a home card is offered the court
+    those cards print most (:attr:`~matchcentre.competition.Team.court_printed`),
+    in the words the captains are offered in. Where they print more than one, a
+    comment says each and how often, and a tie is offered no court; a team with no
+    home card is offered nothing, and a court the club declares is written back
+    live and not offered again, with the cards' court below it where that differs.
+    A competition no card of which printed a court keeps the example line.
+    """
+    courts = dict(declared.courts) if declared else {}
+    lines = ["", f"[competitions.{toml_key(comp.id)}.courts]"]
+    if not any(team.courts_printed for team in comp.teams.values()):
+        lines.append("# Each team's home court, if your club plays on numbered courts.")
+        for team_name in sorted(courts):
+            lines.append(f"{toml_key(team_name)} = {courts[team_name]}")
+        if not courts:
+            for team_name in sorted(names)[:1]:
+                lines.append(f"# {toml_key(team_name)} = 1")
+        return lines
+    if courts:
+        lines.extend(_comment_flow(
+            "As this file had them, with any others read from the court printed on "
+            "each team's home cards written with a # in front. Remove the # to use "
+            "one."))
+    else:
+        lines.extend(_comment_flow(
+            "Read from the court printed on each team's home cards. Correct a line "
+            "if it reads wrongly and remove the # to use it."))
+    entries: dict[str, list[str]] = {
+        key: [f"{toml_key(key)} = {toml_value(courts[key])}"] for key in courts}
+    for offer in court_offers(comp, declared):
+        team = comp.team_by_name(offer.key)
+        line = f"# {toml_key(offer.key)} = {offer.value}"
+        if offer.instead is not None:
+            entries[offer.key].extend([*_comment_flow(
+                f"The home cards of {team.name} print {_courts_printed(team)}. To "
+                f"use court {offer.value}, delete the line above and the # below."),
+                line])
+        else:
+            entries[offer.key] = [*(_comment_flow(
+                f"The home cards of {team.name} print {_courts_printed(team)}.")
+                if len(team.courts_printed) > 1 else []), line]
+    keyed = _keyed(comp, courts)
+    for slug in sorted(comp.teams):
+        team = comp.teams[slug]
+        if team.courts_printed and team.court_printed is None and slug not in keyed:
+            entries[team.name] = _comment_flow(
+                f"The home cards of {team.name} print {_courts_printed(team)}, so "
+                f"no court is offered for it.")
+    for key in sorted(entries):
+        lines.extend(entries[key])
     return lines
 
 

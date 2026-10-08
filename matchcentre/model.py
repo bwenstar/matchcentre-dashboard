@@ -28,7 +28,8 @@ from .scoring import Ruleset
 
 __all__ = ["NO_OPPONENT", "SetStatus", "MatchStatus", "Outcome", "Rating",
            "SetResult", "Match", "SIDES", "other_side", "forfeit_set_winner",
-           "forfeit_match_winner", "stopped_short"]
+           "forfeit_match_winner", "stopped_short", "names_miscounted",
+           "all_blank", "retired_set_winner", "rubber_award"]
 
 # The opponent of a team with a bye. Deliberately unsluggable — `slugs.slugify`
 # can never produce a string containing '*' — so it cannot collide with a real
@@ -50,13 +51,15 @@ def forfeit_set_winner(*, home_forfeit: bool, away_forfeit: bool,
                        home_games: int, away_games: int) -> str | None:
     """Who a forfeited rubber goes to, from the two things the row prints.
 
-    The ticked box first, and whatever the games say. A rubber one side did not
-    turn up for is 0-0 on the card — there were no games to print — so a winner
-    taken from the games alone credits nobody, which loses the side that turned up
-    a set it won, and then puts the set rows in contradiction with the card's own
-    printed TOTAL row. That is the same rule :attr:`Match.winner` has always
-    applied to a whole-match forfeit, where the ticked box decides however the
-    games read, and for the same reason.
+    The ticked box first, and whatever the games say. A rubber ticked Forfeit can
+    print anything: 0-0 where one side did not turn up, or the games it was played
+    to before it was awarded. A winner taken from the games credits nobody on the
+    first and the wrong side on the second, and either way puts the set rows in
+    contradiction with the card's own printed TOTAL row, which counts the rubber a
+    love set to the side that stayed (:func:`rubber_award` scores those games).
+    That is the same rule :attr:`Match.winner` has always applied to a
+    whole-match forfeit, where the ticked box decides however the games read, and
+    for the same reason.
 
     The games are the fallback and not the answer. A row whose ``Forfeit`` boxes
     were ticked on both sides names nobody, and the printed scoreline is then the
@@ -76,6 +79,67 @@ def forfeit_set_winner(*, home_forfeit: bool, away_forfeit: bool,
     if home_games == away_games:
         return None
     return "home" if home_games > away_games else "away"
+
+
+def retired_set_winner(*, home_retired: bool, away_retired: bool) -> str | None:
+    """Who a retired rubber goes to: the side whose ``Retired`` box is not ticked.
+
+    Read off the box and never off the games (4.422). Match Centre gives the set to
+    the side that stayed, and a side can retire ahead: on a real card the home side
+    retired leading 4-2 and the away side was given the set. Both boxes, or neither
+    read, name nobody, so the set is nobody's as an unfinished one is.
+    """
+    if home_retired != away_retired:
+        return "away" if home_retired else "home"
+    return None
+
+
+def rubber_award(*, status: "SetStatus", home_games: int, away_games: int,
+                 games_to_win: int, award: str = "full-games",
+                 home_forfeit: bool = False, away_forfeit: bool = False,
+                 home_retired: bool = False, away_retired: bool = False,
+                 given_up_by: str | None = None) -> tuple[str, int, int] | None:
+    """The side a rubber not played out is awarded to, and the games it scores at.
+
+    ``(side, home games, away games)``, or ``None`` for a rubber scored as printed
+    and decided by its games. Match Centre's own TOTAL row is the arithmetic
+    (4.421, 4.422): a rubber ticked Forfeit against one side is a love set at the
+    set rule's ``games_to_win`` to the side that stayed, whatever the row prints; a
+    rubber one side retired from goes to the other, its games raised to
+    ``games_to_win`` where they were fewer, the retiring side keeping its own; and
+    a match given up whole (``given_up_by``, of the Match Forfeited box, a walkover
+    or every row) makes every rubber a love set to the side that came, rows with
+    play on them included, as Match Centre totals a walkover over play 24-0.
+
+    Under ``as-played`` the printed games stand: the ticked box still names the
+    side the set goes to, which is the fact the card states, and only the games
+    raised to win it are the award. ``fixed`` prices a match's points, and a
+    rubber has none of its own to fix, so it scores the rubber as ``full-games``
+    does. A row ticked against both sides or neither, a row retired from with both
+    boxes or neither, a row left incomplete and a row played are ``None``: no side
+    was given the rubber.
+
+    One function for every reading of a row: discover scores the match by it, and
+    validate's tally, the reader's check of the TOTAL row and the writer that
+    prints the TOTAL row of every fixture ask it too.
+    """
+    if award != "as-played" and given_up_by in SIDES:
+        came = other_side(given_up_by)
+        return (came, games_to_win, 0) if came == "home" else (came, 0, games_to_win)
+    if status is SetStatus.FORFEIT and home_forfeit != away_forfeit:
+        came = "away" if home_forfeit else "home"
+        if award == "as-played":
+            return came, home_games, away_games
+        return (came, games_to_win, 0) if came == "home" else (came, 0, games_to_win)
+    stayed = (retired_set_winner(home_retired=home_retired, away_retired=away_retired)
+              if status is SetStatus.RETIRED else None)
+    if stayed is None:
+        return None
+    if award == "as-played":
+        return stayed, home_games, away_games
+    if stayed == "home":
+        return stayed, max(home_games, games_to_win), away_games
+    return stayed, home_games, max(away_games, games_to_win)
 
 
 def forfeit_match_winner(forfeited_by: str | None) -> str | None:
@@ -103,14 +167,34 @@ class SetStatus(Enum):
 def stopped_short(status: SetStatus) -> bool:
     """Whether a set's box says it stopped before it finished: retired or incomplete.
 
-    Such a set is nobody's, however its printed games stand, since a lead is not a
-    win. :attr:`SetResult.completed` asks this, and so do validate's check of the
+    Such a set is not won on its printed games, however they stand, since a lead
+    is not a win: one side's Retired box gives the set to the other
+    (:func:`retired_set_winner`, 4.422), and otherwise it is nobody's.
+    :attr:`SetResult.completed` asks this, and so do validate's check of the
     row straight off the page, the reader's bound on the sets each side can have
     won and the TOTAL row the card writer prints. The reader's bound credited the
     leader, and a card whose verb and tick gave the match on the finished sets was
     two F6 errors (4.217).
     """
     return status in (SetStatus.RETIRED, SetStatus.INCOMPLETE)
+
+
+def names_miscounted(named: int, unnamed: int, places: int) -> bool:
+    """Whether a side's names on a row disagree with the places its rubber has.
+
+    *named* is the names read, *unnamed* the side's cells printing Match Centre's
+    ``Unspecified player``, and *places* the players the rubber is for, 2 for
+    doubles and 1 for singles. A placeholder is a place Match Centre says nobody
+    filled, so it counts towards the places; it is not a name, so it never makes
+    a side naming too many right. A side naming nobody is not asked: an empty side
+    is ``set-players-missing``'s, and says nothing of a row's marker. The reader's
+    note on a row and validate's ``set-player-count`` both ask this, so a pair
+    naming one player above the placeholder is held to the same count by each
+    (4.447, 4.448). Rejected: holding names and placeholders to the places
+    exactly, which tells a singles cell of one name beside the placeholder that
+    it is short of a name.
+    """
+    return bool(named) and (named > places or named + unnamed < places)
 
 
 class MatchStatus(Enum):
@@ -167,14 +251,43 @@ class SetResult:
     # card, and reducing it here would throw away the only evidence that it did.
     home_forfeit: bool = False
     away_forfeit: bool = False
+    # Each side's name cells printing Match Centre's 'Unspecified player', which the
+    # reader keeps beside the names (card.ParsedSet), so a place nobody filled is
+    # told apart from a name that failed to read. Not exported.
+    home_unnamed: int = 0
+    away_unnamed: int = 0
+    # Which side's `Retired` box this row ticks, in the same voice: the side that
+    # retired cannot be read off the games, since a side can retire ahead (4.422).
+    home_retired: bool = False
+    away_retired: bool = False
+    # The games the row prints, where an award scored the set at others (4.421),
+    # and the side the award gave it to; `None` for a set scored as printed.
+    printed: tuple[int, int] | None = None
+    awarded_to: str | None = None
+
+    @property
+    def printed_home_games(self) -> int:
+        """The home games the card prints on this row, played or not awarded."""
+        return self.home_games if self.printed is None else self.printed[0]
+
+    @property
+    def printed_away_games(self) -> int:
+        return self.away_games if self.printed is None else self.printed[1]
 
     @property
     def completed(self) -> bool:
         """Whether the score is a finished set under this set's own rule.
 
         A forfeited or retired set is *not* complete on the score even when the
-        printed games look like a win, which is why status is checked first.
+        printed games look like a win, which is why status is checked first. A set
+        awarded to a side is complete, whatever its box (4.421), and so is a set one
+        side retired from (4.422): Match Centre gives it to the side that stayed.
         """
+        if self.awarded_to is not None:
+            return True
+        if (self.status is SetStatus.RETIRED and retired_set_winner(
+                home_retired=self.home_retired, away_retired=self.away_retired)):
+            return True
         if stopped_short(self.status):
             return False
         if self.status is SetStatus.FORFEIT:
@@ -200,8 +313,17 @@ class SetResult:
 
         A forfeited set goes to whoever did not forfeit, which the card records by
         ticking the forfeiter's box beside the row. :func:`forfeit_set_winner` is
-        what reads it.
+        what reads it. A retired set goes to whoever did not retire,
+        :func:`retired_set_winner`, and a set an award scored to the side it was
+        awarded to.
         """
+        if self.awarded_to is not None:
+            return self.awarded_to
+        if self.status is SetStatus.RETIRED:
+            stayed = retired_set_winner(home_retired=self.home_retired,
+                                        away_retired=self.away_retired)
+            if stayed is not None:
+                return stayed
         if self.status is SetStatus.FORFEIT:
             return forfeit_set_winner(home_forfeit=self.home_forfeit,
                                       away_forfeit=self.away_forfeit,
@@ -220,6 +342,9 @@ class SetResult:
 
     def players_for(self, side: str) -> tuple[str, ...]:
         return self.home_players if side == "home" else self.away_players
+
+    def unnamed_for(self, side: str) -> int:
+        return self.home_unnamed if side == "home" else self.away_unnamed
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +428,42 @@ class Match:
         return sum(s.away_games for s in self.sets)
 
     @property
+    def printed_home_games(self) -> int:
+        """The home games the rows print, the games played on court (4.421)."""
+        return sum(s.printed_home_games for s in self.sets)
+
+    @property
+    def printed_away_games(self) -> int:
+        return sum(s.printed_away_games for s in self.sets)
+
+    def nobody_played(self, result: SetResult) -> bool:
+        """Whether nobody played this row: printed 0-0 under a forfeit (4.289).
+
+        A forfeit of the row, or of the whole match by its box or a walkover (a
+        night told by its rows is a forfeit of every row). Asked of the games
+        printed, since an award scores such a row a love set. Nobody is credited
+        with it: it pays its players no match, no set and no games (stats), and
+        validate does not ask it for games or names. A retired row left 0-0 on a
+        night not given up whole is not one: somebody came to play it. Under a
+        forfeit of the whole match every row left 0-0 is, whatever its box, as
+        validate asked before (4.420).
+        """
+        if result.printed_home_games or result.printed_away_games:
+            return False
+        return (result.status is SetStatus.FORFEIT
+                or self.status is MatchStatus.FORFEIT)
+
+    @property
+    def no_rubber_played(self) -> bool:
+        """Whether not one rubber of this night was played: every row nobody's.
+
+        Such a night happened and counts, but has no games, sets or margin to
+        compare with a night that was played, so the overview leaves it out of
+        those tiles (4.421).
+        """
+        return bool(self.sets) and all(self.nobody_played(s) for s in self.sets)
+
+    @property
     def home_sets(self) -> int:
         return sum(1 for s in self.sets if s.winner == "home")
 
@@ -358,6 +519,34 @@ class Match:
         if self.status is MatchStatus.FORFEIT:
             return self.forfeited_by in SIDES
         return self.completed_sets >= self.fmt.min_sets_for_result
+
+    @property
+    def given_up_by(self) -> str | None:
+        """The side that gave this whole match up, however its card tells it.
+
+        Three tellings of one night (4.33): the Match Forfeited box, which a
+        walkover's card (4.418) is built with too, the status ``FORFEIT`` and
+        ``forfeited_by`` naming one side; and no box, every row 0-0 and ticked
+        Forfeit against the same one side, which keeps the status the card's boxes
+        give it, since nobody ticked the box. ``None`` for any other night: a row
+        with games on it, a row ticked against the other side, against both or not
+        at all, a box naming no one side, and a night that does not count.
+
+        Derived, beside ``status`` and ``forfeited_by`` as printed, so pricing
+        (:meth:`points_for`) and the checks that ask of the side that never came
+        (``validate._never_came``) read one answer for every telling.
+        """
+        if self.status is MatchStatus.FORFEIT:
+            return self.forfeited_by if self.forfeited_by in SIDES else None
+        if not self.counts_as_played or not self.sets:
+            return None
+        sides = set()
+        for s in self.sets:
+            if (s.status is not SetStatus.FORFEIT or s.home_forfeit == s.away_forfeit
+                    or s.printed_home_games or s.printed_away_games):
+                return None
+            sides.add("home" if s.home_forfeit else "away")
+        return sides.pop() if len(sides) == 1 else None
 
     @property
     def short_of_result(self) -> bool:
@@ -416,6 +605,10 @@ class Match:
         A night of rubbers one side never came for is played, and counts, and is
         still level at nothing: not a game was played on it. So the games have to
         be more than none, or a walkover is "level on games, decided on sets".
+
+        The games scored, not printed (4.421): the result is decided on them, so a
+        night level on the games its rows print and not on the love sets it was
+        scored at was not decided on sets.
         """
         return (self.counts_as_played and self.home_games > 0
                 and self.home_games == self.away_games)
@@ -475,13 +668,16 @@ class Match:
         # Under as-played the box decides the outcome and the outcome is paid, but
         # a scheme whose points are the sets won pays nothing for an outcome, and
         # nobody wins a set on a forfeit's empty rows. So such a scheme prices
-        # every whole-match forfeit here, whatever `forfeit_award` says.
-        if (self.status is MatchStatus.FORFEIT
+        # every whole-match forfeit here, whatever `forfeit_award` says. Asked of
+        # who gave the match up, not of the status, so a night told by its rows is
+        # paid as the box would pay it (4.420).
+        gave_up = self.given_up_by
+        if (gave_up is not None
                 and (self.rules.forfeit_award != "as-played"
                      or self.rules.points_are_sets_won)):
-            if outcome is Outcome.WIN:
-                return self.rules.forfeit_win_points(self.fmt)
-            return self.rules.forfeit_loss_points(self.fmt)
+            if side == gave_up:
+                return self.rules.forfeit_loss_points(self.fmt)
+            return self.rules.forfeit_win_points(self.fmt)
         return self.rules.points(
             outcome=outcome.value,
             games_won=self.games_for(team),
@@ -509,3 +705,18 @@ class Match:
     def key(self) -> tuple[str, str, str]:
         """The identity a fixture has: one match per round per pairing."""
         return (self.round, self.home, self.away)
+
+
+def all_blank(sets) -> bool:
+    """Whether every set row is blank: no games on it, and no rubber awarded by it.
+
+    The one test of a card with nothing on it a result could be made of, which is
+    what :func:`~matchcentre.discover._match_status` records as ``UNPLAYED`` and
+    what :func:`~matchcentre.validate.records_nothing` asks of a match not
+    counted, cancelled or not (4.424). A rubber awarded counts as much as a game
+    does, asked of :attr:`SetResult.winner`, so a row ticked Forfeit against one
+    side is not blank, and whatever the club's rules credit a rubber is asked
+    where it is decided. No rows is not blank: nothing was read to be blank.
+    """
+    return bool(sets) and not any(s.home_games or s.away_games or s.winner
+                                  for s in sets)

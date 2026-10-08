@@ -35,15 +35,17 @@ from decimal import Decimal
 
 from .card import (Card, ParsedSet, Rejection, letterhead_key, letterhead_spellings,
                    majority_letterhead, states_no_result, thin_card_prints, verb_side)
+from .card import Totals
 from .competition import (DRAW_DECLARED, Club, Competition, Provenance,
                           fixture_sort_key, is_finals_label,
                           round_number, years_played)
 from .format import MatchFormat, SetRule, completed, plausible, set_winner
 from .config import DEFAULT_PATH, toml_key, toml_value
-from .discover import called_off, nearest_team, where as _where
-from .model import (SIDES, Match, MatchStatus, SetResult, SetStatus,
-                    forfeit_match_winner, forfeit_set_winner, stopped_short)
-from .scorecard import _box, box_award, forfeit_award
+from .discover import FiledElsewhere, called_off, nearest_team, where as _where
+from .model import (SIDES, Match, MatchStatus, SetResult, SetStatus, all_blank,
+                    forfeit_match_winner, forfeit_set_winner, names_miscounted,
+                    retired_set_winner, rubber_award, stopped_short)
+from .scorecard import _given_up, box_award, forfeit_award
 from .scoring import Ruleset, ScoringError
 from .scoring import UNPLAYED_AVERAGE, UNPLAYED_ZERO
 from .sheet import (AHEAD, COMPARED, Comparison, TeamCheck, at_places, by_weeks,
@@ -51,8 +53,9 @@ from .sheet import (AHEAD, COMPARED, Comparison, TeamCheck, at_places, by_weeks,
 from .scope import echoed, in_words
 from .slugs import did_you_mean, unslug
 from .stats import (card_against_rest, chronological, fixtures_without_cards,
-                    ladder_matches, points_ledger, rests_standing, rounds_present,
-                    same_result, same_scoreline, unlisted_words)
+                    ladder_counts, ladder_detail, ladder_matches, ladder_played,
+                    ladder_state_of, rests_standing, rounds_present, same_result,
+                    same_scoreline, unlisted_words)
 from .stats import duplicates
 
 __all__ = ["Issue", "Report", "validate", "ERROR", "WARNING"]
@@ -127,6 +130,9 @@ class _Context:
     # The config file the build read, by its name, for the advice that sends a
     # club to a line of it.
     config_name: str = DEFAULT_PATH
+    # The cards of this competition's teams filed under another of its season, for
+    # card-missing to say where a card went (discover.FiledElsewhere).
+    strays: tuple[FiledElsewhere, ...] = ()
 
     @property
     def rule(self) -> SetRule:
@@ -185,13 +191,26 @@ class _Context:
         where = _where(card)
         return all(m.counts_as_played for m in self.matches if m.source == where)
 
+    def records_nothing(self, card: Card) -> bool:
+        """Whether *card* is the card of a match :func:`records_nothing` says of.
+
+        Asked by every finding that would say again, of such a card, what its
+        ``no-result`` says (4.424). A card no match was made from records what it
+        prints: nothing says otherwise, and a finding passed by for want of a
+        match would record the absence of evidence as evidence.
+        """
+        where = _where(card)
+        return any(records_nothing(m, card) for m in self.matches
+                   if m.source == where)
+
 
 def validate(matches: Sequence[Match], competition: Competition, *,
              club: Club | None = None, cards: Sequence[Card] = (),
              rejected: Sequence[Rejection] = (),
              seasons_mode: str = "single",
              sheet: Comparison | None = None,
-             config_name: str = DEFAULT_PATH) -> Report:
+             config_name: str = DEFAULT_PATH,
+             strays: Sequence[FiledElsewhere] = ()) -> Report:
     """Run every check. Findings come back in a deterministic order.
 
     ``cards`` are the parsed scorecards behind ``matches`` and ``rejected`` the
@@ -220,11 +239,16 @@ def validate(matches: Sequence[Match], competition: Competition, *,
     (:func:`~matchcentre.config.named`), and like ``seasons_mode`` it changes advice
     and never a verdict: a finding that sends the club to a line of it names that
     file. The name and never the path, since a finding reaches ``season.json``.
+
+    ``strays`` are the cards of this competition's teams that discovery filed under
+    another competition of the season (:class:`~matchcentre.discover.FiledElsewhere`),
+    and like ``club`` they only change what a finding can explain: a declared
+    fixture one fits is still a card this competition has not got.
     """
     context = _Context(matches=tuple(matches), competition=competition, club=club,
                        cards=tuple(cards), rejected=tuple(rejected),
                        multi_season=seasons_mode == "multi", sheet=sheet,
-                       config_name=config_name)
+                       config_name=config_name, strays=tuple(strays))
     issues: list[Issue] = []
     for check in (
         _check_inputs,              # what could not be checked at all
@@ -234,6 +258,7 @@ def validate(matches: Sequence[Match], competition: Competition, *,
         _check_totals,              # totals-mismatch
         _check_verb,                # verb-mismatch
         _check_forfeit_rows,        # forfeit-contradicted
+        _check_walkover_rows,       # walkover-rows-played
         _check_unnamed,             # players-unrecorded
         _check_competition_id,      # wrong-competition
         _check_letterhead,          # foreign-card
@@ -274,17 +299,23 @@ def _nobody_played(match: Match, result: SetResult) -> bool:
     """Whether a row is one of a whole-match forfeit's, left with no games on it.
 
     Nobody played such a row, and the Match Forfeited box says so, so it is missing
-    neither games nor names: ``set-no-games`` and ``set-players-missing`` both ask
-    this and pass it by. Asked of the status, which is the reader's one reading of
-    the box, and not of the box itself; asked of the row too, so a forfeit given up
-    after a rubber is still held to the names on the rubber it played. Only
-    ``set-no-games`` asked at first, and the same card with the absent side's names
-    left blank, as a card for a side that never came would be, was measured with a
-    ``set-players-missing`` warning naming every row. ``roster-missing`` asks it
-    too, of every row, through :func:`_never_came`.
+    neither games nor names: ``set-no-games``, ``set-players-missing`` and
+    ``set-player-count`` all ask this and pass it by, the last since 4.446, which
+    measured it telling a forfeit's absent side that a rubber nobody played was a
+    doubles set short of a name. Asked of the status, which is the reader's one
+    reading of the box, and not of the box itself; asked of the row too, so a
+    forfeit given up after a rubber is still held to the names on the rubber it
+    played. Only ``set-no-games`` asked at first, and the same card with the absent
+    side's names left blank, as a card for a side that never came would be, was
+    measured with a ``set-players-missing`` warning naming every row.
+    ``roster-missing`` asks it too, of every row, through :func:`_never_came`. A
+    night given up by its rows alone, every row 0-0 and ticked Forfeit against one
+    side, is one too (:attr:`~matchcentre.model.Match.given_up_by`, 4.420), though
+    nobody ticked the box. :meth:`~matchcentre.model.Match.nobody_played` is the
+    one rule, of the games printed, since a forfeit's rows are scored as love sets
+    (4.421), and the players' figures ask it too.
     """
-    return (match.status is MatchStatus.FORFEIT
-            and result.home_games == 0 and result.away_games == 0)
+    return match.nobody_played(result)
 
 
 def _never_came(match: Match, side: str) -> bool:
@@ -293,9 +324,11 @@ def _never_came(match: Match, side: str) -> bool:
     Such a side owes no roster: with nobody on court for it there is no fill-in to
     detect and nobody to rate, and ``roster-missing`` said both of the filed card
     of a side that never came, which prints nobody in its block. A forfeit given up
-    after a rubber is not one, since somebody played that rubber.
+    after a rubber is not one, since somebody played that rubber. Asked of
+    :attr:`~matchcentre.model.Match.given_up_by`, so a night told by its rows,
+    every row ticked Forfeit against *side*, owes no roster either (4.288).
     """
-    return (match.forfeited_by == side
+    return (match.given_up_by == side
             and all(_nobody_played(match, result) for result in match.sets))
 
 
@@ -307,8 +340,13 @@ def _set_finished(parsed: ParsedSet, rule: SetRule) -> bool:
     the page, so the totals and verb checks do not inherit a mistake made while
     turning cards into matches. A forfeited set is complete; a retirement or a
     washout is not, however final its printed games look, by
-    :func:`~matchcentre.model.stopped_short`, the rule the model asks.
+    :func:`~matchcentre.model.stopped_short`, the rule the model asks, unless one
+    side's Retired box says who retired, which gives the other side the set
+    (:func:`~matchcentre.model.retired_set_winner`, 4.422).
     """
+    if parsed.status is SetStatus.RETIRED and retired_set_winner(
+            home_retired=parsed.home_retired, away_retired=parsed.away_retired):
+        return True
     if stopped_short(parsed.status):
         return False
     if parsed.status is SetStatus.FORFEIT:
@@ -326,6 +364,11 @@ def _set_winner_of(parsed: ParsedSet, rule: SetRule) -> str | None:
                                   away_forfeit=parsed.away_forfeit,
                                   home_games=parsed.home_games,
                                   away_games=parsed.away_games)
+    if parsed.status is SetStatus.RETIRED:
+        stayed = retired_set_winner(home_retired=parsed.home_retired,
+                                    away_retired=parsed.away_retired)
+        if stayed is not None:
+            return stayed
     if not _set_finished(parsed, rule):
         return None
     return set_winner(parsed.home_games, parsed.away_games, rule)
@@ -336,6 +379,36 @@ def _card_tally(card: Card, rule: SetRule) -> tuple[int, int, int, int]:
     winners = [_set_winner_of(s, rule) for s in card.sets]
     return (winners.count("home"), card.home_games, card.away_games,
             winners.count("away"))
+
+
+def _card_scored(card: Card, rule: SetRule,
+                 rules: Ruleset) -> tuple[int, int, int, int]:
+    """The set rows' ``(home_sets, home_games, away_games, away_sets)`` as scored.
+
+    :func:`_card_tally` reckons the games printed; this reckons them as the match
+    is scored, by :func:`~matchcentre.model.rubber_award` under the club's set rule
+    and forfeit award, the one rule discover scores the match by: a rubber ticked
+    Forfeit against one side a love set to the other (4.421), a set one side
+    retired from the other's at the games to win it (4.422), and every rubber of a
+    match given up whole a love set to the side that came. Under ``as-played`` the
+    two reckonings are one. A TOTAL row may total either (4.421).
+    """
+    given_up = card.forfeit_side if card.forfeit_side in SIDES else None
+    winners: list[str | None] = []
+    home_games = away_games = 0
+    for parsed in card.sets:
+        award = rubber_award(
+            status=parsed.status, home_games=parsed.home_games,
+            away_games=parsed.away_games, games_to_win=rule.games_to_win,
+            award=rules.forfeit_award, home_forfeit=parsed.home_forfeit,
+            away_forfeit=parsed.away_forfeit, home_retired=parsed.home_retired,
+            away_retired=parsed.away_retired, given_up_by=given_up)
+        side, home, away = award or (_set_winner_of(parsed, rule),
+                                     parsed.home_games, parsed.away_games)
+        winners.append(side)
+        home_games += home
+        away_games += away
+    return (winners.count("home"), home_games, away_games, winners.count("away"))
 
 
 def rows_against_box(card: Card, rule: SetRule, rules: Ruleset) -> str:
@@ -351,7 +424,7 @@ def rows_against_box(card: Card, rule: SetRule, rules: Ruleset) -> str:
     ``verb-mismatch`` and ``totals-mismatch``, F6 and ``tools/doctor.py`` ask
     (4.134).
     """
-    forfeited, came = card.forfeited_by, forfeit_match_winner(card.forfeited_by)
+    forfeited, came = card.forfeit_side, forfeit_match_winner(card.forfeit_side)
     if came is None or not all(_set_finished(s, rule) for s in card.sets):
         return ""
     tally = h_sets, h_games, a_games, a_sets = _card_tally(card, rule)
@@ -373,7 +446,7 @@ def _rows_say(tally: tuple[int, int, int, int], rules: Ruleset, side: str) -> st
 def _restates_award(card: Card, fmt: MatchFormat) -> bool:
     """Whether a forfeit's printed TOTAL row totals what its box awards under *fmt*."""
     return card.totals.present and not card.totals.differs_on(
-        box_award(card.forfeited_by, fmt))
+        box_award(card.forfeit_side, fmt))
 
 
 def _results_printed(card: Card, fmt: MatchFormat) -> tuple[
@@ -391,7 +464,7 @@ def _results_printed(card: Card, fmt: MatchFormat) -> tuple[
             ("winner-tick", f"the {card.winner_tick} Match Winner tick",
              card.winner_tick),
             ("totals", "the printed TOTAL row",
-             forfeit_match_winner(card.forfeited_by)
+             forfeit_match_winner(card.forfeit_side)
              if _restates_award(card, fmt) else None))
 
 
@@ -401,7 +474,7 @@ def restating_box(card: Card, fmt: MatchFormat) -> tuple[tuple[str, str], ...]:
     What F6 passes by and ``forfeit-contradicted`` names on a card that finding
     reports, and what ``tools/doctor.py`` says it names (4.134).
     """
-    came = forfeit_match_winner(card.forfeited_by)
+    came = forfeit_match_winner(card.forfeit_side)
     return tuple((name, what) for name, what, side in _results_printed(card, fmt)
                  if side == came)
 
@@ -473,6 +546,22 @@ def _check_status(ctx: _Context) -> list[Issue]:
     missing card instead. The forfeit case is the exception and an error: the
     predecessor scored a match flagged forfeit with neither side ticked by paying
     the forfeit-win value to *both* teams.
+
+    A cancelled card that also names a winner, by its Match Winner tick or its
+    verb, is still a washout, and still one warning: the Match Cancelled tick
+    decides, which is a club's own rule and how Match Centre itself exports a
+    night stopped by rain with the side ahead ticked. The warning says what else
+    the card claims and that the tick decides (:func:`overruled`). It was an
+    error (4.233), whose advice to untick one box and export again a club cannot
+    take of a card Match Centre wrote; and a walkover, which ticks Match Cancelled
+    too, is a forfeit and not this (4.418, 4.419).
+
+    A card that records nothing (:func:`records_nothing`: every row 0-0, and no
+    tick, verb or TOTAL row saying otherwise) is told this one finding, and the
+    findings that would say it again stand down (4.424). A night not called off
+    is told what its rows read and, if it was played, to enter its result in
+    Match Centre and export the card again, which is what a club can do about
+    it. A night called off is told nothing more, since nothing needs doing.
     """
     issues: list[Issue] = []
     for match in chronological(ctx.matches, ctx.competition.rounds):
@@ -495,34 +584,51 @@ def _check_status(ctx: _Context) -> list[Issue]:
                         f"{_label(match)}: the card's Match Disputed box is ticked, "
                         "but the match has no result for the ladder to count.",
                 subject=_label(match), detail=match.source))
-        if (match.status is MatchStatus.BYE or match.decided
-                or match.status is MatchStatus.FORFEIT):
+        if not _no_result(match):
             continue        # a bye is normal; an unattributed forfeit is said above
         need = match.fmt.min_sets_for_result
         why = (f"only {match.completed_sets} of the {need} sets needed for a result "
                "are complete"
                if match.short_of_result
                else f"recorded as {match.status.value}")
-        claims = ([claim for card in ctx.cards if _where(card) == match.source
-                   for claim in winner_claims(card)]
+        cards = [card for card in ctx.cards if _where(card) == match.source]
+        claims = ([claim for card in cards for claim in winner_claims(card)]
                   if match.status is MatchStatus.CANCELLED else [])
-        but = (f", but {in_words(claims)}. A match called off has no winner, "
-               "so the card contradicts itself." if claims else ".")
+        # A night not called off whose rows record nothing may be one nobody
+        # entered a result for: the one finding about it says what it read, so a
+        # misread card is caught, and what to do if it was played (4.424).
+        blank = (match.status is not MatchStatus.CANCELLED
+                 and any(records_nothing(match, card) for card in cards))
         issues.append(Issue(
-            rule="no-result", severity=ERROR if claims else WARNING,
-            message=f"{_label(match)}: {why}, so it is not counted in the ladder"
-                    f"{but}",
+            rule="no-result", severity=WARNING,
+            message=f"{_label(match)}: {why}, so it is not counted in the ladder."
+                    + (f" {overruled(claims)}." if claims else "")
+                    + (" Every set row reads 0-0: if the match was played, enter "
+                       "its result in Match Centre and export the card again."
+                       if blank else ""),
             subject=_label(match), detail=match.source))
     return issues
+
+
+def _no_result(match: Match) -> bool:
+    """Whether *match* is one ``no-result`` names: no bye, forfeit or result.
+
+    The condition :func:`_check_status` names a match by, and
+    :func:`records_nothing` asks it, so the findings that stand down on a card
+    recording nothing do so only where ``no-result`` is said of it.
+    """
+    return not (match.status is MatchStatus.BYE or match.decided
+                or match.status is MatchStatus.FORFEIT)
 
 
 def winner_claims(card: Card) -> list[str]:
     """What a card says won its match: its tick, then its verb.
 
-    Asked of the card of a match called off. A night called off has no winner, so
-    a card that ticks a Match Winner box or prints a verb naming a side contradicts
-    its own Match Cancelled box, and one of the two is wrong: either the ladder
-    leaves out a result, or the card names a winner nobody had. That is a question
+    Asked of the card of a match called off. A night called off has no winner, and
+    the Match Cancelled tick decides: Match Centre exports a washout with the side
+    ahead when play stopped ticked and named by the verb, and a club's rules give
+    both teams the washout (4.419). So what the card claims is said beside the
+    washout's one warning, and overruled (:func:`overruled`). That is a question
     about the card's own boxes, not its rows, which stay held to nothing. A drawn
     verb, ``VS`` and a word nobody knows name no winner. :func:`_check_status`
     finds the card by the name it shares with its match. Public, as
@@ -536,6 +642,53 @@ def winner_claims(card: Card) -> list[str]:
     if side in SIDES:
         claims.append(_verb_says(card.verb, side))
     return claims
+
+
+def overruled(claims: Sequence[str]) -> str:
+    """:func:`winner_claims` as a sentence the Match Cancelled tick overrules.
+
+    "The card also ticks away as Match Winner and the verb 'DEF. BY' means away
+    won; the Match Cancelled tick decides", with no full stop: the washout's
+    ``no-result`` warning and the doctor's verdict both say it, in these words.
+    """
+    said = in_words(claims).replace("the card ticks", "the card also ticks", 1)
+    return f"{said[:1].upper()}{said[1:]}; the Match Cancelled tick decides"
+
+
+def records_nothing(match: Match, card: Card) -> bool:
+    """Whether the card of *match* records no result and no play, nor claims one.
+
+    Such a card is told one finding, ``no-result`` (4.424). The findings that
+    would each say again, in their own words, that nothing on it was played or
+    confirmed stand down on it: F6's warning that nothing confirms its rows,
+    ``totals-missing``, ``players-unrecorded``, and ``verb-absent`` on a disputed
+    card, which counts. Each asks this, through :meth:`_Context.records_nothing`,
+    so a check added later asks it too. So do the page's notes on its match,
+    which leave off the reader's two warnings that a cross-check is missing
+    (``export._notes``).
+
+    Three things. ``no-result`` names the match (:func:`_no_result`): a walkover
+    or a forfeit has a result, and is not one. Every row is blank
+    (:func:`~matchcentre.model.all_blank`, the test the build records a night
+    unplayed by), so no game is left unverified. And the card claims no result:
+    it is called off, which holds nothing it prints to its rows, or it prints
+    ``VS`` or no verb and no cross-check disagrees with its rows. Blank rows are
+    what a misread card looks like too, and a verb naming a result, a word
+    nobody reads or a tick over them is the evidence of it, so such a card keeps
+    every finding. Public, as :func:`winner_claims` is, because
+    ``tools/doctor.py`` says what the build does with one card.
+
+    Rejected: asking only the first two, which told a card printing ``DEFEATS``
+    and ticking home over rows read 0-0 to enter a result it prints, and took its
+    ``totals-missing``; and a second blank test of the card's own rows, which
+    would part from the build's the day either changed what a rubber is worth.
+    """
+    if not _no_result(match) or not all_blank(match.sets):
+        return False
+    if called_off(card):
+        return True
+    return (all(check.agrees for check in card.cross_checks_available)
+            and (not card.verb or states_no_result(card.verb)))
 
 
 # --- F4: every card is accounted for ------------------------------------
@@ -589,6 +742,11 @@ def _check_cross_checks(ctx: _Context) -> list[Issue]:
     Each says what it was held to, the set rows or a forfeit's box, and a verb
     printed that confirms nothing is said as printed, from the check (4.152,
     4.133).
+
+    A card that prints no check is told so, unless it records nothing
+    (:func:`records_nothing`): with every row 0-0 and no result counted, no
+    figure rests on its rows for a check to confirm, and its ``no-result`` is
+    the one finding about it (4.424).
     """
     issues: list[Issue] = []
     by_verb = {issue.subject for issue in _check_verb(ctx)
@@ -616,7 +774,7 @@ def _check_cross_checks(ctx: _Context) -> list[Issue]:
                         f"trustworthy.",
                 subject=_where(card),
                 detail=check.detail or f"{check.name} check failed"))
-        if not card.cross_checks_available:
+        if not card.cross_checks_available and not ctx.records_nothing(card):
             nouns = {"totals": "TOTAL row", "verb": "result verb",
                      "winner-tick": "winner tick"}
             issues.append(Issue(
@@ -637,6 +795,8 @@ def _check_totals(ctx: _Context) -> list[Issue]:
     rule = ctx.rule
     for card in ctx.in_play:
         if not card.totals.present:
+            if ctx.records_nothing(card):
+                continue    # no game to verify, and no-result says so (4.424)
             issues.append(Issue(
                 rule="totals-missing", severity=WARNING,
                 message=f"{_where(card)}: no TOTAL row was read, so the computed "
@@ -654,12 +814,29 @@ def _check_totals(ctx: _Context) -> list[Issue]:
                   "away games": printed.away_games, "away sets": printed.away_sets}
         wrong = [name for name, value in stated.items()
                  if value is not None and value != computed[name]]
-        if (wrong and card.forfeited_by
+        if (wrong and card.forfeit_side
                 and rows_against_box(card, rule, ctx.competition.rules)
                 and _restates_award(card, ctx.competition.fmt)):
             # A row totalling the box's award over rows against the box is the
             # rows' finding's, which names it (4.134); asked, as the award is, only
-            # where a box is ticked.
+            # where a box is ticked, or a walkover read.
+            continue
+        if wrong and card.walkover_by:
+            # A walkover's TOTAL row is what made it one: the award, under the
+            # club's set rule, whatever the rows hold, which the reader held it to
+            # under every rule it might be (4.418). So it is held to that alone.
+            award = box_award(card.walkover_by, ctx.competition.fmt)
+            against = printed.differs_on(award)
+            if against:
+                issues.append(Issue(
+                    rule="totals-mismatch", severity=ERROR,
+                    message=f"{_where(card)}: the printed TOTAL row and "
+                            f"{_given_up(card)} disagree on {in_words(against)}.",
+                    subject=_where(card),
+                    detail=f"printed {printed.describe()}; a walkover's TOTAL row "
+                           f"totals every rubber to "
+                           f"{forfeit_match_winner(card.walkover_by)} as a love "
+                           f"set, {award.describe()} under {rule.name}"))
             continue
         # Asked only where a box is ticked, so a played card's row needs nothing
         # of the context but the set rule.
@@ -685,14 +862,30 @@ def _check_totals(ctx: _Context) -> list[Issue]:
                            f"set, {award.describe()}, or the set rows, sets "
                            f"{h_sets}-{a_sets} games {h_games}-{a_games}"))
             continue
-        if wrong:
+        # A TOTAL row may total the rows as printed or as they are scored, a
+        # forfeited rubber a love set and a retired one raised to win (4.421,
+        # 4.422), which is Match Centre's own arithmetic. Held whole to one or the
+        # other, and the disagreement named against the nearer. Asked only of a
+        # card a rubber of which was not played out, so a played card's row
+        # still needs nothing of the context but the set rule.
+        scored = (h_sets, h_games, a_games, a_sets)
+        if wrong and (card.forfeit_side in SIDES or any(
+                s.status is not SetStatus.PLAYED for s in card.sets)):
+            scored = _card_scored(card, rule, ctx.competition.rules)
+        against = printed.differs_on(Totals(*scored)) if wrong else []
+        if wrong and against:
+            rows = f"sets {h_sets}-{a_sets} games {h_games}-{a_games}"
+            if scored != (h_sets, h_games, a_games, a_sets):
+                rows = (f"sets {scored[0]}-{scored[3]} games {scored[1]}-"
+                        f"{scored[2]} as scored under {rule.name}, or {rows} as "
+                        "printed")
+            named = against if len(against) < len(wrong) else wrong
             issues.append(Issue(
                 rule="totals-mismatch", severity=ERROR,
                 message=f"{_where(card)}: the printed TOTAL row and the set rows "
-                        f"disagree on {in_words(wrong)}.",
+                        f"disagree on {in_words(named)}.",
                 subject=_where(card),
-                detail=f"printed {printed.describe()}; set rows add to "
-                       f"sets {h_sets}-{a_sets} games {h_games}-{a_games}"))
+                detail=f"printed {printed.describe()}; set rows add to {rows}"))
     return issues
 
 
@@ -728,10 +921,11 @@ def _check_verb(ctx: _Context) -> list[Issue]:
                         "cross-checked against it.",
                 subject=_where(card), detail=card.verb))
             continue
-        if not ctx.counts(card):
+        if not ctx.counts(card) or ctx.records_nothing(card):
             # `no-result` already names a match that counts for nothing, and it has
             # no counted result for a verb to state or to leave out. Two findings
-            # about one fact teach a club to skim the list.
+            # about one fact teach a club to skim the list. A disputed card that
+            # records nothing counts, and has no rows for the verb to check (4.424).
             continue
         if expected is None:
             issues.append(Issue(
@@ -743,26 +937,33 @@ def _check_verb(ctx: _Context) -> list[Issue]:
                         f"could not run is this one cross-check against them.",
                 subject=_where(card), detail=card.verb))
             continue
-        h_sets, h_games, a_games, a_sets = _card_tally(card, ctx.rule)
-        if card.forfeited_by in SIDES:
+        # Held to the rows as printed or as the match is scored, a forfeited
+        # rubber a love set and a retired one raised to win (4.421, 4.422), as the
+        # TOTAL row is: Match Centre's verb states the result its award gives, and
+        # a card filled in as played, as 0.1.0's writer filled one, the result the
+        # games printed give. A verb either bears out agrees, as the reader's does.
+        scored = _card_scored(card, ctx.rule, rules)
+        printed = _card_tally(card, ctx.rule)
+        if card.forfeit_side in SIDES:
             # A whole-match forfeit goes to whoever did not forfeit, whatever the
             # games say — they are often 0-0 on a card nobody turned up for, and
             # comparing the verb against them would report every forfeit as a
-            # contradiction. Match.winner asks the same function.
-            actual = forfeit_match_winner(card.forfeited_by)
+            # contradiction. Match.winner asks the same function. A walkover is
+            # one (4.418).
+            actual = forfeit_match_winner(card.forfeit_side)
             # A verb its rows agree with, against the box, is the rows' finding's,
             # which names it (4.134).
             if actual != expected and not (
-                    expected == card.forfeited_by
+                    expected == card.forfeit_side
                     and rows_against_box(card, ctx.rule, rules)):
                 issues.append(Issue(
                     rule="verb-mismatch", severity=ERROR,
                     message=f"{_where(card)}: {_verb_says(card.verb, expected)}, "
-                            f"but the card says {card.forfeited_by} forfeited the "
+                            f"but the card says {card.forfeit_side} forfeited the "
                             "match.",
                     subject=_where(card),
                     detail=f"verb {card.verb!r} says {expected}; "
-                           f"{_box(card.forfeited_by)} gives the match to {actual}"))
+                           f"{_given_up(card)} gives the match to {actual}"))
             continue
         finished = sum(1 for s in card.sets if _set_finished(s, ctx.rule))
         if finished < fmt.min_sets_for_result:
@@ -773,17 +974,27 @@ def _check_verb(ctx: _Context) -> list[Issue]:
                         "for a result are complete.",
                 subject=_where(card), detail=card.verb))
             continue
-        winner = rules.outcome(home_games=h_games, away_games=a_games,
-                              home_sets=h_sets, away_sets=a_sets)
-        actual = "draw" if winner is None else winner
-        if actual != expected:
-            issues.append(Issue(
-                rule="verb-mismatch", severity=ERROR,
-                message=f"{_where(card)}: {_verb_says(card.verb, expected)}, but "
-                        f"the set rows give {actual}.",
-                subject=_where(card),
-                detail=f"verb {card.verb!r} says {expected}; " + _rows_say(
-                    (h_sets, h_games, a_games, a_sets), rules, actual)))
+        gives = {}
+        for h_sets, h_games, a_games, a_sets in (scored, printed):
+            winner = rules.outcome(home_games=h_games, away_games=a_games,
+                                  home_sets=h_sets, away_sets=a_sets)
+            gives[h_sets, h_games, a_games, a_sets] = (
+                "draw" if winner is None else winner)
+        if expected in gives.values():
+            continue
+        actual, rows = gives[scored], _rows_say(scored, rules, gives[scored])
+        if printed != scored:
+            # Named against both, as a TOTAL row of neither is.
+            rows += (f" as scored under {ctx.rule.name}, and "
+                     f"{_rows_say(printed, rules, gives[printed])} as printed")
+            if gives[printed] != actual:
+                actual = f"{actual} as scored and {gives[printed]} as printed"
+        issues.append(Issue(
+            rule="verb-mismatch", severity=ERROR,
+            message=f"{_where(card)}: {_verb_says(card.verb, expected)}, but "
+                    f"the set rows give {actual}.",
+            subject=_where(card),
+            detail=f"verb {card.verb!r} says {expected}; {rows}"))
     return issues
 
 
@@ -804,11 +1015,11 @@ def _check_forfeit_rows(ctx: _Context) -> list[Issue]:
         reading = rows_against_box(card, ctx.rule, ctx.competition.rules)
         if not reading:
             continue
-        forfeited, came = card.forfeited_by, forfeit_match_winner(card.forfeited_by)
+        forfeited, came = card.forfeit_side, forfeit_match_winner(card.forfeit_side)
         printed = _results_printed(card, ctx.competition.fmt)
         box = [what for _, what in restating_box(card, ctx.competition.fmt)]
         rows = [what for _, what, side in printed if side == forfeited]
-        detail = f"{reading}; {_box(forfeited)} gives the match to {came}"
+        detail = f"{reading}; {_given_up(card)} gives the match to {came}"
         detail += as_restating(box)
         if rows:
             detail += (f", and {in_words(rows)} {'give' if len(rows) > 1 else 'gives'}"
@@ -820,6 +1031,63 @@ def _check_forfeit_rows(ctx: _Context) -> list[Issue]:
                     "sets and the match.",
             subject=_where(card), detail=detail))
     return issues
+
+
+def _check_walkover_rows(ctx: _Context) -> list[Issue]:
+    """A walkover whose set rows hold play its own TOTAL row does not count.
+
+    Match Centre writes a match one side gave up as Match Cancelled ticked beside
+    a winner and a TOTAL row awarding the side that came every rubber as a love
+    set, and on one of a club's real walkovers it did so over rows of play,
+    2-6, 6-4, 3-6 and 0-0, on which the side ticked won one rubber and lost two.
+    The match is scored as the walkover (4.418), so the rows count for nothing in
+    its result, and this says so once, as a warning, naming what the card prints
+    that makes it one, where the rows hold play the TOTAL row leaves out
+    (:func:`uncounted_play`). Not where ``forfeit-contradicted`` reports the rows,
+    which is the same fact said as an error (:func:`rows_against_box`).
+    """
+    issues: list[Issue] = []
+    for card in ctx.in_play:
+        side = card.walkover_by
+        if (side is None or not uncounted_play(card)
+                or rows_against_box(card, ctx.rule, ctx.competition.rules)):
+            continue
+        came = forfeit_match_winner(side)
+        said = ["the TOTAL row"]
+        if card.winner_tick in SIDES:
+            said.append(f"the {card.winner_tick} Match Winner tick")
+        if card.verb:
+            said.append(f"the verb {card.verb!r}")
+        issues.append(Issue(
+            rule="walkover-rows-played", severity=WARNING,
+            message=f"{_where(card)}: the card ticks Match Cancelled and prints the "
+                    f"TOTAL row of a walkover conceded by {side}, every rubber to "
+                    f"{came} as a love set, but its set rows hold games "
+                    f"{card.home_games}-{card.away_games} that the TOTAL row does "
+                    f"not count. The match is scored as the walkover "
+                    f"{in_words(said)} describe, a forfeit by {side}.",
+            subject=_where(card),
+            detail="set rows " + ", ".join(f"{s.home_games}-{s.away_games}"
+                                           for s in card.sets)
+                   + f"; printed {card.totals.describe()}"))
+    return issues
+
+
+def uncounted_play(card: Card) -> bool:
+    """Whether a walkover's set rows hold play its printed TOTAL row leaves out.
+
+    Its TOTAL row credits the side that came every rubber as a love set and the
+    side that gave the match up nothing, so rows of love sets to the side that
+    came, or of love sets and 0-0, hold no game it leaves out, and a game to the
+    side that gave up, or more to the side that came than the award, is one.
+    Asked of a card :attr:`~matchcentre.card.Card.walkover_by` names, whose every
+    TOTAL cell is printed. The one rule, which ``walkover-rows-played`` and
+    ``tools/doctor.py`` ask (4.418). Rejected: asking whether the rows hold any
+    games, which told four love sets to the side that came that their TOTAL row
+    of 4-0 and 24-0 does not count the 24-0 it is.
+    """
+    return (card.home_games > card.totals.home_games
+            or card.away_games > card.totals.away_games)
 
 
 # --- name cells nobody filled in ----------------------------------------
@@ -835,23 +1103,35 @@ def _check_unnamed(ctx: _Context) -> list[Issue]:
     itself. Dropping it silently would be the other failure: a card thinned out
     with no trace is exactly the kind of quiet loss this program refuses
     elsewhere. So each card that lost names says so once, with the count, whether
-    or not the match was played.
+    or not the match was played, unless the card records nothing at all.
 
     The usual cause is a fixture called off before the teams were entered, in
-    which case nothing needs doing. The one worth acting on is a card that *was*
-    played and still prints the placeholder, because those rubbers have games but
-    no one to credit them to: fix the entry in Match Centre and re-export.
+    which case nothing needs doing: every row reads 0-0, and its ``no-result`` is
+    the one finding about it (:func:`records_nothing`, 4.424). The one worth
+    acting on is a card that *was* played and still prints the placeholder,
+    because those rubbers have games but no one to credit them to: fix the entry
+    in Match Centre and re-export.
     """
     issues: list[Issue] = []
     for card in ctx.cards:
         cells = sum(s.unnamed for s in card.sets)
-        if not cells:
+        if not cells or ctx.records_nothing(card):
             continue
         rows = sum(1 for s in card.sets if s.unnamed)
-        played = "; this match was called off" if card.cancelled else \
-                 ("; those rubbers have games but nobody to credit them to"
+        # Worded from what the match is, not from the Cancelled box: a walkover
+        # ticks it and is not called off, and nor is a forfeit ticking it too
+        # (4.418).
+        played = "; this match was called off" if called_off(card) else \
+                 (_uncredited(card)
                   if any(s.unnamed and (s.home_games or s.away_games)
-                         for s in card.sets) else "")
+                         for s in card.sets) else
+                  "; this match was forfeited whole, so nobody played those "
+                  "rubbers" if card.forfeit_side else "")
+        # Which side printed it, so the club knows whose entry to fix (4.448).
+        sides = [f"{side} in rubber(s) "
+                 + ", ".join(str(s.index + 1) for s in card.sets
+                             if s.unnamed_for(side))
+                 for side in SIDES if any(s.unnamed_for(side) for s in card.sets)]
         issues.append(Issue(
             rule="players-unrecorded", severity=WARNING,
             message=f"{_where(card)}: {cells} name cell(s) across "
@@ -859,9 +1139,48 @@ def _check_unnamed(ctx: _Context) -> list[Issue]:
                     f"'Unspecified player' placeholder rather than a person, so no "
                     f"name was recorded for them{played}.",
             subject=_where(card),
-            detail=f"{cells} placeholder cell(s) in rubber(s) "
-                   f"{', '.join(str(s.index + 1) for s in card.sets if s.unnamed)}"))
+            detail=f"{cells} placeholder cell(s): {'; '.join(sides)}"))
     return issues
+
+
+def _uncredited(card: Card) -> str:
+    """What a played card's placeholder cells leave credited to nobody, by side.
+
+    A side printing the placeholder and naming nobody on a rubber with games has
+    nobody to credit them to; a pair naming one player above it has half the
+    rubber's games credited to nobody, since a doubles rubber is shared by its
+    two places. Said per side and rubber, so the club knows which entry to fix in
+    Match Centre: one clause said nobody was credited on every such rubber, of
+    pairs whose one name is credited, the detail naming no side (4.448). Said of
+    the rubbers with games alone, which a night stopped before its last rubber
+    or a forfeit given up after the rubbers it played leaves some of: a rubber
+    left 0-0 has no games to credit, and "those rubbers have games" was said of
+    it too.
+    """
+    nobody: list[str] = []
+    half: list[str] = []
+    for side in SIDES:
+        placed = [s for s in card.sets
+                  if s.unnamed_for(side) and (s.home_games or s.away_games)]
+        none = [str(s.index + 1) for s in placed if not s.players_for(side)]
+        one = [str(s.index + 1) for s in placed
+               if s.doubles and len(s.players_for(side)) == 1]
+        if none:
+            nobody.append(f"the {side} side of rubber(s) {in_words(none)}")
+        if one:
+            half.append(f"the {side} side of rubber(s) {in_words(one)}")
+    clauses = []
+    if nobody:
+        clauses.append(f"nobody to credit them to on {in_words(nobody)}")
+    if half:
+        clauses.append(f"only one player of the pair to credit on {in_words(half)}, "
+                       "so half of those games are credited to nobody")
+    if not clauses:
+        return ""
+    lead = ("those rubbers have games but"
+            if all(s.home_games or s.away_games for s in card.sets if s.unnamed)
+            else "those rubbers with games have")
+    return f"; {lead} " + ", and ".join(clauses)
 
 
 # --- every card belongs to the competition being scored -----------------
@@ -890,10 +1209,11 @@ def _check_competition_id(ctx: _Context) -> list[Issue]:
 def _check_letterhead(ctx: _Context) -> list[Issue]:
     """Cards printing a letterhead the rest of this competition's cards do not.
 
-    Routing is by what a card prints -- its division and the weekday of its own
-    date -- which is what makes this worth saying: a PDF exported from *another*
-    club's Tuesday B division lands in this one, names teams nobody here has heard
-    of, and takes a ladder position. The letterhead is the only thing on the card
+    Routing is by what a card prints -- its division and the night its
+    competition line names, else the weekday of its own date -- which is what
+    makes this worth saying: a PDF exported from *another* club's Tuesday B
+    division lands in this one, names teams nobody here has heard of, and takes a
+    ladder position. The letterhead is the only thing on the card
     that says so, and it is otherwise settled by a majority vote whose losers
     nothing records.
 
@@ -1285,6 +1605,25 @@ def _disagreement(group: Sequence[Match]) -> str:
 # --- set counts and games, against the format and the set rule ----------
 
 
+def _says_awarded(ctx: _Context, match: Match) -> bool:
+    """Whether *match*'s card prints a TOTAL row of its rows as scored, not printed.
+
+    Match Centre's own arithmetic counts a rubber ticked Forfeit against one side
+    as a love set to the other, so a TOTAL row that totals the rows that way, every
+    printed cell, and does not total the games printed, is the card saying the
+    tick is meant (4.423). A card with no TOTAL row, or one that totals the games
+    on court, says nothing of it.
+    """
+    rules = ctx.competition.rules
+    for card in ctx.cards:
+        if _where(card) == match.source and card.totals.present:
+            return (not card.totals.differs_on(
+                        Totals(*_card_scored(card, ctx.rule, rules)))
+                    and bool(card.totals.differs_on(
+                        Totals(*_card_tally(card, ctx.rule)))))
+    return False
+
+
 def _check_sets(ctx: _Context) -> list[Issue]:
     """The card's shape and scores against the competition's own format.
 
@@ -1297,6 +1636,10 @@ def _check_sets(ctx: _Context) -> list[Issue]:
     fmt = ctx.competition.fmt
     rule = ctx.rule
     expected_keys = list(fmt.keys)
+    # The rows that stopped with nothing ticked, by the rule each is told under,
+    # told once for the competition after the loop (_stopped_rows). Each with the
+    # key and score the loop has already said it by.
+    stopped: dict[str, list[tuple[Match, str, str]]] = defaultdict(list)
     for match in ctx.playable:
         present = [s.slot.key for s in match.sets]
         missing = [key for key in expected_keys if key not in present]
@@ -1318,8 +1661,11 @@ def _check_sets(ctx: _Context) -> list[Issue]:
                 subject=_label(match), detail=match.source))
         for result in match.sets:
             where = f"{_label(match)} {result.slot.key}"
-            score = f"{result.home_games}-{result.away_games}"
-            if not plausible(result.home_games, result.away_games, rule):
+            # The games printed, which are what was played and what was read; a
+            # rubber's award scores it otherwise (4.421).
+            home, away = result.printed_home_games, result.printed_away_games
+            score = f"{home}-{away}"
+            if not plausible(home, away, rule):
                 issues.append(Issue(
                     rule="set-implausible", severity=ERROR,
                     message=f"{where}: {score} cannot happen under "
@@ -1329,25 +1675,44 @@ def _check_sets(ctx: _Context) -> list[Issue]:
                 continue
             if result.status is SetStatus.FORFEIT:
                 # A row whose two halves name different winners: a finished set on
-                # the games, and the rubber credited by the tick to the side that
-                # lost it. Asked of the set as scored rather than of the ticks, so
-                # that which side forfeited is still decided in one place; it can
-                # only be the side whose box was ticked. A warning, because a card
-                # can mean it (a rubber awarded against the side that won it on
-                # court), and it is reported whatever the TOTAL row says: a TOTAL
-                # row counted off the games is its own finding, and correcting it
-                # leaves this row contradicting itself.
-                on_court = set_winner(result.home_games, result.away_games, rule)
-                if on_court is not None and on_court != result.winner:
+                # the games printed, and the rubber credited by the tick to the
+                # side that lost it. Asked of the set as scored rather than of the
+                # ticks, so that which side forfeited is still decided in one
+                # place; it can only be the side whose box was ticked. A warning,
+                # because a card can mean it (a rubber awarded against the side
+                # that won it on court, as against an ineligible player) or have
+                # ticked the wrong side, and the games on court are not what is
+                # scored. Not asked where the card's own TOTAL row totals the
+                # rubber as the love set it is scored and not the games printed
+                # (_says_awarded): the card has said what it meant (4.423).
+                on_court = set_winner(home, away, rule)
+                if (on_court is not None and on_court != result.winner
+                        and not _says_awarded(ctx, match)):
                     team = match.team_for(on_court)
+                    other = match.team_for(result.winner)
+                    scored = (f"credited to {other}"
+                              if ctx.competition.rules.forfeit_award == "as-played"
+                              else f"scored {rule.games_to_win}-0 to {other} as "
+                                   "forfeited")
                     issues.append(Issue(
                         rule="set-forfeit-contradicted", severity=WARNING,
                         message=f"{where}: the row ticks Forfeit against {team} "
-                                f"and prints {score}, a set {team} won. The tick "
-                                "decides, so the set is credited to "
-                                f"{match.team_for(result.winner)}; check which of "
-                                "the two the card meant.",
+                                f"and prints {score}, a set {team} won on court. "
+                                f"The tick decides, so the set is {scored}; check "
+                                "which of the two the card meant.",
                         subject=where, detail=match.source))
+            if (result.status is SetStatus.RETIRED and result.awarded_to is None
+                    and result.home_retired and result.away_retired):
+                # Both Retired boxes: which side retired, and so whose set it is,
+                # cannot be read from the card (4.422). One warning, of the one
+                # row, where a box on one side gives the other the set.
+                issues.append(Issue(
+                    rule="set-retired-both", severity=WARNING,
+                    message=f"{where}: both sides' Retired boxes are ticked, so "
+                            "who retired cannot be read from the card, and nobody "
+                            f"is credited the set; it counts at the {score} "
+                            "printed.",
+                    subject=where, detail=match.source))
             if not result.unfinished_unmarked:
                 continue      # finished, or a box on the row says why it stopped
             # Warnings, not errors, and the reasoning is the severity rule itself: a
@@ -1375,27 +1740,11 @@ def _check_sets(ctx: _Context) -> list[Issue]:
             if result.home_games == 0 and result.away_games == 0:
                 if _nobody_played(match, result):
                     continue
-                issues.append(Issue(
-                    rule="set-no-games", severity=WARNING,
-                    message=f"{where}: no games on the row at all and no box "
-                            "ticked, so nobody is credited the set. A rubber that "
-                            "was never played reads like this when the card does "
-                            "not say so.",
-                    subject=where, detail=match.source))
+                stopped["set-no-games"].append((match, where, score))
             elif result.home_games == result.away_games:
-                issues.append(Issue(
-                    rule="set-tied", severity=WARNING,
-                    message=f"{where}: level at {score}, so nobody won the set and "
-                            "nothing on the card says why it stopped.",
-                    subject=where, detail=match.source))
+                stopped["set-tied"].append((match, where, score))
             else:
-                issues.append(Issue(
-                    rule="set-unfinished", severity=WARNING,
-                    message=f"{where}: {score} is not a finished set under "
-                            f"{rule.name} ({rule.describe()}) and is not marked "
-                            "forfeit, retired or incomplete, so nobody is credited "
-                            "the set.",
-                    subject=where, detail=match.source))
+                stopped["set-unfinished"].append((match, where, score))
         # The one predicate the ladder uses to leave this match out and the page
         # uses to explain it, asked here so the three cannot disagree about which
         # cards they are talking about.
@@ -1408,7 +1757,78 @@ def _check_sets(ctx: _Context) -> list[Issue]:
                         "row was misread. The night is left out of the ladder until "
                         "it is.",
                 subject=_label(match), detail=match.source))
+    issues.extend(_stopped_rows(name, stopped[name], rule)
+                  for name in ("set-no-games", "set-tied", "set-unfinished")
+                  if stopped[name])
     return issues
+
+
+def _stopped_rows(name: str, rows: list[tuple[Match, str, str]],
+                  rule: SetRule) -> Issue:
+    """One competition's rows that stopped with no box ticked, told once a rule.
+
+    ``set-no-games``, ``set-tied`` and ``set-unfinished`` were one finding a
+    rubber, so a club whose play stops at a fixed time whatever the score had one
+    a night: on one club's export, 69 of its 267 warnings, none of them about a
+    match left undecided (row 4.434). Now each rule is one finding for the
+    competition, listing its rubbers with their scores in the order the matches
+    were played, and their cards as the detail, each once. That order is the
+    loop's, :attr:`_Context.playable`'s: round 9 before round 10, which neither a
+    card's path nor its round as text puts first.
+
+    A lone rubber is the finding it always was, its key the subject the message
+    begins with. A list of rubbers is no key: printed as a subject it would be the
+    list again, under ``subject:`` in the report and in brackets on the page, so
+    the listed finding has none, as the F8 warning listing a derived team list has
+    none. Its key is the competition and the rule, of which there is one.
+
+    A row of a match left short of a result is on the list with the rest, as what
+    the row says is the same; ``no-result`` tells the match. Rejected: folding per
+    card, which folds nothing where every played match finishes three or four sets
+    of four, as on that export; per round, which folds only a round whose matches
+    stopped under the same rule, 12 findings to 11 on the fictional cards it was
+    measured on, where per competition is 6; a ``[rules]`` key to silence the three,
+    a club rule no card states, under which a misread row would go unreported; and
+    set-tied told as set-unfinished, as a row left level and a row with no games on
+    it are told apart for what each is (4.453).
+    """
+    if len(rows) == 1:
+        match, where, score = rows[0]
+        if name == "set-no-games":
+            message = (f"{where}: no games on the row at all and no box ticked, so "
+                       "nobody is credited the set. A rubber that was never "
+                       "played reads like this when the card does not say so.")
+        elif name == "set-tied":
+            message = (f"{where}: level at {score}, so nobody won the set and "
+                       "nothing on the card says why it stopped.")
+        else:
+            message = (f"{where}: {score} is not a finished set under {rule.name} "
+                       f"({rule.describe()}) and is not marked forfeit, retired or "
+                       "incomplete, so nobody is credited the set.")
+        return Issue(rule=name, severity=WARNING, message=message, subject=where,
+                     detail=match.source)
+    # No score where there are no games: "0-0" is the misreading set-no-games
+    # exists to avoid.
+    listed = in_words(where if name == "set-no-games" else f"{where} {score}"
+                      for _, where, score in rows)
+    cards = list(dict.fromkeys(match.source for match, _, _ in rows))
+    if name == "set-no-games":
+        message = (f"{len(rows)} rubbers have no games on their rows at all and no "
+                   f"box ticked, so nobody is credited them: {listed}. A rubber "
+                   "that was never played reads like this when the card does not "
+                   "say so.")
+    elif name == "set-tied":
+        # Two of a card's rows can be the competition's only ones, and its match
+        # is then short of a result too.
+        on = "the card" if len(cards) == 1 else "the cards"
+        message = (f"{len(rows)} rubbers were left level, so nobody won those sets "
+                   f"and nothing on {on} says why they stopped: {listed}.")
+    else:
+        message = (f"{len(rows)} rubbers stopped short of a finished set under "
+                   f"{rule.name} ({rule.describe()}) and are not marked forfeit, "
+                   f"retired or incomplete, so nobody is credited them: {listed}.")
+    return Issue(rule=name, severity=WARNING, message=message,
+                 detail=", ".join(cards))
 
 
 # --- set rows against the rosters --------------------------------------
@@ -1434,16 +1854,29 @@ def _check_set_players(ctx: _Context) -> list[Issue]:
             roster = match.roster_for(side)
             team = match.team_for(side)
             nameless: list[str] = []
-            # Collected and reported once per side too, for a card whose roster was
-            # not read: with no squad to check against, every stranger on that side
-            # is one for the same reason, and one warning per set row repeated it
-            # for each name on each row -- 24 of 31 on two such cards.
+            # Every name off the side's roster block is collected with the rows it
+            # is on, and asked who it is once, after the rows: which of the five
+            # per-name findings it gets turns on the side, its block and the squads,
+            # never on the row, so one warning per set row said one fact once for
+            # each row a name played. Every row is still named, in the subject, as
+            # the place to look. A card whose roster was not read folds further,
+            # one warning for every stranger on the side (``unplaced``): with no
+            # squad to check against, each is one for the same reason, and one per
+            # name on each row was 24 of 31 warnings on two such cards.
+            outsiders: dict[str, list[str]] = {}
             unplaced: list[str] = []
             for result in match.sets:
                 players = result.players_for(side)
                 expected = result.slot.players
                 where = f"{_label(match)} {result.slot.key}"
-                if players and len(players) != expected:
+                # The side's 'Unspecified player' cells count as places nobody
+                # filled, which players-unrecorded tells (4.448), and a row nobody
+                # played is held to no names (4.446). A played card's row left
+                # 0-0 with no box ticked is not one: the card does not say nobody
+                # played it, and the players' figures count the names on it.
+                if (names_miscounted(len(players), result.unnamed_for(side),
+                                     expected)
+                        and not _nobody_played(match, result)):
                     # The names go in the sentence and the card goes in the detail,
                     # which is the other way round from how this read first. A club
                     # cannot fix a missing name here -- the fix is in Match Centre --
@@ -1457,59 +1890,66 @@ def _check_set_players(ctx: _Context) -> list[Issue]:
                                 f"{result.slot.discipline} set.",
                         subject=where, detail=match.source))
                 if (not players and result.status is SetStatus.PLAYED
+                        and result.unnamed_for(side) < expected
                         and not _nobody_played(match, result)):
                     # Collected and reported once per side: a card whose whole name
                     # column failed to read would otherwise emit one warning per set
                     # and bury everything else in the report. A whole-match
                     # forfeit's empty row names nobody because nobody played it.
+                    # A side whose placeholder cells fill its places is
+                    # players-unrecorded's (4.448); a placeholder beside a blank
+                    # cell leaves a place that may be a name unread, still told.
                     nameless.append(result.slot.key)
                 for slug in players:
                     if roster and slug in roster:
                         continue
-                    known = index.get(slug)
-                    if known is None:
-                        elsewhere = (ctx.club.registered_elsewhere(slug, comp.id)
-                                     if ctx.club else None)
-                        if elsewhere is not None:
-                            issues.append(Issue(
-                                rule="fill-in-other-competition", severity=WARNING,
-                                message=f"{where}: {slug} is registered in "
-                                        f"{elsewhere.id}, not in {comp.id}, and "
-                                        f"played {side} for {team} — counted as a "
-                                        "fill-in.",
-                                subject=where, detail=elsewhere.id))
-                            continue
-                        if not roster:
-                            if slug not in unplaced:
-                                unplaced.append(slug)
-                            continue
+                    outsiders.setdefault(slug, []).append(result.slot.key)
+            for slug, rows in outsiders.items():
+                where = f"{_label(match)} {in_words(rows)}"
+                known = index.get(slug)
+                if known is None:
+                    elsewhere = (ctx.club.registered_elsewhere(slug, comp.id)
+                                 if ctx.club else None)
+                    if elsewhere is not None:
                         issues.append(Issue(
-                            rule="unknown-player", severity=WARNING,
-                            message=f"{where}: {slug} is on neither the {side} "
-                                    "roster nor any registered squad, so this is "
-                                    "either a fill-in or a spelling that needs an "
-                                    "alias.",
-                            subject=where, detail=match.source))
-                    elif known.team is None:
-                        issues.append(Issue(
-                            rule="player-no-team", severity=WARNING,
-                            message=f"{where}: {known.name} is registered in "
-                                    f"{comp.id} without a team, so this set cannot "
-                                    "be checked against a roster.",
-                            subject=where, detail=match.source))
-                    elif known.team != team:
-                        issues.append(Issue(
-                            rule="fill-in", severity=WARNING,
-                            message=f"{where}: {known.name} is registered to "
-                                    f"{known.team} but played {side} for {team} — "
-                                    "counted as a fill-in.",
-                            subject=where, detail=f"registered to {known.team}"))
-                    elif roster:
-                        issues.append(Issue(
-                            rule="off-roster", severity=WARNING,
-                            message=f"{where}: {known.name} plays for {team} but is "
-                                    "not in this card's roster block.",
-                            subject=where, detail=", ".join(roster)))
+                            rule="fill-in-other-competition", severity=WARNING,
+                            message=f"{where}: {slug} is registered in "
+                                    f"{elsewhere.id}, not in {comp.id}, and "
+                                    f"played {side} for {team} — counted as a "
+                                    "fill-in.",
+                            subject=where, detail=elsewhere.id))
+                        continue
+                    if not roster:
+                        unplaced.append(slug)
+                        continue
+                    issues.append(Issue(
+                        rule="unknown-player", severity=WARNING,
+                        message=f"{where}: {slug} is on neither the {side} "
+                                "roster nor any registered squad, so this is "
+                                "either a fill-in or a spelling that needs an "
+                                "alias.",
+                        subject=where, detail=match.source))
+                elif known.team is None:
+                    these = "this set" if len(rows) == 1 else "these sets"
+                    issues.append(Issue(
+                        rule="player-no-team", severity=WARNING,
+                        message=f"{where}: {known.name} is registered in "
+                                f"{comp.id} without a team, so {these} cannot "
+                                "be checked against a roster.",
+                        subject=where, detail=match.source))
+                elif known.team != team:
+                    issues.append(Issue(
+                        rule="fill-in", severity=WARNING,
+                        message=f"{where}: {known.name} is registered to "
+                                f"{known.team} but played {side} for {team} — "
+                                "counted as a fill-in.",
+                        subject=where, detail=f"registered to {known.team}"))
+                elif roster:
+                    issues.append(Issue(
+                        rule="off-roster", severity=WARNING,
+                        message=f"{where}: {known.name} plays for {team} but is "
+                                "not in this card's roster block.",
+                        subject=where, detail=", ".join(roster)))
             if unplaced:
                 one = len(unplaced) == 1
                 issues.append(Issue(
@@ -1652,15 +2092,24 @@ def _check_ratings(ctx: _Context) -> list[Issue]:
     A warning: ratings are display data and no result depends on them. But a whole
     card losing them usually means the roster block was not read, and that is worth
     knowing before a reader concludes the club stopped publishing them.
+
+    A player is asked about only where their side's roster block prints them,
+    since a rating is read from that block and from nowhere else. A name on no line
+    of it has no rating on the card to read: :func:`_check_set_players` has
+    already said who they are, as a fill-in or a stranger, and saying their
+    rating is missing too was a second finding for the same fact, and wrong for a
+    lent player whose own team's cards rate them. What is left is a line the block
+    printed, for somebody who played, with no rating on it.
     """
     issues: list[Issue] = []
     for match in ctx.playable:
-        # Only the sides whose roster was read: ratings are printed in the roster
-        # block, and a side with none read is already a roster-missing that says
-        # its ratings went with it, or a side that never came (_never_came), with
+        # Only names on their side's roster block: ratings are printed there, and a
+        # side with no block read is already a roster-missing that says its
+        # ratings went with it, or a side that never came (_never_came), with
         # nobody on court to rate.
-        on_court = {slug for side in ("home", "away") if match.roster_for(side)
-                    for slug in match.players_on(side)}
+        on_court = {slug for side in ("home", "away")
+                    for slug in match.players_on(side)
+                    if slug in match.roster_for(side)}
         if not on_court:
             continue
         if not match.ratings:
@@ -1672,10 +2121,21 @@ def _check_ratings(ctx: _Context) -> list[Issue]:
             continue
         absent = sorted(on_court - set(match.ratings))
         if absent:
+            # The block once for each side the names are on: two home players
+            # are on one block, and a home and an away player on two.
+            blocks = sum(1 for side in ("home", "away")
+                         if set(absent) & set(match.roster_for(side)))
+            gives = ("the roster block gives" if blocks == 1
+                     else "the roster blocks give")
+            if len(absent) == 1:
+                said = (f"{gives} no rating for {absent[0]}, who played, so "
+                        f"{absent[0]} shows")
+            else:
+                said = (f"{gives} no rating for {in_words(absent)}, who played, "
+                        "so each shows")
             issues.append(Issue(
                 rule="ratings-missing", severity=WARNING,
-                message=f"{_label(match)}: no rating was read for "
-                        f"{in_words(absent)}.",
+                message=f"{_label(match)}: {said} none for this round.",
                 subject=_label(match), detail=match.source))
     return issues
 
@@ -1762,11 +2222,20 @@ def _check_draw(ctx: _Context) -> list[Issue]:
                             "the declared draw.",
                     subject=_label(match), detail=f"declared: {listed}"))
         if scheduled.date and match.date and match.date != scheduled.date:
+            # A card dated off its night is shown on its round's date (discover's
+            # _off_night_dates), which is the date compared; the date it printed
+            # is quoted beside it, since a club checks the card by that.
+            printed = next((card.date for card in ctx.cards
+                            if _where(card) == match.source), match.date)
+            dated, wins = ((f"is dated {match.date}", "The card wins.")
+                           if printed == match.date else
+                           (f"is dated {printed} and is shown on {match.date}, "
+                            f"the date of the other cards of its round",
+                            "The cards win."))
             issues.append(Issue(
                 rule="date-mismatch", severity=WARNING,
-                message=f"{_label(match)}: the card is dated {match.date}; the "
-                        f"declared draw has round {match.round} on "
-                        f"{scheduled.date}. The card wins.",
+                message=f"{_label(match)}: the card {dated}; the declared draw "
+                        f"has round {match.round} on {scheduled.date}. {wins}",
                 subject=_label(match), detail=scheduled.date))
     return issues
 
@@ -1796,6 +2265,11 @@ def _check_missing_cards(ctx: _Context) -> list[Issue]:
     nothing about whether the night was played: a forfeit, a washout and a card
     nobody exported are identical from here, and which one it was is written on the
     scorecard being asked for.
+
+    A fixture a card filed under another competition fits (``ctx.strays``) is told
+    where that card went and why, in place of the advice to export it or diagnose
+    it, which is false of a card that was read (4.444); its path is left out,
+    because this reaches ``season.json``, which lists only its own cards by path.
     """
     issues: list[Issue] = []
     comp = ctx.competition
@@ -1815,18 +2289,31 @@ def _check_missing_cards(ctx: _Context) -> list[Issue]:
         else:
             because = (f"nothing at all was read for that round while round "
                        f"{gap.later} has cards, so the season is past it")
+        fixture = f"{comp.team_name(gap.home)} v {comp.team_name(gap.away)}"
+        filed = [stray for stray in ctx.strays
+                 if stray.fits(gap.round, (gap.home, gap.away))]
+        if filed:
+            message = (f"round {gap.round}: no scorecard of {fixture}, which the "
+                       f"declared draw lists, was filed under this competition, and "
+                       f"{because}. "
+                       + " ".join(stray.told(comp.team_name, path=False)
+                                  for stray in filed)
+                       + f" {FiledElsewhere.uncounted(filed)}.")
+        else:
+            message = (f"round {gap.round}: no scorecard was read for {fixture}, "
+                       f"which the declared draw lists, and {because}. Export it "
+                       f"from Match Centre into this round's folder — or if the "
+                       f"file is already there, run tools/doctor.py on it to see "
+                       f"why it was not read.")
         issues.append(Issue(
             rule="card-missing", severity=WARNING,
-            message=f"round {gap.round}: no scorecard was read for "
-                    f"{comp.team_name(gap.home)} v {comp.team_name(gap.away)}, "
-                    f"which the declared draw lists, and {because}. Export it from "
-                    f"Match Centre into this round's folder — or if the file is "
-                    f"already there, run tools/doctor.py on it to see why it was "
-                    f"not read.",
+            message=message,
             subject=f"R{gap.round} {gap.home} v {gap.away}",
             detail=f"round {gap.round}: {gap.cards} of {gap.fixtures} declared "
                    f"fixtures have a card"
-                   + (f"; cards exist for round {gap.later}" if gap.later else "")))
+                   + (f"; cards exist for round {gap.later}" if gap.later else "")
+                   + "".join(f"; a card of it is filed under {stray.filed_under}"
+                             for stray in filed)))
     return issues
 
 
@@ -2052,11 +2539,12 @@ def _check_finals(ctx: _Context) -> list[Issue]:
 
 
 def _check_ladder(ctx: _Context) -> list[Issue]:
-    """Rule F10. Whether the ladder is an order or a snapshot, and who is short.
+    """Rule F10. Whether the ladder is an order, a snapshot or none, and who is short.
 
     A warning, always: the points are right, and what is at stake is the claim the
     dashboard makes about them. Mid-round, the team on top is the team whose card
-    arrived, and the label has to say so.
+    arrived, and the label has to say so. The state is :func:`stats.ladder_state_of`'s,
+    the one rule the document's ``meta.ladder_state`` is written by too (4.428).
     """
     issues: list[Issue] = []
     comp = ctx.competition
@@ -2067,9 +2555,9 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
         # excluded (F11), or the two teams in a semi-final read as a round ahead of
         # everybody else, and one card per fixture (F9), or a re-exported card does
         # the same thing.
-        ladder_set = ladder_matches(ctx.matches, comp)
-        counted = {slug: points_ledger(ladder_set, slug).counted
-                   for slug in comp.teams}
+        counted = ladder_counts(ctx.matches, comp)
+        # What P shows of those, for the words the state is said in (4.458).
+        played = ladder_played(ctx.matches, comp)
     except ScoringError as exc:
         # A defence, not a path. A level match under a ruleset with no value for a
         # draw is what refuses, and no folder's gets here: ladder_matches drops it
@@ -2081,21 +2569,23 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
             rule="F10", severity=ERROR,
             message=f"the ladder cannot be computed — {exc}",
             detail=str(exc))]
-    most = max(counted.values(), default=0)
-    if most == 0:
+    state = ladder_state_of(counted)
+    # The report's line and both pages say the state in the same words.
+    detail = ladder_detail(counted, played)
+    if state == "empty":
+        # "Regular-season": a final alone was played, and is out of the table (F11).
         issues.append(Issue(
             rule="F10", severity=WARNING,
-            message="no team has a counted match yet, so there is no ladder to "
-                    "present.",
+            message=f"{detail}, so there is no ladder to present.",
             detail="0 counted matches"))
         return issues
-    short = sorted(slug for slug, n in counted.items() if n < most)
-    if short:
+    if state == "in-progress":
+        most = max(counted.values())
+        short = sorted(slug for slug, n in counted.items() if n < most)
         issues.append(Issue(
             rule="F10", severity=WARNING,
-            message=f"the ladder is in progress — teams have played unequal "
-                    f"numbers of matches, so the order is not settled. "
-                    f"{in_words(short)} "
+            message=f"the ladder is in progress — {detail}, so the order is not "
+                    f"settled. {in_words(short)} "
                     f"{'has' if len(short) == 1 else 'have'} fewer than the "
                     f"{most} counted by the rest.",
             detail="; ".join(f"{slug} {counted[slug]}" for slug in sorted(counted))))

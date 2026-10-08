@@ -804,6 +804,87 @@ class TestASentenceInACommentIsNotOneThePageSays(unittest.TestCase):
                                  "so a sentence the page does say cannot be found")
 
 
+class TestEachValueWeWorkedOutIsExplainedAsWhatTheCodeMakesOfIt(WebAssetCase):
+    """4.464 and 4.462: the page's sentences for the captains and the season.
+
+    The captains sentence said "The captain was worked out from a roster mark
+    rather than declared", calling a (C) mark a guess, though a team's captain
+    comes only from the card's mark or the club's declaration: the one value of
+    captains the page flags is "mixed", some declared and the rest marked. The
+    season sentence said "No season label was declared, so this one was worked
+    out from the cards" of a name no card holds, which is its folder's name made
+    readable, or in multi-season mode for cards that sit in no season folder, the
+    year on them. Read from app.js (``PROVENANCE_ADVICE``, measured in headless
+    Chrome as the flag's title in /tmp/mcf/scratch/STUB/out-before-*.txt). Now
+    each says what a value so flagged is, the season's as
+    ``meta.season_label_from`` says it was made. Rejected: deleting the captains
+    sentence and its place in ``PROVENANCE_ORDER``, which hides a flag Python
+    sends; "No card that counts marks this captain with a (C), and nobody declared
+    one", false of every captain so flagged (/tmp/mcf/scratch/STUB/fix/before.txt);
+    and a year called its folder's name, beside the run's note that its cards sit
+    in no season folder.
+    """
+
+    @staticmethod
+    def joined(literal: str) -> str:
+        """The text of a JavaScript string literal, or of several joined by +."""
+        return "".join(piece.replace("\\'", "'") for piece in
+                       re.findall(r"'((?:[^'\\]|\\.)*)'", literal))
+
+    def advice(self) -> dict[str, str]:
+        source = self.assets()["app.js"]
+        block = re.search(r"\nvar PROVENANCE_ADVICE = \{(.*?)\n\};", source, re.S)
+        self.assertIsNotNone(block, "app.js defines no PROVENANCE_ADVICE")
+        return {key: self.joined(value) for key, value in re.findall(
+            r"\n  (\w+): ((?:'(?:[^'\\]|\\.)*'[\s+]*)+)", block.group(1))}
+
+    def test_the_captains_sentence_says_some_were_declared_and_the_rest_marked(self):
+        said = self.advice()["captains"]
+        self.assertEqual(said, "Some captains here were declared and the rest were "
+                               "read from the (C) their cards print. Set captains "
+                               "under [competitions.\"{id}\"] in config.toml to "
+                               "declare every one.")
+        self.assertNotIn("roster mark", said)
+        self.assertNotIn("worked out", said)
+
+    def test_the_season_sentence_says_the_name_is_its_folders(self):
+        self.assertEqual(self.advice()["season"],
+                         "No card printed this season's name and nobody declared "
+                         "one, so this is its folder's name made readable. Name the "
+                         "season under [seasons] in config.toml, or set season "
+                         "under [competitions.\"{id}\"].")
+
+    def test_a_year_on_cards_in_no_season_folder_is_said_to_be_that_year(self):
+        source = self.assets()["app.js"]
+        found = re.search(r"\nvar SEASON_FROM_DATE_ADVICE = ((?:'(?:[^'\\]|\\.)*'"
+                          r"[\s+]*)+);", source)
+        self.assertIsNotNone(found, "app.js defines no SEASON_FROM_DATE_ADVICE")
+        self.assertEqual(self.joined(found.group(1)),
+                         "No card printed this season's name and nobody declared "
+                         "one, so this is the year on its cards, which sit in no "
+                         "season folder. Name the season under [seasons] in "
+                         "config.toml, or set season under [competitions.\"{id}\"].")
+        # Taken for the season where the document says its name is that year.
+        body = jslint.without_comments(self.body("provenanceAdvice"))
+        self.assertRegex(body, r"if \(aspect === 'season' && "
+                               r"meta\(\)\.season_label_from === 'date'\) \{\s*"
+                               r"text = SEASON_FROM_DATE_ADVICE;\s*\}")
+
+    def test_every_aspect_the_page_lists_has_a_sentence(self):
+        source = self.assets()["app.js"]
+        order = re.search(r"var PROVENANCE_ORDER = \[([^\]]*)\]", source)
+        self.assertIsNotNone(order)
+        self.assertEqual(sorted(self.advice()),
+                         sorted(re.findall(r"'(\w+)'", order.group(1))))
+
+    def test_the_page_flags_a_value_worked_out_and_never_an_empty_one(self):
+        from matchcentre import export
+        flagged = re.findall(r"v === '(\w+)'", jslint.without_comments(
+            self.body("isDerived")))
+        self.assertEqual(sorted(flagged), ["derived", "mixed"])
+        self.assertNotIn(export.EMPTY, flagged)
+
+
 class TestTheDomContractHolds(WebAssetCase):
 
     def test_every_agreed_hook_is_in_both_the_script_and_the_page(self):
@@ -1595,20 +1676,22 @@ class TestTheLevelScorelineSentenceIsGuardedByTheData(WebAssetCase):
     # which is what the list of wordings this used to carry -- one of them retired,
     # and matched by nothing -- was standing in for.
     PHRASES = ("level on games", "decided on sets")
+    # Moved by 4.427 from matchCard(), which pushed the sentence itself, to the one
+    # function the match card and the overview's Tightest match tile both ask.
+    WORDS = "tiebreakWords"
 
     def test_nothing_prints_it_without_consulting_decided_by(self):
         for phrase in self.PHRASES:
             with self.subTest(phrase=phrase):
                 self.assertIn("decided_by",
-                              self.guard_for("matchCard", phrase, emits="bits.push"),
+                              self.guard_for(self.WORDS, phrase, emits="return"),
                               "the sentence is printed from the level scoreline "
                               "alone, which is true of a washout")
 
     def test_it_does_not_claim_the_match_was_decided_on_sets_by_itself(self):
         # `decided_by === 'sets'` is the only thing that licenses the words "decided
         # on sets"; a check against anything else is the old hardcoded assumption.
-        self.assertRegex(self.guard_for("matchCard", "decided on sets",
-                                        emits="bits.push"),
+        self.assertRegex(self.guard_for(self.WORDS, "decided on sets", emits="return"),
                          r"decided_by\s*===\s*'sets'")
 
     def test_nothing_else_in_the_page_derives_the_tie_from_the_two_totals(self):
@@ -1885,14 +1968,16 @@ class TestAShareOfNoTeamGamesIsADashThatSortsBelowANought(WebAssetCase):
 
     def test_the_tile_gives_a_player_on_no_roster_no_team_s_total(self):
         # "0 of 0 team games won" was measured on the page of a player whose side won
-        # 24. The words are the players-to-check list's for the same player.
+        # 24. The words are the players-to-check list's for the same player. Changed by
+        # 4.456: the team's games are worded for their count, so a 1 is "1 team game".
         said = self.said("renderPlayer")
         tile = said[said.index("tile('Team share',"):]
         self.assertRegex(tile, r"^tile\('Team share', [^;]*?, !p\.team \? "
                                r"'on no team’s roster' : p\.contribution \? "
                                r"shareNum\(p\.contribution\.games_won\) \+ ' of ' \+ "
-                               r"num\(p\.contribution\.team_games_won\) \+ "
-                               r"' team games won' : '—'\)")
+                               r"num\(p\.contribution\.team_games_won\) \+ ' team ' \+ "
+                               r"plural\(p\.contribution\.team_games_won, 'game'\) \+ "
+                               r"' won' : '—'\)")
 
     def test_a_missing_share_sorts_below_a_real_nought(self):
         # The sort subtracts one value from the other, and null - 0 is 0: a bare
@@ -1902,6 +1987,163 @@ class TestAShareOfNoTeamGamesIsADashThatSortsBelowANought(WebAssetCase):
         case = re.search(r"case 'share': return ([^;]*);", said)
         self.assertIsNotNone(case, "playerSortValue() has no share case")
         self.assertEqual(case.group(1), f"{self.HAS_SHARE} ? p.contribution.share_pct : -1")
+
+
+class TestAPlayersMatchesTileSaysHowManyWereForTheirOwnTeam(WebAssetCase):
+    """The Matches tile keeps the whole record, and says how much of it was the team's.
+
+    The tile was ``tile('Matches', String(p.matches), 'of ' + p.available + ' the
+    team has played')``: every night the player was on court, lent nights included,
+    over the nights their own team played, and for a player on no team their own
+    count over itself. Measured in headless Chrome on a fictional season
+    (/tmp/mcf/scratch/ROSTER/before/measure.txt): Jo Calder, lent once on her own
+    side's bye, read ``5 / of 4 the team has played``; Lena Ordoy, lent once beside
+    one night of her own, ``2 / of 4``, and ``2 of 4`` in the players-to-check
+    Played cell; Zed Quill, on no roster, ``1 / of 1 the team has played`` beside
+    ``Team share — on no team’s roster``; and in the demo Priya Halloran read ``4 /
+    of 4`` for three of the Brindle Magpies' four nights and one for the Rosellas.
+
+    The split is Python's, ``team_matches`` beside ``available``
+    (TestAPlayersMatchesSayHowManyWereForTheTeamThatRegistersThem), and one function
+    here reads it for both places, so the tile reads ``4 of 4 the team has played, 1
+    for another side`` and the cell ``1 of 4, 1 for another side``. A document from
+    before the key has no line under the figure, as an older document's regular
+    fixtures print unknown. Rejected: counting the team's nights here from the
+    matches, Python's rule a second time in the language the suite cannot run; and
+    making the figure the team's nights alone, which the Players view's M column,
+    the whole record, would contradict.
+
+    Structural, because there is no JavaScript engine here to run any of it.
+    """
+
+    def said(self, fn: str) -> str:
+        return " ".join(jslint.without_comments(self.body(fn)).split())
+
+    def test_one_function_reads_the_split_for_the_tile_and_the_played_cell(self):
+        # Neither place reads the two counts itself, so the two cannot word one
+        # player two ways, and neither reads the old figure the tile was built on.
+        for fn in ("renderPlayer", "playersToCheckCard"):
+            with self.subTest(function=fn):
+                code = jslint.code_only(self.body(fn))
+                self.assertEqual(code.count("matchesOutOf(p)"), 1)
+                self.assertNotRegex(code, r"\bp\.(?:available|team_matches)\b")
+
+    def test_the_split_is_the_document_s_and_not_one_made_here(self):
+        said = self.said("matchesOutOf")
+        self.assertIn("var lent = p.matches - p.team_matches;", said)
+        self.assertIn("played: p.team_matches, of: p.available,", said)
+        for counted in ("S.matches", "fill_in_appearances", "setsOfPlayer"):
+            with self.subTest(reads=counted):
+                self.assertNotIn(counted, jslint.code_only(self.body("matchesOutOf")))
+
+    def test_a_player_on_no_roster_or_a_document_without_the_key_is_out_of_nothing(self):
+        # A null team_matches is a player on no team; an undefined one is an older
+        # document, which cannot say which of the nights were the team's.
+        self.assertIn("{ if (!p.team || p.team_matches === null || "
+                      "p.team_matches === undefined) return null;",
+                      self.said("matchesOutOf"))
+
+    def test_the_nights_for_another_side_are_worded_once(self):
+        self.assertIn("lent: lent ? lent + ' for ' + plural(lent, 'another side', "
+                      "'other sides') : ''", self.said("matchesOutOf"))
+
+    def test_the_tile_keeps_the_whole_record_and_words_its_foot_by_the_three_cases(self):
+        said = self.said("renderPlayer")
+        self.assertIn("var outOf = matchesOutOf(p);", said)
+        self.assertRegex(said[said.index("tile('Matches',"):],
+                         r"^tile\('Matches', String\(p\.matches\), !p\.team \? "
+                         r"'on no team’s roster' : outOf && \(outOf\.lent \? "
+                         r"outOf\.played \+ ' of ' \+ outOf\.of \+ "
+                         r"' the team has played, ' \+ outOf\.lent : 'of ' \+ "
+                         r"outOf\.of \+ ' the team has played'\)\),")
+
+    def test_a_document_without_the_key_prints_no_line_under_the_figure(self):
+        # `outOf && (...)` hands the tile null for such a document, and a tile with
+        # no foot draws none, rather than an empty line or the word "null".
+        self.assertIn("foot ? el('div', { class: 'foot', text: foot }) : null",
+                      self.said("tile"))
+
+    def test_the_played_cell_takes_the_same_words(self):
+        # A player on no roster keeps the bare figure: the Note column beside it
+        # says "on no team’s roster" already.
+        said = self.said("playersToCheckCard")
+        self.assertIn("var outOf = matchesOutOf(p);", said)
+        self.assertIn("teamLinkBySlug(p.team), !outOf ? String(played) : outOf.lent "
+                      "? outOf.played + ' of ' + outOf.of + ', ' + outOf.lent : "
+                      "outOf.of > played ? played + ' of ' + outOf.of : "
+                      "String(played),", said)
+
+
+class TestARegisteredPlayerIsOneARosterBlockPrints(WebAssetCase):
+    """The views count as registered the rows with a team, and give the rest apart.
+
+    The overview header, the Players used tile and the Players view's caption counted
+    every row of ``S.players``, which holds a row for every name a counted set row
+    prints. Measured in headless Chrome on a fictional season
+    (/tmp/mcf/scratch/ROSTER/before/measure.txt): ``8 scorecards read · 4 teams · 13
+    registered players``, ``Players used 10 of 13`` over ``3 yet to play`` and ``13
+    registered players.``, where the roster blocks register 12 and Zed Quill, on
+    none of them, is the thirteenth. They read now ``12 registered players · 1 on no
+    team’s roster``, ``9 of 12`` over ``3 yet to play · 1 more on no team’s
+    roster``, and ``12 registered players and 1 on no team’s roster.``, and the
+    view's subtitle says it lists everyone on no team's roster who played. Each new
+    clause is there only where there is such a player, so the demo, whose 18 rows
+    all have a team, reads as it did.
+
+    A row has a team exactly when a roster block registers its player
+    (TestARowHasATeamExactlyWhenARosterBlockRegistersItsPlayer). Rejected: dropping
+    the word registered and keeping the totals, so that the squad's size, the
+    figure validate and the README call registered, would be on no page; counting
+    off the rows with ``fill_in_appearances``, which a registered player lent to
+    another side has too; ``S.teams[].players``, a second list beside the rows the
+    tile's numerator counts; a count published in season.json, a new key for what
+    the page has already; and calling the rest fill-ins, which validate leaves open.
+
+    Structural, because there is no JavaScript engine here to run any of it.
+    """
+
+    def said(self, fn: str) -> str:
+        return " ".join(jslint.without_comments(self.body(fn)).split())
+
+    def test_one_function_says_who_is_registered(self):
+        self.assertIn("{ var rows = S.players || []; var registered = "
+                      "rows.filter(function (p) { return !!p.team; }); return { rows: "
+                      "registered, unrostered: rows.length - registered.length }; }",
+                      self.said("registeredPlayers"))
+
+    def test_neither_view_counts_every_row_as_registered(self):
+        for fn in ("renderOverview", "renderPlayers"):
+            with self.subTest(function=fn):
+                code = jslint.code_only(self.body(fn))
+                self.assertEqual(code.count("registeredPlayers()"), 1)
+                self.assertNotIn("(S.players || []).length", code)
+
+    def test_the_overview_header_names_the_rest_apart_only_where_there_are_any(self):
+        self.assertIn("plural(ladder.length, 'team') + ' · ' + registered.rows.length "
+                      "+ ' registered ' + plural(registered.rows.length, 'player') + "
+                      "(registered.unrostered ? ' · ' + registered.unrostered + "
+                      "' on no team’s roster' : ''))", self.said("renderOverview"))
+
+    def test_the_players_used_tile_is_of_the_registered_and_names_the_rest_apart(self):
+        said = self.said("renderOverview")
+        self.assertIn("var appeared = registered.rows.filter(function (p) { return "
+                      "p.matches > 0; }).length;", said)
+        self.assertIn("tile('Players used', appeared + ' of ' + "
+                      "registered.rows.length, registered.rows.length - appeared + "
+                      "' yet to play' + (registered.unrostered ? ' · ' + "
+                      "registered.unrostered + ' more on no team’s roster' : ''))",
+                      said)
+
+    def test_the_players_view_says_it_in_its_subtitle_and_its_caption(self):
+        said = self.said("renderPlayers")
+        self.assertIn("'Every registered player, including those yet to play' + "
+                      "(registered.unrostered ? ', and everyone on no team’s roster "
+                      "who played' : '') + '. Select a column heading to sort.'", said)
+        self.assertIn("caption: registered.rows.length + ' registered ' + "
+                      "plural(registered.rows.length, 'player') + "
+                      "(registered.unrostered ? ' and ' + registered.unrostered + "
+                      "' on no team’s roster' : '') + '. A dash means nothing "
+                      "recorded yet.',", said)
 
 
 class TestThePlayersToCheckList(WebAssetCase):
@@ -2028,6 +2270,74 @@ class TestTheFillInNoteCountsWhatThePythonCounts(WebAssetCase):
             if "plural(" in line and "'match'" in line:
                 with self.subTest(line=line.strip()):
                     self.assertIn("'matches'", line)
+
+
+class TestAFillInNoteSaysOnNoTeamsRosterOnlyOfAPlayerNoSquadRegisters(WebAssetCase):
+    """The Fill-in note says who a player is, and not only that they were a fill-in.
+
+    Both notes said every fill-in ``played outside their registered roster``: the
+    match card ``Fill-in: Zed Quill played outside their registered roster.`` and
+    the player page ``Zed Quill has played 1 match outside their registered
+    roster.``, measured in Chrome on a season where Zed Quill is on no roster block
+    and no squad (``/tmp/mcf/scratch/PNOISE/pages.py``). The Team share tile a few
+    lines above on the same page says ``on no team’s roster`` of him, and so does
+    the players-to-check list, so the page contradicted itself about one person. A
+    player on no squad has no registered roster to be outside.
+
+    Now both notes say ``is on no team’s roster``, in the list's words, of a player
+    with no team on this page whom no other competition of the club registers
+    either; the match card finds the record in ``IDX.playerBySlug``, since a match
+    holds its fill-ins as slugs. A player on a team keeps the sentence, which is
+    what a lent player did, and so does a player the record says is
+    ``registered_elsewhere``. Quoy Darrow, on the Monday hawks' roster and on no
+    team on this Tuesday page, read ``is on no team’s roster`` on both under the
+    first version of this, which asked the team alone, beside the Data health
+    line saying he is ``registered in monday-division-b``
+    (``/tmp/mcf/scratch/PNOISE/fixup/quin-first.txt``). The figure on the page note
+    is printed as before (:class:`TestTheFillInNoteCountsWhatThePythonCounts`).
+
+    Rejected: naming the side they played for as their team, which invents a
+    membership no card printed; a heading of its own saying the name may be a
+    misspelling, which the players-to-check list and unknown-player already ask,
+    while ``on no team’s roster`` is true either way; and the page working out
+    where a player is registered from the report's findings, a rule in the
+    language that renders.
+    """
+
+    NONE = "on no team’s roster"
+
+    def said(self, fn: str) -> str:
+        return " ".join(jslint.without_comments(self.body(fn)).split())
+
+    def test_the_match_card_s_note_asks_the_player_s_record_where_they_are_registered(self):
+        self.assertRegex(
+            self.said("matchCard"),
+            r"\(m\.fill_ins \|\| \[\]\)\.forEach\(function \(slug\) \{ "
+            r"var who = IDX\.playerBySlug\[slug\]; "
+            r"body\.appendChild\(note\('warning', 'Fill-in', playerName\(slug\) \+ "
+            r"\(who && \(who\.team \|\| who\.registered_elsewhere\) "
+            r"\? ' played outside their registered roster\.' "
+            r": ' is on no team’s roster\.'\)\)\); \}\);")
+
+    def test_the_player_page_s_note_asks_the_player_where_they_are_registered(self):
+        self.assertRegex(
+            self.said("slotAppearanceTable"),
+            r"if \(p\.fill_in_appearances\) \{ "
+            r"out\.appendChild\(note\('warning', 'Fill-in', "
+            r"!p\.team && !p\.registered_elsewhere "
+            r"\? p\.name \+ ' is on no team’s roster\.' "
+            r": p\.name \+ ' has played ' \+ p\.fill_in_appearances \+ ' ' \+ "
+            r"plural\(p\.fill_in_appearances, 'match', 'matches'\) \+ "
+            r"' outside their registered roster\.'\)\); \}")
+
+    def test_every_sentence_about_a_player_on_no_team_is_in_the_same_words(self):
+        # The tile, the players-to-check list and the two notes, at least: places
+        # that say one thing about one person, so one that drifts, or a straight
+        # apostrophe where the others have the page's own, reads as something else.
+        said = jslint.without_comments(self.assets()["app.js"])
+        found = re.findall(r"on no team\S{0,2}s roster", said)
+        self.assertGreaterEqual(len(found), 4, found)
+        self.assertEqual(set(found), {self.NONE})
 
 
 class TestThePageRoundsTheWayThePythonDoes(WebAssetCase):
@@ -2639,6 +2949,487 @@ class TestTheRubbersInsideSuchACardAreQuietenedWithItsRow(WebAssetCase):
                                     f"column whose header promises the rubber's own "
                                     f"business is answering for the night: "
                                     f"{expression.strip()!r}")
+        # Row 4.453 moved this: the word is now rubberStatus(st)'s, and an expression
+        # that is a call passes the lines above without its answer being read. So every
+        # function of app.js the expression calls is read too, all of it, and asked the
+        # same question with the call this file's other checks know the night by. A
+        # function handed the set alone can still reach for the match one call down.
+        source = self.assets()["app.js"]
+        called = sorted(set(re.findall(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(",
+                                       jslint.code_only(expression))))
+        for name in (n for n in called if f"\nfunction {n}(" in source):
+            code = jslint.code_only(self.body(name))
+            for asked, how in ((r"\bm\b", "the match"), (r"\bunscored\b", "the night"),
+                               (r"\bcountsAsPlayed\b", "whether the night counted")):
+                with self.subTest(called=name, asked=asked):
+                    self.assertNotRegex(code, asked,
+                                        f"{name}(), which the Status column takes its "
+                                        f"word from, now reads {how}, so the column "
+                                        f"whose header promises the rubber's own "
+                                        f"business is answering for the night")
+
+
+class TestARubberWithNoGamesOnItSaysNoScoreRatherThanUnfinished(WebAssetCase):
+    """'Unfinished' of a row with no games on it, a rubber nobody started.
+
+    The match card's Status column said 'unfinished' of every row stored as played that
+    was not a finished set, which is the one set ``SetResult.unfinished_unmarked`` asks
+    about. validate splits that predicate three ways, set-no-games, set-tied and
+    set-unfinished, because a row with no games on it is not a contest that stopped: it
+    is a rubber nobody played. The report was corrected and the page never was, and the
+    cell is on every match card, and in the season's table of rubbers and its CSV
+    through ``rubberRow``.
+
+    Measured on eight cardwriter cards built at a pinned stamp and dumped in headless
+    Chrome (/tmp/mcf/scratch/UNFIN/probe/probe.py): nine rows with no games read
+    'Unfinished' -- the last doubles of a played card beside its set-no-games warning,
+    the four rows of a card ticked Match Cancelled and the four of a whole-match forfeit
+    -- and eleven cells of the table of every rubber did, those nine and the 5-3 and 4-4
+    that did stop short. On the club's own season it is 95 rows: 59 on cancelled cards,
+    24 on blank cards nobody entered and 12 the last rubber of a played card, beside 64
+    rows with games that stopped short, of which the word is true. After, the nine read
+    'No score', and the 5-3, the 4-4, the Incomplete, Retired and Forfeit rows and the
+    finished rows' em dashes read as they did.
+
+    The word is ``rubberStatus(st)``'s, one function of the set alone, which the player
+    page asks too (4.454). It is read here by a reader that evaluates it as a browser
+    would, since the suite runs no JavaScript and which word sits on which arm of a
+    ternary is the whole of this item, and it is put rows the exporter wrote, with every
+    field the page is handed. Rejected: 'Not played', true of a called-off card or a
+    walkover but not shown by a played card whose last row is empty, which set-no-games
+    offers only as what such a row reads like; 'No games', which reads as a score of
+    nothing each, the misreading being fixed; 'Cancelled', 'Forfeit' or 'Walkover' from
+    the match, which is 3.17's refusal, held by the class above; a field in the export
+    naming the rows nobody played, the same refusal by another route; an em dash, which
+    3.17 keeps for a rubber played to a finish; and 'Level' for a 4-4, of which
+    'Unfinished' is true.
+    """
+
+    # What the reader below can read: the set's own fields, the operators the helper is
+    # written in, string and number literals, and the brackets and keywords of
+    # `if (...) return`.
+    TOKEN = re.compile(r"\s+|'[^'\\]*'|===|!==|&&|\|\||[<>]=?|[!?:;()]|\d+"
+                       r"|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?")
+    LITERALS = {"true": True, "false": False, "null": None}
+    # Loosest first, as JavaScript binds them: a ternary is looser than all of these, and
+    # `!` is tighter.
+    BINARY = (("||",), ("&&",), ("===", "!=="), ("<", ">", "<=", ">="))
+
+    # Cards as the model holds them, each row (home games, away games, its box, the word
+    # it is owed), put through the exporter, so that a row reaches the helper as the page
+    # is handed it: its slot, label and doubles, both sides' names as the lists they are,
+    # its winner, completed and margin. A helper asking any of those beyond the four the
+    # rule needs is answered as a browser answers it. A box is a side whose Forfeit is
+    # ticked, or `retired` or `incomplete`. The rows nobody played are an empty doubles
+    # and an empty singles, named on both sides and on one, since a helper that took a
+    # name or a doubles for a rubber that was started reads them as unfinished; and every
+    # pair of games is asked both ways round, since a helper that asks one side's games
+    # reads 0-3 as a row nobody played.
+    CARDS = (
+        # A played card whose last doubles nobody played: the row set-no-games warns of.
+        ("played", {}, ("home", "away"),
+         ((6, 2, "", ""), (6, 3, "", ""), (3, 6, "", ""), (0, 0, "", "no score"))),
+        # A card ticked Match Cancelled, every row empty and every name filled in.
+        ("cancelled", {}, ("home", "away"), ((0, 0, "", "no score"),) * 4),
+        # A whole-match forfeit with nobody named for the side that gave the night up.
+        ("forfeit", {"forfeited_by": "away"}, ("home",), ((0, 0, "", "no score"),) * 4),
+        # A washout, with games on two rows when the rain came and none on the last.
+        ("cancelled", {}, ("home", "away"),
+         ((6, 4, "", ""), (3, 0, "", "unfinished"), (0, 3, "", "unfinished"),
+          (0, 0, "", "no score"))),
+        # The 9 p.m. finish, short of a set and level, beside two sets played out.
+        ("played", {}, ("home", "away"),
+         ((5, 3, "", "unfinished"), (6, 1, "", ""), (2, 6, "", ""),
+          (4, 4, "", "unfinished"))),
+        # Each box a card can tick, on a row with games and on a row without.
+        ("played", {}, ("home", "away"),
+         ((2, 6, "away", "forfeit"), (0, 0, "home", "forfeit"),
+          (4, 2, "retired", "retired"), (0, 0, "incomplete", "incomplete"))),
+    )
+
+    @staticmethod
+    def truthy(value) -> bool:
+        """Whether a browser takes *value* for true.
+
+        A list or an object always is, empty or not, where Python takes an empty one for
+        false: the side of a walkover with nobody named is `[]`, and a helper that asks
+        it is answered as the page would answer it.
+        """
+        return isinstance(value, (list, dict)) or bool(value)
+
+    @staticmethod
+    def same(one, other) -> bool:
+        """``===``: a list or an object is only itself, and a number is no boolean."""
+        if isinstance(one, (list, dict)) or isinstance(other, (list, dict)):
+            return one is other
+        kinds = {"number" if isinstance(v, (int, float)) and not isinstance(v, bool)
+                 else type(v).__name__ for v in (one, other)}
+        return len(kinds) == 1 and one == other
+
+    def evaluate(self, node, row):
+        """What *node*, as :meth:`expression` read it, gives for *row*."""
+        kind = node[0]
+        if kind == "field":
+            return row.get(node[1])
+        if kind == "value":
+            return node[1]
+        if kind == "!":
+            return not self.truthy(self.evaluate(node[1], row))
+        if kind == "?":
+            asked = self.truthy(self.evaluate(node[1], row))
+            return self.evaluate(node[2] if asked else node[3], row)
+        one = self.evaluate(node[1], row)
+        # `||` and `&&` give back the operand that decided, as a browser's do.
+        if kind == "||":
+            return one if self.truthy(one) else self.evaluate(node[2], row)
+        if kind == "&&":
+            return self.evaluate(node[2], row) if self.truthy(one) else one
+        other = self.evaluate(node[2], row)
+        if kind in ("===", "!=="):
+            return self.same(one, other) == (kind == "===")
+        numbers = [isinstance(v, (int, float)) and not isinstance(v, bool)
+                   for v in (one, other)]
+        self.assertTrue(all(numbers), f"rubberStatus() compares {one!r} {kind} "
+                                      f"{other!r}, and this reader compares numbers only")
+        return {"<": one < other, ">": one > other, "<=": one <= other,
+                ">=": one >= other}[kind]
+
+    def expression(self, words: list[str], param: str):
+        """One expression of rubberStatus(), read by precedence as JavaScript reads it.
+
+        A ternary, which may hold another on either arm or in brackets anywhere, then
+        `||`, `&&`, the comparisons and `!`, each a node of the tuple :meth:`evaluate`
+        walks. A name that is not one of the set's own fields is refused by name, and a
+        word this reader has no rule for is refused as one it cannot read, so neither is
+        put down to the other: a helper that reaches past its set fails on the name it
+        reached for, and one written in more than this reader knows fails on that.
+        """
+        said, at = " ".join(words), 0
+
+        def peek():
+            return words[at] if at < len(words) else None
+
+        def take(expected=None):
+            nonlocal at
+            word = peek()
+            if word is None or expected is not None and word != expected:
+                self.fail(f"rubberStatus() says {said!r}, which this reader cannot read: "
+                          f"{word or 'its end'!r} where {expected or 'more'!r} would be")
+            at += 1
+            return word
+
+        def choice():
+            asked = binary(0)
+            if peek() != "?":
+                return asked
+            take("?")
+            yes = choice()
+            take(":")
+            return ("?", asked, yes, choice())
+
+        def binary(level):
+            if level == len(self.BINARY):
+                return unary()
+            left = binary(level + 1)
+            while peek() in self.BINARY[level]:
+                left = (take(), left, binary(level + 1))
+            return left
+
+        def unary():
+            word = take()
+            if word == "!":
+                return ("!", unary())
+            if word == "(":
+                inside = choice()
+                take(")")
+                return inside
+            if word.startswith(param + "."):
+                return ("field", word[len(param) + 1:])
+            if word[0] == "'":
+                return ("value", word[1:-1])
+            if word.isdigit():
+                return ("value", int(word))
+            if word in self.LITERALS:
+                return ("value", self.LITERALS[word])
+            if re.fullmatch(r"[A-Za-z_$][\w$.]*", word):
+                self.fail(f"rubberStatus() asks {word!r}, which is not the set it was "
+                          f"handed, so the word is no longer the rubber's own")
+            self.fail(f"rubberStatus() says {said!r}, which this reader cannot read: "
+                      f"{word!r} where a value would be")
+
+        if not words:
+            return ("value", None)
+        read = choice()
+        if peek() is not None:
+            self.fail(f"rubberStatus() says {said!r}, which this reader cannot read: "
+                      f"{peek()!r} after a whole expression")
+        return read
+
+    def rubber_status(self):
+        """rubberStatus() read off its source, as a function to put rows to.
+
+        A structural check of which word sits on which arm is satisfied by a condition
+        written the wrong way round, so the helper is read token by token and evaluated:
+        `if (...) return ...;` lines and a last `return`, each expression read by
+        :meth:`expression`. Anything else is refused and named rather than guessed at,
+        so a helper that has grown past this reader fails until the reader is taught it.
+        """
+        said = jslint.without_comments(self.body("rubberStatus"))
+        head = re.match(r"\s*function rubberStatus\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{", said)
+        self.assertIsNotNone(head, "rubberStatus() is no longer a function of the one set "
+                                   "it is asked about")
+        param, inside = head.group(1), said[head.end():said.rindex("}")]
+        tokens, at = [], 0
+        while at < len(inside):
+            found = self.TOKEN.match(inside, at)
+            self.assertIsNotNone(found, f"rubberStatus() says {inside[at:at + 20]!r}, which "
+                                        f"this reader cannot read")
+            if not found.group(0).isspace():
+                tokens.append(found.group(0))
+            at = found.end()
+
+        statements, current = [], []
+        for token in tokens:
+            if token == ";":
+                statements.append(current)
+                current = []
+            else:
+                current.append(token)
+        self.assertFalse(current, "rubberStatus() ends in a statement with no ';'")
+        steps = []
+        for words in statements:
+            if words[:2] == ["if", "("]:
+                depth = 0
+                for close, word in enumerate(words):
+                    depth += {"(": 1, ")": -1}.get(word, 0)
+                    if depth == 0 and close > 1:
+                        break
+                self.assertEqual(words[close + 1:close + 2], ["return"],
+                                 "an if in rubberStatus() does not return")
+                steps.append((self.expression(words[2:close], param),
+                              self.expression(words[close + 2:], param)))
+            else:
+                self.assertEqual(words[:1], ["return"], f"rubberStatus() says "
+                                 f"{' '.join(words)!r}, which this reader cannot read")
+                steps.append((None, self.expression(words[1:], param)))
+
+        def rubber_status(row):
+            for asked, given in steps:
+                if asked is None or self.truthy(self.evaluate(asked, row)):
+                    return self.evaluate(given, row)
+            return None
+        return rubber_status
+
+    def rows(self) -> list[tuple[dict, str]]:
+        """Every row of CARDS as the exporter writes it, beside the word it is owed."""
+        from matchcentre import export, format as fmt_mod, scoring
+        from matchcentre.competition import Club, Competition
+        from matchcentre.model import Match, MatchStatus, SetResult, SetStatus
+        comp = Competition(id="x", day="Tuesday", division="C",
+                           fmt=fmt_mod.match_format("doubles-singles-doubles"),
+                           rules=scoring.ruleset("games-bonus"))
+        matches, owed = [], {}
+        for number, (status, ticked, named, rows) in enumerate(self.CARDS, start=1):
+            sets = []
+            for slot, (home, away, box, word) in zip(comp.fmt.slots, rows):
+                names = {side: tuple(f"{side}-{slot.key}-{n}"
+                                     for n in range(1 + slot.doubles))
+                         if side in named else () for side in ("home", "away")}
+                sets.append(SetResult(
+                    slot=slot, home_games=home, away_games=away,
+                    home_players=names["home"], away_players=names["away"],
+                    status=(SetStatus(box) if box in ("retired", "incomplete") else
+                            SetStatus.FORFEIT if box else SetStatus.PLAYED),
+                    rule=comp.fmt.set_rule,
+                    home_forfeit=box == "home", away_forfeit=box == "away"))
+                owed[str(number), slot.key] = word
+            matches.append(Match(competition="x", round=str(number), home="a", away="b",
+                                 fmt=comp.fmt, rules=comp.rules, sets=tuple(sets),
+                                 status=MatchStatus(status), match_id=f"id{number}",
+                                 **ticked))
+        doc = export.build_season(
+            matches, competition=comp, source_dir=Path("."), generated="",
+            club=Club(name="", competitions=(comp,)), cards=[], rejected=[])
+        found = [(row, owed[match["round"], row["slot"]])
+                 for match in doc["matches"] for row in match["sets"]]
+        self.assertEqual(len(found), len(owed), "the exporter wrote other rows than the "
+                                                "cards above hold")
+        return found
+
+    def put(self, which):
+        word = self.rubber_status()
+        rows = [(row, owed) for row, owed in self.rows() if which(owed)]
+        self.assertTrue(rows, "no row of the cards above is owed what this test asks")
+        for row, owed in rows:
+            got = word(row)
+            named = [side for side in ("home", "away") if row[f"{side}_players"]]
+            sides = ("neither side", f"the {named[0]} side alone" if named else "",
+                     "both sides")[len(named)]
+            with self.subTest(row=f"{row['slot']} {row['home_games']}-"
+                                  f"{row['away_games']} {row['status']}"):
+                self.assertEqual(got, owed, f"a {row['label']} at {row['home_games']}-"
+                                            f"{row['away_games']} stored {row['status']!r}"
+                                            f"{' and finished' if row['completed'] else ''}"
+                                            f", with names on {sides}, reads {got!r}, "
+                                            f"where it is owed {owed!r}")
+
+    def test_the_match_card_takes_its_word_from_the_one_function(self):
+        body = self.body("setRow")
+        line = re.search(r"var status = (.+?);\n", body, re.S)
+        self.assertIsNotNone(line, "setRow() no longer computes a status for the column")
+        self.assertEqual(line.group(1).strip(), "rubberStatus(st)",
+                         "setRow() works the Status column's word out for itself again, "
+                         "so the match card and a player's list can come to give two "
+                         "words for one rubber")
+        # And prints it capitalised, as a player's list does: one word, spelt one way,
+        # first in the cell, before the games on court beside it (4.421).
+        said = jslint.without_comments(body)
+        self.assertRegex(said, r"var words = \[status, onCourt\(st\)\]",
+                         "the Status column's word is no longer the first of the cell")
+        self.assertRegex(said,
+                         r"\{\s*text\s*:\s*words\s*\?\s*upperFirst\(words\)\s*:",
+                         "the match card no longer prints the Status column's word "
+                         "capitalised, as a player's list prints it, so the two pages "
+                         "spell one rubber's word two ways")
+
+    def test_a_row_with_no_games_on_it_reads_no_score(self):
+        self.put(lambda owed: owed == "no score")
+
+    def test_every_other_row_keeps_the_word_it_had(self):
+        self.put(lambda owed: owed != "no score")
+
+class ResultCellCase(WebAssetCase):
+    """Shared reading of the Result cell of a player's Every set played list.
+
+    The cell's text and class, each a ternary on whether the set was decided, split at
+    its own `?` and `:` over code_only text, so that a ternary inside brackets is one
+    branch's business and not the cell's. Strings are kept and the space between them
+    squeezed out, so a branch compares as the words it is written in.
+
+    Each branch is held to that exact text on purpose, as this file holds the other
+    branches it has no engine to run: a rewrite that keeps what the cell says fails
+    here, and this is the place to rewrite the test along with it.
+    """
+
+    SQUEEZE = re.compile(r"'[^'\\]*'|\s+")
+
+    def result_cell(self) -> dict[str, str]:
+        """The cell's properties, by name: the last object of the row before 'Result'."""
+        body = self.body("renderPlayer")
+        code, said = jslint.code_only(body), jslint.without_comments(body)
+        header = said.find("'Result'")
+        self.assertGreater(header, 0, "renderPlayer() has no Result column")
+        cells = [found.start() for found in re.finditer(r"\{\s*text\s*:", code[:header])]
+        self.assertTrue(cells, "renderPlayer() builds no cell with words of its own")
+        opens = cells[-1]
+        closes = closing_bracket(code, opens)
+        inside, words = code[opens + 1:closes] + ",", said[opens + 1:closes] + ","
+        found, depth, start = {}, 0, 0
+        for at, char in enumerate(inside):
+            depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(char, 0)
+            if char == "," and depth == 0:
+                colon = inside.index(":", start)
+                found[inside[start:colon].strip()] = self.SQUEEZE.sub(
+                    lambda f: f.group(0) if f.group(0)[0] == "'" else "",
+                    words[colon + 1:at])
+                start = at + 1
+        self.assertEqual(sorted(found), ["cls", "text"],
+                         "the Result cell is no longer a text and a class")
+        return found
+
+    def branches(self, value: str, what: str) -> tuple[str, str, str]:
+        """*value*'s condition, the branch for a decided set and the other one."""
+        code = jslint.code_only(value)
+        depth, ask, inner = 0, None, 0
+        for at, char in enumerate(code):
+            depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(char, 0)
+            if depth or char not in "?:":
+                continue
+            if char == "?":
+                if ask is None:
+                    ask = at
+                else:
+                    inner += 1
+            elif ask is not None and inner:
+                inner -= 1
+            elif ask is not None:
+                parts = value[:ask], value[ask + 1:at], value[at + 1:]
+                self.assertEqual(parts[0], "s.decided", f"the Result cell's {what} is no "
+                                 f"longer chosen on whether the set was decided: {value!r}")
+                return parts
+        self.fail(f"the Result cell's {what} is no longer chosen on whether the set was "
+                  f"decided: {value!r}")
+
+
+class TestASetNobodyWonReadsOnThePlayersPageAsOnTheMatchCard(ResultCellCase):
+    """'played', in lowercase, beside a 5-3 and a 0-0 alike.
+
+    A player's Every set played list fell back to ``s.set.status`` for a set with no
+    winner, and to 'unfinished' only where that was empty -- but export writes every
+    set's status as one of SetStatus's four values, so the fallback never ran, and an
+    undecided set printed 'played', a word for how its score was recorded and not for
+    what became of it, or 'retired' and 'incomplete' in the lowercase the match card
+    capitalises. Measured on the probe's cards across all twelve players' pages
+    (/tmp/mcf/scratch/UNFIN/probe/probe.py): 18 Result cells read 'played', ten at 0-0,
+    four at 4-4 and four at 5-3, four read 'incomplete' and two 'retired', of rubbers
+    their match cards called 'Unfinished', 'Incomplete' and 'Retired'. On the club's own
+    season it is the 69 undecided sets of counted matches, 57 with games and 12 without,
+    on every named player's page of each. After: 'No score' ten times, 'Unfinished'
+    eight, 'Incomplete' four and 'Retired' twice, still muted, as each match card reads.
+
+    Rejected: keeping 'played', which says nothing true of a 5-3 or a 0-0; 'Unfinished'
+    for every such set, which is the dead fallback made live and puts back on the 0-0
+    rows the word 4.453 takes off them; an em dash, which leaves no reason the set has
+    no result; 'No result', true but less than the match card says, and a second word
+    for one rubber; and dropping a played card's 0-0 rows from the list, which the
+    player's figures count among sets played and the list has to keep.
+    """
+
+    def test_a_set_nobody_won_says_what_its_match_card_says_and_stays_muted(self):
+        cell = self.result_cell()
+        _, _, words = self.branches(cell["text"], "text")
+        self.assertEqual(words, "upperFirst(rubberStatus(s.set))",
+                         "a set nobody won no longer reads its match card's word, from the "
+                         "function the match card asks, so the two pages can give one "
+                         "rubber two words")
+        _, _, painted = self.branches(cell["cls"], "class")
+        self.assertEqual(painted, "'muted'", "a set nobody won is no longer muted, so "
+                         "a rubber with no result is painted like one with a result")
+
+
+class TestASetAForfeitTickDecidedSaysSoBesideWonOrLost(ResultCellCase):
+    """A bare Won or Lost for a set a ticked box decided.
+
+    The Result cell said the stored status only of a set with no winner, and a forfeited
+    set has one, so its match card's 'Forfeit' never reached a player's list: on the
+    probe's card with two rubbers forfeited (/tmp/mcf/scratch/UNFIN/probe/probe.py), six
+    cells across four players' pages read 'Won' or 'Lost' alone, among them a 2-6 'Won'
+    and a 6-2 'Lost', with nothing to say why. The club's own season has 5 forfeited
+    rows. After: 'Won, forfeit' and 'Lost, forfeit', in the win and lose classes they had,
+    and every other decided set reads Won or Lost alone, as it did.
+
+    The word beside the result is ``rubberStatus``'s, '' for a set played to a finish,
+    rather than a test of ``s.set.status === 'forfeit'``: should 4.422 export a retired
+    rubber with a winner, the side that did not retire, as its row directs, that set
+    reads 'Won, retired' as its match card reads 'Retired', not a bare result. The games
+    beside it are the Games cell's, which 4.421 words. Rejected: 'Won by forfeit', since
+    a row ticked against both sides goes by its games and not by a forfeit; the status
+    in place of the result, which loses whether the player won or lost the set; and the
+    list as it was.
+    """
+
+    def test_won_or_lost_carries_the_rubbers_own_word_in_the_class_it_had(self):
+        cell = self.result_cell()
+        _, words, _ = self.branches(cell["text"], "text")
+        self.assertEqual(words, "[s.won?'Won':'Lost',rubberStatus(s.set)]"
+                                ".filter(Boolean).join(', ')",
+                         "a decided set no longer reads Won or Lost with its rubber's own "
+                         "word after a comma, so a set a Forfeit tick decided reads as one "
+                         "won or lost on court")
+        _, painted, _ = self.branches(cell["cls"], "class")
+        self.assertEqual(painted, "(s.won?'win':'lose')", "a decided set no longer "
+                         "takes the win or lose class, so a forfeited set's result is "
+                         "painted like one nobody won")
 
 
 class TestARowWithNoCardSaysSoRatherThanScheduled(WebAssetCase):
@@ -2747,6 +3538,391 @@ class TestARowWithNoCardSaysSoRatherThanScheduled(WebAssetCase):
         for rule in found:
             with self.subTest(rule=rule.where):
                 self.assertIn("--warning-text", rule.value("color"))
+
+
+class TestARoundWithCardsNoneOfWhichWasPlayedIsNotCalledPlayed(WebAssetCase):
+    """A round whose every card counts for nothing is headed "not played".
+
+    4.452. ``rounds[].played`` is true of a round with any card, and the Matches view
+    worded and coloured a round's pill by it alone, so a washed-out round read
+    ``played``, in the green pill, over cards that each say ``cancelled — counts for
+    nothing``, while each of its teams' pages said the round ``was not played``.
+    Measured in headless Chrome on cardwriter cards
+    (/tmp/mcf/scratch/UNPLAYED/fix/before.txt): a round 2 of two Match Cancelled
+    cards, one stopped at 6-1 6-0 3-0 and one with no games, was headed ``played`` in
+    ``pill good``, two blank cards nobody ticked were headed the same, and a GF whose
+    one card was called off was headed ``played`` and named in ``Finals played:
+    GF.``. A round with one card played and one called off is headed ``played``
+    still, and is.
+
+    The exporter counts the round's cards that count as played,
+    ``rounds[].cards_played`` by ``Match.counts_as_played``, and one function here
+    reads it, for the heading and for the finals line. But it can count only the
+    cards that are in. A round of a declared draw with one card called off and no
+    card for its other fixture was headed ``not played`` in the muted pill by the
+    first version of this fix, over a row saying ``no card yet`` and a report asking
+    for that card (/tmp/mcf/scratch/UNPLAYED/fix/mid.txt): the missing card taken for
+    an answer. That round says ``card missing``, in the amber of a card to chase, as
+    a round short of every card says ``no cards yet``.
+
+    There is no JavaScript engine on this machine, so the heading's few lines, and the
+    expressions the finals line and Latest round pick their rounds by, are read by
+    ``value`` below, which works out what an expression of that size comes to. The
+    tests then ask what each kind of round is headed and whether it is picked, and
+    not how the choice is nested, which an equivalent rewrite would change.
+
+    Rejected: "called off", false of a round of blank cards nobody ticked; "counts
+    for nothing", false under ``unplayed = "average"``, which credits the round at
+    each team's average; the amber pill over a round with every card in, 4.3's colour
+    for a card still to come, where nothing is to chase; the page counting
+    ``countsAsPlayed`` over the round's cards itself, a second copy of the rule
+    (4.112); and, over a round still short of a card, either "not played" or the
+    green "played" of the base, each an answer the missing card would have to give.
+    """
+
+    ASKS = "noCardPlayed"
+
+    class Undefined:
+        """JavaScript's ``undefined``: falsy, and strictly equal to itself alone."""
+
+        def __bool__(self):
+            return False
+
+        def __repr__(self):
+            return "undefined"
+
+    UNDEFINED = Undefined()
+
+    # Integers, quoted strings, names and dotted names, and the operators the heading
+    # is chosen with. Anything else stops the reader, and the test that met it fails,
+    # so a heading rewritten past what this reads says so rather than passing unread.
+    TOKEN = re.compile(r"\s*(?:(\d+)|'([^'\\]*)'"
+                       r"|([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)"
+                       r"|(===|!==|&&|\|\||[!?:()+,]))")
+
+    def value(self, expression: str, names: dict, local=None):
+        """What *expression* comes to, by JavaScript's rules, with *names* bound.
+
+        *names* maps a name or a dotted name (``r.played``) to its value, and *local*
+        is asked for any other. ``&&`` and ``||`` give an operand, as JavaScript's do,
+        ``===`` compares type and value, and ``+`` joins as soon as either side is a
+        string. Both arms of a ``? :`` are worked out, which nothing read here minds.
+        """
+        text, at, tokens = expression.strip(), 0, []
+        while at < len(text):
+            found = self.TOKEN.match(text, at)
+            self.assertIsNotNone(found, f"the reader stops at {text[at:]!r} in "
+                                        f"{text!r}, so what it chooses is not read")
+            tokens.append(found.groups())
+            at = found.end()
+        tokens.append((None, None, None, None))
+        pos = 0
+
+        def peek(*ops):
+            return tokens[pos][3] in ops
+
+        def take(op):
+            nonlocal pos
+            self.assertTrue(peek(op), f"{op!r} expected in {text!r}")
+            pos += 1
+
+        def joined(x):
+            return {True: "true", False: "false", None: "null"}.get(x, str(x)) \
+                if isinstance(x, (bool, type(None))) else str(x)
+
+        def choice():
+            test = either()
+            if not peek("?"):
+                return test
+            take("?")
+            yes = choice()
+            take(":")
+            no = choice()
+            return yes if test else no
+
+        def either():
+            left = both()
+            while peek("||"):
+                take("||")
+                right = both()
+                left = left or right
+            return left
+
+        def both():
+            left = equal()
+            while peek("&&"):
+                take("&&")
+                right = equal()
+                left = left and right
+            return left
+
+        def equal():
+            left = added()
+            while peek("===", "!=="):
+                same = tokens[pos][3] == "==="
+                take(tokens[pos][3])
+                right = added()
+                left = (type(left) is type(right) and left == right) == same
+            return left
+
+        def added():
+            left = unary()
+            while peek("+"):
+                take("+")
+                right = unary()
+                left = (joined(left) + joined(right)
+                        if isinstance(left, str) or isinstance(right, str)
+                        else left + right)
+            return left
+
+        def unary():
+            if peek("!"):
+                take("!")
+                return not unary()
+            return term()
+
+        def term():
+            nonlocal pos
+            number, string, name, op = tokens[pos]
+            if op == "(":
+                take("(")
+                inner = choice()
+                take(")")
+                return inner
+            self.assertIsNone(op, f"{op!r} where a value belongs in {text!r}")
+            self.assertTrue(number or string is not None or name,
+                            f"{text!r} ends where a value belongs")
+            pos += 1
+            if number is not None:
+                return int(number)
+            if string is not None:
+                return string
+            if name in names:
+                found = names[name]
+            else:
+                self.assertIsNotNone(local, f"{text!r} reads {name}, not given")
+                found = local(name)
+            if not peek("("):
+                return found
+            take("(")
+            args = []
+            while not peek(")"):
+                args.append(choice())
+                if peek(","):
+                    take(",")
+            take(")")
+            return found(*args)
+
+        result = choice()
+        self.assertIsNone(tokens[pos][0] or tokens[pos][1] or tokens[pos][2]
+                          or tokens[pos][3], f"{text!r} is read only in part")
+        return result
+
+    @staticmethod
+    def round_(**keys):
+        """A round of season.json, with *keys* and no others."""
+        r = type("Round", (), {})()
+        vars(r).update(keys)
+        return r
+
+    def rule(self) -> str:
+        """The one expression noCardPlayed() returns."""
+        code = jslint.without_comments(self.body(self.ASKS))
+        found = re.search(r"\{\s*return ([^;]*);\s*\}", code)
+        self.assertIsNotNone(found, f"{self.ASKS}() is no longer one expression")
+        return found.group(1)
+
+    def said(self, expression: str, r):
+        """What *expression* says of the round *r*: a key it lacks is undefined, as in
+        JavaScript, and noCardPlayed() is app.js's own, worked out the same way. Any
+        other name stops the reader, rather than reading as undefined."""
+        def key(name):
+            self.assertTrue(name.startswith("r."), f"{expression!r} reads {name}, "
+                                                   f"which this does not know")
+            return getattr(r, name[len("r."):], self.UNDEFINED)
+
+        return self.value(expression, {"r": r, "undefined": self.UNDEFINED,
+                                       "true": True, "false": False, "null": None,
+                                       self.ASKS: lambda x: self.said(self.rule(), x)},
+                          key)
+
+    def plural(self, n, one, many=UNDEFINED):
+        """app.js's own plural(), read off its one line."""
+        code = jslint.without_comments(self.body("plural"))
+        found = re.search(r"\{ return ([^\n]*); \}", code)
+        self.assertIsNotNone(found, "plural() is no longer one line that this reads")
+        return self.value(found.group(1), {"n": n, "one": one, "many": many})
+
+    def heading(self, played: bool, none_played: bool, missing: int) -> tuple[str, str]:
+        """The words and the pill renderMatches heads a round with.
+
+        Given whether the round has a card (``r.played``), what ``noCardPlayed``
+        says of it, and how many of its fixtures are short a card (``card_missing``),
+        as the function itself is given them. Every other name the two expressions
+        read is found by its own ``var`` line and worked out the same way.
+        """
+        body = jslint.without_comments(self.body("renderMatches"))
+        asked = re.search(r"var (\w+) = " + self.ASKS + r"\(r\);", body)
+        self.assertIsNotNone(asked, "renderMatches() never asks whether any card of "
+                                    "the round was played, so it heads it played")
+        counted = re.search(r"var (\w+) = [^\n]*\.card_missing[^\n]*;\n", body)
+        self.assertIsNotNone(counted, "renderMatches() never counts the round's "
+                                      "fixtures short a card")
+        chosen = re.search(r"var \w+ = ([^\n]*'not played yet'[^\n]*);\n", body)
+        self.assertIsNotNone(chosen, "the heading's wording is no longer a choice")
+        pill = re.search(r"class: ('pill ' \+ [^\n]*?) \}, \[\n", body)
+        self.assertIsNotNone(pill, "the round heading has no pill to colour")
+        names = {"r.played": played, asked.group(1): none_played,
+                 counted.group(1): missing, "plural": self.plural}
+
+        def local(name):
+            found = re.search(r"\bvar " + re.escape(name) + r" = ([^\n]*);\n", body)
+            self.assertIsNotNone(found, f"the heading reads {name}, and no line of "
+                                        f"renderMatches() says what it is")
+            return self.value(found.group(1), names, local)
+
+        tone = self.value(pill.group(1), names, local)
+        self.assertTrue(tone.startswith("pill "), tone)
+        return self.value(chosen.group(1), names, local), tone[len("pill "):]
+
+    # Each kind of round, as (has a card, noCardPlayed's answer, fixtures short a
+    # card), and the words and pill it is headed with. The first two and the last two
+    # are 4.3's, which this must not move; the one between is this item's.
+    PLAYED = {"a round played": (True, False, 0),
+              "a round played with a card still missing (4.3)": (True, False, 1)}
+    NONE_IN = (True, True, 0)
+    NO_CARD = {"a round the season went past with no card (4.3)": (False, False, 2),
+               "a round not reached (4.3)": (False, False, 0)}
+    UNMOVED = {"a round played": ("played", "good"),
+               "a round played with a card still missing (4.3)": ("played", "good"),
+               "a round the season went past with no card (4.3)": ("no cards yet",
+                                                                   "warning"),
+               "a round not reached (4.3)": ("not played yet", "")}
+
+    def test_the_exporter_writes_the_count_the_page_reads(self):
+        self.assertIn('"cards_played"',
+                      (ROOT / "matchcentre" / "export.py").read_text())
+
+    def test_the_page_reads_the_count_strictly_and_keeps_no_rule_of_its_own(self):
+        # Strictly 0: a format 4 document built before the key lacks it, and its
+        # rounds read as they did, played wherever a card has the round, rather than
+        # every round with cards as not played. And a round with cards: one without is
+        # still to come or gone past without one, and the heading has its own words
+        # for those (4.3). Worked out for each, not matched as text, so a reading that
+        # also takes an absent count for none (`|| r.cards_played === undefined`) is
+        # the older document's every round headed not played, and fails here.
+        rule = self.rule()
+        rounds = {
+            "cards, none of them played": (dict(played=True, cards_played=0), True),
+            "cards, one of them played": (dict(played=True, cards_played=1), False),
+            "cards, in an older document without the count": (dict(played=True), False),
+            "no card": (dict(played=False, cards_played=0), False),
+            "no card, in an older document": (dict(played=False), False),
+        }
+        for what, (keys, expected) in rounds.items():
+            with self.subTest(round=what):
+                self.assertIs(bool(self.said(rule, self.round_(**keys))), expected,
+                              "the page reads the exporter's count loosely, so a "
+                              "document without it heads every round with cards not "
+                              "played, or a round with no card is one nobody played")
+        for own in ("countsAsPlayed", "counts_as_played", "status", "keys", "cardsOf"):
+            with self.subTest(own=own):
+                self.assertNotIn(own, rule,
+                                 "the page works out from the round's cards whether "
+                                 "any was played, a second copy of Python's rule")
+
+    def test_the_heading_says_not_played_over_such_a_round(self):
+        # Every card in and none of them played: the team pages' words for the night.
+        self.assertEqual(self.heading(*self.NONE_IN)[0], "not played",
+                         "a round with every card in and none of them played is "
+                         "headed as one somebody played, or in other words than the "
+                         "team pages give it")
+        for what, shape in {**self.PLAYED, **self.NO_CARD}.items():
+            with self.subTest(round=what):
+                self.assertEqual(self.heading(*shape)[0], self.UNMOVED[what][0])
+
+    def test_its_pill_is_the_muted_one(self):
+        self.assertEqual(self.heading(*self.NONE_IN)[1], "",
+                         "the pill over a round nobody played is green, or amber, "
+                         "rather than the muted one a round not played yet has")
+        for what, shape in {**self.PLAYED, **self.NO_CARD}.items():
+            with self.subTest(round=what):
+                self.assertEqual(self.heading(*shape)[1], self.UNMOVED[what][1])
+
+    def test_a_round_still_short_of_a_card_says_so_rather_than_not_played(self):
+        """A round with a card missing and the rest called off says the card is missing.
+
+        Measured (/tmp/mcf/scratch/UNPLAYED/fix/mid.txt): on a declared draw, a round 2
+        of one Match Cancelled card and no card for its other fixture was headed
+        ``not played`` in the muted pill, over a row saying ``no card yet`` and a
+        report asking for the card, as the base had headed it ``played`` in green.
+        Either is an answer the missing card would have to give. It is headed with
+        what it is short of, ``card missing``, two of them ``cards missing``, in the
+        amber pill a round short of every card has. Rejected: ``no cards yet``, false
+        under a card that is in, and either of the answers above.
+        """
+        for missing, words in ((1, "card missing"), (2, "cards missing")):
+            with self.subTest(missing=missing):
+                self.assertEqual(self.heading(True, True, missing), (words, "warning"),
+                                 "a round with a card still to come and the rest "
+                                 "called off is headed as if the missing card had "
+                                 "said whether anybody played")
+
+    def test_a_final_nobody_played_is_not_named_among_the_finals_played(self):
+        # A final with a card missing and the rest called off is left out too, as one
+        # with every card missing always was: the line names what the cards say was
+        # played, and says nothing of the rest, where the heading says what is missing.
+        # Worked out for each kind of round, as the heading is.
+        code = jslint.without_comments(self.body("finalsPlayed"))
+        found = re.search(r"\.filter\(function \(r\) \{\s*return ([^;]*);\s*\}\)", code)
+        self.assertIsNotNone(found, "finalsPlayed() no longer picks its rounds by one "
+                                    "expression that this reads")
+        pick = found.group(1)
+        for what, keys, named in (
+                ("a final with a card played",
+                 dict(is_finals=True, played=True, cards_played=1), True),
+                ("a final with cards, in an older document",
+                 dict(is_finals=True, played=True), True),
+                ("a final whose every card was called off",
+                 dict(is_finals=True, played=True, cards_played=0), False),
+                ("a final the draw lists and no card has",
+                 dict(is_finals=True, played=False, cards_played=0), False),
+                ("a final with no card, in an older document",
+                 dict(is_finals=True, played=False), False),
+                ("a regular round played",
+                 dict(is_finals=False, played=True, cards_played=2), False)):
+            with self.subTest(round=what):
+                self.assertIs(bool(self.said(pick, self.round_(**keys))), named,
+                              "Finals played names a final none of whose cards was "
+                              "played, or one with no card, or leaves out one played")
+        self.assertIn(self.ASKS, pick,
+                      "the finals line reads the count itself, a second reader of it")
+        self.assertNotIn("card_missing", code,
+                         "a final none of whose cards was played is named for a card "
+                         "nobody has read")
+
+    def test_the_latest_round_is_still_last_week_whether_or_not_anyone_played(self):
+        # Latest round shows the last round with cards, a called-off one with its
+        # cards, since that is what last week was; asked whether anybody played, it
+        # would skip a washed-out last week for an older one and say nothing of it.
+        # Worked out, as the heading is, for the rounds it picks among.
+        code = jslint.without_comments(self.body("renderOverview"))
+        at = code.find("sectionTitle('Latest round')")
+        self.assertGreater(at, 0, "the overview has no Latest round")
+        found = re.compile(r"\(S\.rounds \|\| \[\]\)\.filter\(function \(r\) "
+                           r"\{\s*return ([^;]*);\s*\}\)").search(code, at)
+        self.assertIsNotNone(found, "Latest round no longer picks the rounds it shows "
+                                    "the last of by one expression that this reads")
+        pick = found.group(1)
+        for what, keys, shown in (
+                ("a week washed out", dict(played=True, cards_played=0), True),
+                ("a week played", dict(played=True, cards_played=3), True),
+                ("a week with cards, in an older document", dict(played=True), True),
+                ("a week with no card", dict(played=False, cards_played=0), False)):
+            with self.subTest(round=what):
+                self.assertIs(bool(self.said(pick, self.round_(**keys))), shown,
+                              "Latest round skips a washed-out last week for an older "
+                              "one, or shows a round with no card")
 
 
 class TestAnUndatedMatchLeavesNoSeparatorStanding(WebAssetCase):
@@ -3189,7 +4365,8 @@ class TestTheRoundNobodyPlayedIsMarkedInTheChartItStaysIn(WebAssetCase):
     The demo season built under that preset is the measurement: the same team goes from
     55.3 points over 13 counted rounds to 59.553846 over 14, so the night nobody played
     earned it 4.25 there, and the sentence under the plot cannot say otherwise in its own
-    words. It says what is on the card, which is nothing under either preset.
+    words. It says what is counted of the card, which is nothing under either preset
+    (4.451: what is on the card is not always nothing).
 
     **Found in the same shell while fixing this.** On the same page, ``Points average by
     team`` dims the seven teams that are not the one being read -- and measured, all eight
@@ -3398,9 +4575,10 @@ class TestTheRoundNobodyPlayedIsMarkedInTheChartItStaysIn(WebAssetCase):
         # ``unplayed = "average"`` it is false. The demo season built twice, once per
         # preset, puts Brindle Magpies on 55.3 points from 13 counted rounds under
         # "zero" and 59.553846 from 14 under "average": the washed-out round earned them
-        # 4.25 there. What is empty is the card this plot draws from, so that is what the
-        # sentence is allowed to be about; what the round was worth is the exporter's
-        # clause, which follows two words later and is right under both presets.
+        # 4.25 there. What is the same under both is the card this plot draws from,
+        # nothing on it counted, so that is what the sentence is allowed to be about
+        # (4.451: the card itself is not always empty, the test below); what the round
+        # was worth is the exporter's clause, which follows and is right under both.
         prose = " ".join(re.findall(r"'([^']*)'", self.field(self.options(), "footer")))
         self.assertIn("card", prose,
                       "the sentence does not say where the missing bar went, so an empty "
@@ -3411,6 +4589,38 @@ class TestTheRoundNobodyPlayedIsMarkedInTheChartItStaysIn(WebAssetCase):
                          "did or did not earn, which is the second account of this rule "
                          "and the one that is wrong wherever a club credits an unplayed "
                          "round the team's own average")
+
+    def test_the_sentence_says_what_the_match_card_says_nothing_on_it_is_counted(self):
+        """The sentence says nothing on the round's card is counted, not that it is empty.
+
+        4.451. The sentence read ``R5 was not played, so there is nothing on its card
+        to plot.``, over a card that is often not empty: a night called off part way
+        keeps the games played before the rain. Measured in headless Chrome
+        (/tmp/mcf/scratch/UNPLAYED/before.txt): the demo's own R5 washout is
+        6-0 6-5 0-0 0-0, and both its teams' footers said there was nothing on its
+        card while the Values table beside them printed 12–5 and 5–12; cardwriter
+        cards stopped at 6-1 6-0 3-0 put the same sentence over 15–1. It now says
+        the match card's own words for that night, ``Nothing on this card is
+        counted``, which is true of a card part played and of a blank one alike,
+        with the exporter's clause after it as before. Rejected: two wordings chosen
+        on whether the card carries games, which has the page judge a card's
+        emptiness for itself; and blanking the chart's games for the round so the
+        old sentence came true, which sets the chart against the card and the match
+        list below it.
+        """
+        prose = " ".join(re.findall(r"'([^']*)'", self.field(self.options(), "footer")))
+        for said in ("not played, so nothing ", "on its card ", "on their cards ",
+                     "is counted"):
+            with self.subTest(said=said):
+                self.assertIn(said, prose,
+                              "the sentence no longer says, in the match card's words, "
+                              "that nothing on a round's card is counted")
+        for untrue in ("there is nothing", "to plot", "is empty"):
+            with self.subTest(untrue=untrue):
+                self.assertNotIn(untrue, prose,
+                                 "the sentence says a round's card is empty, which a "
+                                 "night called off part way contradicts in the "
+                                 "Values table beside it")
 
     def test_the_values_table_prints_what_the_bar_printed(self):
         # Before this item the plot said `not scored` and the table said `—` for the same
@@ -3425,6 +4635,27 @@ class TestTheRoundNobodyPlayedIsMarkedInTheChartItStaysIn(WebAssetCase):
         self.assertNotIn("_points", table,
                          "the table reads the points off the match again, which is the "
                          "second expression this test exists to remove")
+
+    def test_the_games_on_the_card_of_a_round_nobody_played_are_still_printed(self):
+        """The tooltip and the Values table print the games a round nobody played has.
+
+        4.451 kept them, as 3.10 decided: the sentence under the plot now says that
+        nothing on the card is counted, and the games beside it are what the card
+        prints, 12–5 for the demo's R5 and 15–1 for a card called off at 6-1 6-0 3-0
+        (/tmp/mcf/scratch/UNPLAYED/fix/before.txt). Nothing else in the suite held
+        them. Rejected: blanking them for such a round, so that the old sentence, that
+        there was nothing on its card, came true, which sets the chart against the
+        card and against the match list below it.
+        """
+        night = self.night()
+        tip = jslint.code_only(self.region("{ name: 'Games'", "{ name: 'Result'"))
+        table = jslint.code_only(self.field(self.options(), "tableRow"))
+        self.assertIn("m.home_games", table, "the Values table prints no games")
+        for where, code in (("the tooltip", tip), ("the Values table", table)):
+            with self.subTest(where=where):
+                self.assertNotRegex(code, r"\b(?:" + night + r"|dim)\b",
+                                    "the games of a round nobody played are printed "
+                                    "otherwise than its card prints them")
 
 
 class TestTheTeamPageSaysWhichKindOfUncountedMatchEachOneIs(WebAssetCase):
@@ -4050,6 +5281,130 @@ class TestTheShareColumnAccountsForWhatItDoesNotAddUpTo(WebAssetCase):
                                  "local it was already read into")
 
 
+class TestACountOfGamesIsWordedForTheNumberItIs(WebAssetCase):
+    """A count of one game read "1 games" in eight places, and its verb "belong".
+
+    Item 4.456. The page has one function for a counted noun, ``plural``, and the
+    Tightest match tile already worded its margin through it. Eight places joined a
+    count of games to a literal ``' games'`` instead: the Biggest margin tile beside
+    it, the head-to-head cell's hover, the spoken labels of Games for and against
+    (both counts), of Strength by set slot and of a player's Singles and doubles, the
+    player page's Team share tile, whose literal put "team" between the count and
+    the noun, and the team page's Share caption in both directions, the first of
+    which also put "belong" after its count. Measured in headless Chrome on
+    fictional cardwriter cards (/tmp/mcf/scratch/WORDING/probe.py, before.txt, and
+    for the tile /tmp/mcf/scratch/WORDING/fixup/probe2.py, before.txt): a 20-19
+    night read "Tightest match 1 game" beside "Biggest margin 1 games"; a 24-1 night
+    "Hilltop Aces: 1 games won, 24 games lost", "Hilltop Aces won 1 games, Riverside
+    Rockets won 24", "Doubles 1: 1 games won, 6 lost, record 0–1", a player's
+    "Doubles: 1 games won, 12 lost" and that player's Team share "0.5 of 1 team
+    games won"; a first single played by a name on no roster "1 of the 12 games the
+    team won belong to no row above."; and two names on that single "credited with
+    1 games more than the 12 the team won."
+
+    Read as text, as the suite runs no JavaScript: no figure is joined to a literal
+    that begins ``' games'``, or one word and then ``games``, on its own line or
+    across a line break, except the places where the word follows a pronoun or a
+    name; every ``plural(x, 'game')`` follows the figure ``x`` it is the noun of,
+    or that figure and one word; each of the eight keeps its noun; and the caption's
+    verb is worded by the same function. Rejected: a games-only helper beside
+    ``plural``, a second function for what one already does; a branch on ``=== 1``
+    at each site, which 4.195 rejected as a second rule for one word; leaving the
+    spoken labels, which are the text a screen-reader user is given in place of the
+    bar; dropping the noun after the first count ("1 won, 24 lost"), which changes
+    the shape of every label to avoid one word; and the tile reworded as "of the 16
+    games the team won", which changes the tile on every player page to mend the
+    ones whose team won one game.
+    """
+
+    # Where ' games' follows something that is not a count: a pronoun for the
+    # rubbers the sentence has just counted, twice, and a player's name in the file
+    # name a table downloads as.
+    NOT_COUNTS = ("'their') + ' games are credited more than once.'",
+                  "'their') + ' games count for the team and '",
+                  "p.name + ' games differential by opponent'")
+    JOINED = re.compile(r"([^\s+]+)\s*\+\s*('\s+(?:[\w-]+\s+)?games?\b[^'\n]*')")
+    NOUN = re.compile(r"\bplural\(\s*([^,()]+?)\s*,\s*'game'\s*\)")
+    # Each function that prints a count of games, and how many it prints.
+    COUNTS = (("renderOverview", 2), ("h2hGridCard", 2), ("gamesForAgainstChart", 2),
+              ("slotStrengthChart", 1), ("disciplineChart", 1), ("renderPlayer", 1),
+              ("teamPlayersTable", 2))
+
+    def joined(self) -> list[str]:
+        said = jslint.without_comments(self.assets()["app.js"])
+        return [f"{found.group(1)} + {found.group(2)}"
+                for found in self.JOINED.finditer(said)]
+
+    def test_the_search_reads_a_join_across_a_line_break(self):
+        # The Share caption's second sentence broke its line between the count and the
+        # word, and a search a line at a time does not see that one.
+        self.assertRegex("shareNum(-off) +\n      ' games more than the '", self.JOINED)
+
+    def test_the_search_reads_a_word_between_the_count_and_its_noun(self):
+        # The Team share tile put "team" between them, and a search for the noun
+        # straight after the count does not see that one.
+        self.assertRegex("num(p.contribution.team_games_won) + ' team games won'",
+                         self.JOINED)
+
+    def test_no_count_is_joined_to_a_literal_games(self):
+        joined = self.joined()
+        # Seen at all, or the search below passes by reading nothing.
+        for each in self.NOT_COUNTS:
+            with self.subTest(not_a_count=each):
+                self.assertIn(each, joined,
+                              "one of the places ' games' follows a word rather "
+                              "than a count is gone, so this list no longer says "
+                              "what the search is finding")
+        for each in joined:
+            with self.subTest(joined=each):
+                self.assertIn(each, self.NOT_COUNTS,
+                              "a count of games is joined to the literal word, so a "
+                              "count of one reads '1 games'")
+
+    def test_every_plural_of_game_follows_the_count_it_is_the_noun_of(self):
+        # plural() given one figure and printed after another says "1 game" beside a
+        # 24, which is the same mistake made more quietly.
+        said = jslint.without_comments(self.assets()["app.js"])
+        nouns = list(self.NOUN.finditer(said))
+        self.assertTrue(nouns, "nothing in app.js says plural(..., 'game')")
+        for noun in nouns:
+            figure = re.escape(noun.group(1).strip())
+            before = said[max(0, noun.start() - 200):noun.start()]
+            with self.subTest(counts=noun.group(1).strip()):
+                self.assertRegex(
+                    before,
+                    r"(?:\b(?:num|shareNum)\(\s*%s\s*\)|\(\s*%s\s*\)|(?<![\w.$])%s)"
+                    r"\s*\+\s*' (?:[\w-]+ )?'\s*\+\s*$" % (figure, figure, figure),
+                    "plural(..., 'game') does not follow the figure it counts")
+
+    def test_each_count_keeps_its_noun(self):
+        # The rejected way out: "1 won, 24 lost" has no noun to get wrong.
+        for fn, count in self.COUNTS:
+            with self.subTest(fn=fn):
+                said = jslint.without_comments(self.body(fn))
+                self.assertEqual(len(self.NOUN.findall(said)), count,
+                                 f"{fn}() words a different number of counts of "
+                                 f"games through plural() than the {count} it prints")
+
+    def test_the_shortfalls_verb_agrees_with_the_count_it_follows(self):
+        # "1 of the 12 games the team won belong to no row above." Read in that one
+        # sentence: "half of it belongs to nobody" further down is right as it stands.
+        said = jslint.without_comments(self.body("teamPlayersTable"))
+        at = self.offset_of(said, "short of 100%", "the shortfall sentence")
+        sentence = said[said.rfind("caption +=", 0, at):said.index(";", at)]
+        literal = re.search(r"'[^'\n]*\sbelongs?\b[^'\n]*'", sentence)
+        self.assertIsNone(literal and literal.group(0),
+                          "the caption's verb is a literal, so it is plural whatever "
+                          "its count")
+        first = re.search(r"shareNum\((\w+)\)\s*\+\s*' of the '", sentence)
+        self.assertIsNotNone(first, "the shortfall sentence no longer begins with its "
+                                    "count of games")
+        self.assertRegex(sentence,
+                         r"plural\(\s*%s\s*,\s*'belongs'\s*,\s*'belong'\s*\)"
+                         % re.escape(first.group(1)),
+                         "the verb is not worded for the count it follows")
+
+
 class TestTheSeasonsOwnTotalsCountEachNightOnce(WebAssetCase):
     """``not_totalled``: the third question, and the front page's tiles ask it.
 
@@ -4116,6 +5471,227 @@ class TestTheSeasonsOwnTotalsCountEachNightOnce(WebAssetCase):
         self.assertEqual(self.body("renderOverview").count("S.matches"), 1)
 
 
+class TestTheTightestMatchSaysWhenItWasLevelOnGamesAndDecidedOnSets(WebAssetCase):
+    """The tile printed "0 games" over a match one side won, and nothing said how.
+
+    Item 4.427. Under a scheme decided on games and then sets, a night level on games
+    is won on sets, and its games margin is 0 (export.py). ``renderOverview`` takes the
+    smallest margin among the decided matches, which is right -- a night level on
+    games and separated on sets is the tightest result there is -- and the tile
+    printed the margin, the two teams and the round, never ``decided_by``. The
+    qualifier was the match card's alone. Measured in headless Chrome on fictional
+    cardwriter cards (/tmp/mcf/scratch/WORDING/fixup/probe2.py, before.txt): Riverside
+    Rockets v Hilltop Aces 6-0 3-6 3-6 0-0, 12-12 and sets 1-2, beside a 21-15 night,
+    builds with no error and is published with ``tied_on_games`` true and
+    ``decided_by`` 'sets'; the tile read "Tightest match 0 games" over "Riverside
+    Rockets v Hilltop Aces, round 1", while the Matches view's line for the same
+    night read "sets 1–2 · points 3.2 / 5.2 · level on games, decided on sets". The
+    owner's export has two played cards level on games and decided on sets, and in
+    each competition whose tightest match is one of them the tile read the same.
+
+    So the foot adds the card's words, and a match decided on games is told nothing
+    new. One function, ``tiebreakWords``, says them, and the match card and the tile
+    both ask it: written into the tile as well, the words and their test were two
+    copies of one rule, which two edits can part. Read as text, as the suite runs no
+    JavaScript: the words are written once in the page, in that function, under the
+    test the match card always used, term for term; the card pushes what it says of
+    its match; and the tile's foot names the two sides and the round and then what
+    the function says of the match the tile chose, through ``dotted``, the page's one
+    rule for a line of parts, which drops the empty answer. Rejected: the condition
+    written out again in the tile, which a test could only hold equal to the card's;
+    "won on sets", a second wording for one fact; leaving matches decided on sets out
+    of the tile, which would name a 1-game night tighter than a level one; keeping
+    cards with an F6 error out of it, which parts the tiles from the ladder beside
+    them; and naming the winner instead, which leaves "0 games" beside a winner
+    unexplained and drops the two sides a tightest match is about.
+    """
+
+    PHRASE = "level on games, decided on sets"
+    WORDS = "tiebreakWords"
+
+    def tile_call(self, label: str) -> str:
+        """The arguments of the one ``tile(...)`` call with *label*, comments out."""
+        body = self.body("renderOverview")
+        code = jslint.code_only(body)
+        said = jslint.without_comments(body)
+        at = self.offset_of(said, f"tile('{label}'", f"the {label} tile")
+        opens = at + len("tile")
+        return said[opens + 1:closing_bracket(code, opens)]
+
+    def selected(self) -> str:
+        """What the Tightest match tile calls the match it is about."""
+        found = re.match(r"\s*'Tightest match',\s*(\w+)\s*\?",
+                         self.tile_call("Tightest match"))
+        self.assertIsNotNone(found, "the Tightest match tile no longer prints a "
+                                    "match it chose")
+        return found.group(1)
+
+    @staticmethod
+    def top_level(text: str, sep: str) -> list[str]:
+        """*text* split at each *sep* outside every bracket and string."""
+        code = jslint.code_only(text)
+        parts, depth, start = [], 0, 0
+        for index, char in enumerate(code):
+            depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(char, 0)
+            if depth == 0 and code.startswith(sep, index):
+                parts.append(text[start:index].strip())
+                start = index + len(sep)
+        return parts + [text[start:].strip()]
+
+    def test_the_words_are_written_once_in_the_one_function_both_ask(self):
+        said = jslint.without_comments(self.assets()["app.js"])
+        self.assertEqual(said.count(self.PHRASE), 1,
+                         "the words are written in more than one place, so the tile "
+                         "and the match card can say different things of one night")
+        self.assertIn(self.PHRASE, jslint.without_comments(self.body(self.WORDS)),
+                      f"the words are not {self.WORDS}()'s")
+        card = jslint.without_comments(self.body("matchCard"))
+        match = re.search(r"function matchCard\((\w+)", card).group(1)
+        held = re.search(r"var (\w+) = %s\(%s\);" % (self.WORDS, match), card)
+        self.assertIsNotNone(held, f"the match card no longer asks {self.WORDS}() "
+                                   f"about its match")
+        self.assertRegex(card, r"if \(%s\) bits\.push\(%s\);"
+                               % (held.group(1), held.group(1)),
+                         "the match card does not print what the function says, or "
+                         "prints it where it says nothing")
+
+    def test_the_function_asks_what_the_match_card_always_asked(self):
+        # Term for term: a night decided on sets that was not level on games is not
+        # "level on games", and a draw level on every basis was decided by nothing.
+        body = jslint.without_comments(self.body(self.WORDS))
+        match = re.search(r"function %s\((\w+)\)" % self.WORDS, body).group(1)
+        guard = self.guard_for(self.WORDS, self.PHRASE, emits="return")
+        self.assertEqual({term.strip() for term in guard.split("&&")},
+                         {f"{match}.tied_on_games", f"{match}.decided_by === 'sets'"},
+                         "the words are said of nights the match card never said "
+                         "them of, or not of all of them")
+        self.assertEqual(re.findall(r"\breturn\b([^;]*);", body),
+                         [f" '{self.PHRASE}'", " ''"],
+                         "the function says something other than the words, or "
+                         "nothing, of the nights it is not asked about")
+
+    def test_the_words_join_the_foot_that_names_the_match(self):
+        name = self.selected()
+        foot = self.top_level(self.tile_call("Tightest match"), ",")[-1]
+        joined = re.fullmatch(r"%s \? dotted\(\[(.*)\]\)\s*: 'no decided matches'"
+                              % name, foot, re.S)
+        self.assertIsNotNone(joined, "the Tightest match tile's foot is no longer a "
+                                     "line of parts joined through dotted()")
+        parts = self.top_level(joined.group(1), ",")
+        self.assertEqual(len(parts), 2, "the foot is not the match and then its words")
+        self.assertRegex(parts[0], r"^teamShort\(%s\.home\) \+ ' v ' \+ "
+                                   r"teamShort\(%s\.away\)" % (name, name),
+                         "the foot no longer begins with the two sides of the match")
+        self.assertEqual(parts[1], f"{self.WORDS}({name})",
+                         "the foot does not end with what the function says of the "
+                         "match the tile chose")
+
+
+class TestARubberScoredOtherwiseThanItPrintedSaysItsGamesOnCourt(WebAssetCase):
+    """The pages read 4.421's fields: the games printed, and who played.
+
+    A rubber ticked Forfeit against one side is scored a love set to the other, and
+    a set one side retired from is the other's at the games to win it (4.421,
+    4.422), so its games scored are not the games played. 0.1.0's match page
+    printed the games scored alone, which were then the games printed, and its
+    status cell "Forfeit"; now the cell says "Forfeit, 2–6 on court", and a
+    player's Every set played list says "0–6 (6–2 on court)", from the export's
+    ``printed_home_games`` and ``printed_away_games``. A rubber nobody played is in
+    no player's figures (``Match.nobody_played``), so ``setsOfPlayer`` skips it by
+    the export's ``nobody_played``; and a night no rubber was played on is a match
+    played but has no sets, games or margin to count, so the overview's Sets
+    completed, Games played, Tightest and Biggest tiles leave it out by
+    ``no_rubber_played``, and Games played sums the games printed; Sets completed
+    leaves out a rubber nobody played on a night that had play, by
+    ``nobody_played``. Measured by the tiles' arithmetic over the season the probe
+    builds (/tmp/mcf/scratch/RUBBER/probe/before3.txt): on the base a walkover over
+    blank rows was the season's Tightest match, at 0 games, a night of rows all
+    ticked Forfeit added 4 sets completed that nobody played, and a night with two
+    such rows beside two played added 2; scored 24-0 and left in, either whole
+    night would be the Biggest margin, 24 games nobody played. Rejected: the
+    rule written again here, as a status test, which is the second copy the
+    export's fields exist to remove.
+
+    Structural, because there is no JavaScript engine here to run the branches.
+    """
+
+    def code(self, fn: str) -> str:
+        """*fn* with its comments and strings blanked."""
+        return jslint.code_only(self.body(fn))
+
+    def said(self, fn: str) -> str:
+        """*fn* with its comments blanked and its strings kept."""
+        return jslint.without_comments(self.body(fn))
+
+    def test_on_court_reads_the_games_printed_off_the_export(self):
+        code = self.code("onCourt")
+        self.assertIn("st.printed_home_games", code)
+        self.assertIn("st.printed_away_games", code)
+        self.assertIn("' on court'", self.said("onCourt"))
+
+    def test_on_court_says_nothing_of_a_row_scored_as_it_printed(self):
+        self.assertRegex(self.said("onCourt"),
+                         r"home\s*===\s*st\.home_games\s*&&\s*"
+                         r"away\s*===\s*st\.away_games\)\)\s*return\s*''")
+
+    def test_on_court_says_a_rubber_nobody_played_was_not_played(self):
+        self.assertEqual(self.guard_for("onCourt", "'not played'", emits="return"),
+                         "st.nobody_played")
+
+    def test_on_court_reads_the_games_from_the_side_asked(self):
+        self.assertRegex(self.said("onCourt"),
+                         r"side\s*===\s*'away'\s*\?\s*num\(away\)")
+
+    def test_the_match_pages_status_cell_says_the_games_on_court(self):
+        code = self.said("setRow")
+        self.assertRegex(code, r"\[status,\s*onCourt\(st\)\]\.filter\(Boolean\)"
+                               r"\.join\(', '\)")
+        self.assertRegex(code, r"text:\s*words\s*\?\s*upperFirst\(words\)")
+
+    def test_a_players_set_list_says_the_games_on_court_beside_its_own(self):
+        code = self.code("renderPlayer")
+        self.assertIn("onCourt(s.set, s.side)", code)
+        self.assertRegex(code, r"num\(s\.gamesAgainst\)\s*\+\s*\(court\s*\?")
+
+    def test_a_players_set_list_leaves_out_a_rubber_nobody_played(self):
+        self.assertRegex(self.code("setsOfPlayer"),
+                         r"if\s*\(st\.nobody_played\)\s*return;")
+        self.assertNotIn("'forfeit'", self.said("setsOfPlayer"))
+
+    def test_the_overview_counts_the_tennis_of_the_nights_a_rubber_was_played_on(self):
+        code = self.said("renderOverview")
+        self.assertRegex(code, r"var\s+rubbers\s*=\s*played\.filter\(function\s*"
+                               r"\(x\)\s*\{\s*return\s*!x\.no_rubber_played;\s*\}\)")
+        self.assertIn("rubbers.forEach(", code)
+        self.assertNotIn("played.forEach(", code.replace("rubbers.forEach(", ""))
+        # Still a match played: the night happened.
+        self.assertIn("tile('Matches played', String(played.length)", code)
+
+    def test_sets_completed_leave_out_a_rubber_nobody_played_on_a_night_with_play(self):
+        # Two rubbers nobody came for beside two played (the probe's "two 0-0
+        # nobody came"): the night stays in, its two love sets nobody played do
+        # not, by the same field the player pages read.
+        self.assertRegex(self.code("renderOverview"),
+                         r"filter\(function\s*\(st\)\s*\{\s*return\s*st\.completed"
+                         r"\s*&&\s*!st\.nobody_played;\s*\}\)")
+
+    def test_games_played_are_the_games_printed(self):
+        code = self.code("renderOverview")
+        self.assertIn("gamesPlayed += (x.printed_home_games || 0) + "
+                      "(x.printed_away_games || 0)", code)
+        self.assertNotIn("(x.home_games || 0)", code)
+        self.assertIn("num(gamesPlayed / rubbers.length, 1)", code)
+
+    def test_the_share_caption_says_why_a_rubber_nobody_played_is_in_no_row(self):
+        self.assertIn("gap.rubbers_nobody_played", self.code("teamPlayersTable"))
+        self.assertEqual(self.guard_for("teamPlayersTable",
+                                        "won by a forfeit with nobody on court",
+                                        emits="caption").strip(), "nobody")
+        # Nothing to correct, so the data health section is not pointed at.
+        self.assertRegex(self.code("teamPlayersTable"),
+                         r"var found = strangers \+ blanks \+ crowded;")
+
+
 class TestTheProgressBoxNamesTheFinalsPlayedApartFromTheRounds(WebAssetCase):
     """The progress box counts the regular rounds and says which finals were played.
 
@@ -4176,7 +5752,8 @@ class TestTheProgressBoxNamesTheFinalsPlayedApartFromTheRounds(WebAssetCase):
 
     def test_the_box_without_a_length_gives_that_reason(self):
         code = jslint.without_comments(self.body("seasonProgress"))
-        self.assertRegex(code, r"' scored\. ' \+\s*noLengthReason\(\)")
+        # 4.468 moved this: the foot's matches are played, as the tiles' are.
+        self.assertRegex(code, r"' played\. ' \+\s*noLengthReason\(\)")
         self.assertNotIn("has not been declared", code)
 
 
@@ -4247,8 +5824,11 @@ class TestTheProgressBoxsFootCountsTheFixturesOfTheRoundsItCounts(WebAssetCase):
     def test_one_match_is_one_match_in_both_shapes_of_the_box(self):
         name = self.counted()
         code = self.foot()
-        scored = [found.start() for found in re.finditer(r"' scored\b", code)]
-        self.assertEqual(len(scored), 2, "the box does not say what was scored in "
+        # 4.468 moved this: the foot's matches are played, as the tiles' are, and the
+        # count is read in front of that word in both shapes.
+        scored = [found.start()
+                  for found in re.finditer(r"' played(?:\. | · )'", code)]
+        self.assertEqual(len(scored), 2, "the box does not say what was played in "
                                          "both of its shapes")
         for at in scored:
             with self.subTest(at=at):
@@ -4983,6 +6563,162 @@ class TestAMeetingThatReachedNoResultIsStillAMeeting(WebAssetCase):
         # because the alternative is a reader deciding which one is wrong.
         guard = self.guard_for("teamH2HTable", "neither side of", emits="caption +=")
         self.assertIn(self.held_in("teamH2HTable"), guard)
+
+
+class TestAChartWithNothingToDrawSaysSoInsteadOfDrawingItsFloor(WebAssetCase):
+    """A chart with nothing to draw showed the floor it divides by as its scale.
+
+    Item 4.455. The head-to-head grid's ``maxGames`` started at 1 so that the fill
+    never divides by nothing, and the same 1 was the top of the grid's colour key,
+    printed as "1 games" and drawn whatever the grid held. And three diverging charts
+    built over a fixed list -- Games for and against (a row per ladder team),
+    Strength by set slot (a row per slot of the format, with a zero record for a slot
+    nobody played) and a player's Singles and doubles -- hand ``hbarCard`` rows that
+    are all 0, which it draws, since its empty text is for no rows at all: each drew
+    its rows at 0 on an axis of 1 · 0 · 1 under "Games", and their own empty texts
+    never showed. Measured in headless Chrome on fictional cardwriter cards
+    (/tmp/mcf/scratch/WORDING/probe.py, before.txt): a round of two Match Cancelled
+    cards between four teams drew four rows of "0 games won, 0 games lost" and a
+    four-by-four grid of dots over "0 games [ramp] 1 games", and each team page four
+    0/0 slots; one away walkover over four 0-0 rows drew 0–0 cells over the same key
+    and the zero rows on the overview, both team pages and every player's page; a
+    competition of one grand final won 24-10 drew Games for and against at 0 and 0,
+    since a team's figures are the regular season wholesale (stats.py, F11), and the
+    two team pages four 0/0 slots each; and a rostered reserve who had not played
+    after two rounds drew Singles and doubles at 0 and 0 above "No opponent faced
+    yet.".
+
+    So the grid keeps its floor as the divisor only and keys the colours from its own
+    largest figure, counted from 0, drawing the key only where a cell has a colour;
+    and ``hbarCard`` takes ``zeroIsEmpty``, under which rows that are every one 0 are
+    no rows, before the table and the plot are built, for the three charts over a
+    fixed list and no other. Their texts say what their figures count: a team's are the regular
+    season's, and a player's count every match, finals and all. The player's says
+    games and not sets: a last double left at 0-0 when play stopped credits the two
+    named on it a set played (stats.py), and on a fictional card where it was the one
+    set two players and a reserve were named on, each page's Sets tile read "0–0, 1
+    played", where "No sets played yet." would have stood beside it; the same is true
+    of a walkover's rows until 4.289 lands. Read as text, as the suite runs no
+    JavaScript. Rejected: one rule in ``hbarCard`` for every chart,
+    since a 0 in Games differential by opponent says a player is level with that
+    opponent, and Points earned by round keeps a washout's row on purpose; dropping
+    zero rows one at a time, which takes a team still at 0 after a bye out of a chart
+    of the whole ladder; moving ``niceMax``'s floor, which still draws an axis for
+    nothing; mending only the plural, which leaves a key for colours no cell uses;
+    rewording the caption's "Blank" for the dot, which is the blank mark; a hover of
+    its own for a pairing whose one fixture was called off, which is no meeting; and
+    leaving out the colour legend above the empty text, which states no figure and
+    already stands above Games differential by opponent's "No opponent faced yet.".
+    """
+
+    FIXED_LISTS = ("gamesForAgainstChart", "slotStrengthChart", "disciplineChart")
+    EMPTY = {"gamesForAgainstChart": "No regular-season games counted yet.",
+             "slotStrengthChart": "No regular-season set played yet.",
+             "disciplineChart": "No games won or lost yet."}
+
+    @staticmethod
+    def terms(condition: str) -> list[str]:
+        """A condition's terms, split at the ``&&`` outside every bracket, so that a
+        callback's own ``&&`` stays inside the term that calls it."""
+        code = jslint.code_only(condition)
+        terms, depth, start = [], 0, 0
+        for index, char in enumerate(code):
+            depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(char, 0)
+            if depth == 0 and code.startswith("&&", index):
+                terms.append(condition[start:index].strip())
+                start = index + 2
+        return terms + [condition[start:].strip()]
+
+    def key_top(self) -> str:
+        """The figure the grid's colour key tops out at, whatever it is called."""
+        said = jslint.without_comments(self.body("h2hGridCard"))
+        found = re.search(r"text: (\w+) \+ ' ' \+ plural\(\1, 'game'\)", said)
+        self.assertIsNotNone(found, "the top of the grid's key is not worded through "
+                                    "plural(), so it reads '1 games'")
+        return found.group(1)
+
+    def test_the_keys_top_is_the_grids_largest_figure_counted_from_nought(self):
+        top = self.key_top()
+        code = jslint.code_only(self.body("h2hGridCard"))
+        self.assertRegex(code, r"var %s = 0;" % top,
+                         "the key's top starts above 0, so a grid with no games in it "
+                         "is keyed to a game")
+        self.assertRegex(code, r"\b%s = Math\.max\(%s, \w+\.gamesFor\)" % (top, top),
+                         "the key's top is not the largest figure a cell prints")
+        # And given no other value: a floor put back under it after the loop keys a
+        # grid of dots to "1 game" again, with both of the lines above still there.
+        assigned = re.findall(r"(?<![\w$.])%s\s*(?:[-+*/%%&|^]|<<|>>>?)?=(?!=)"
+                              r"|(?:\+\+|--)\s*%s\b|(?<![\w$.])%s\s*(?:\+\+|--)"
+                              % (top, top, top), code)
+        self.assertEqual(len(assigned), 2,
+                         "the key's top is given a value other than 0 and the largest "
+                         "figure a cell prints")
+
+    def test_the_fill_alone_keeps_the_floor_it_divides_by(self):
+        # A walkover's 0–0 cell is a record with games of 0: divided by a top of 0, its
+        # fill is NaN and the cell has no colour at all.
+        top = self.key_top()
+        code = jslint.code_only(self.body("h2hGridCard"))
+        self.assertRegex(code, r"\.gamesFor / Math\.max\(1, %s\)" % top,
+                         "the fill divides by the key's top with no floor under it")
+        self.assertNotRegex(code, r"/ %s\b" % top,
+                            "something divides by the key's top unguarded")
+
+    def test_the_key_is_drawn_only_over_a_cell_with_a_colour(self):
+        top = self.key_top()
+        said = jslint.without_comments(self.body("h2hGridCard"))
+        scale = re.search(r"var (\w+) = el\('div', \{ class: 'scale-legend' \}", said)
+        self.assertIsNotNone(scale, "the grid has no colour key")
+        guard = self.guard_for("h2hGridCard", f"appendChild({scale.group(1)})")
+        self.assertEqual(guard, f"{top} > 0",
+                         "the key is drawn under something other than the grid having "
+                         "a game to colour")
+
+    def test_the_bar_chart_asks_before_it_builds_the_table_or_the_plot(self):
+        guard = self.guard_for("hbarCard", "rows = []", emits="rows =")
+        terms = self.terms(guard)
+        self.assertIn("opts.zeroIsEmpty", terms,
+                      "the rows are emptied whether or not the chart asked for it")
+        every = [term for term in terms if term.startswith("rows.every(")]
+        self.assertEqual(len(every), 1, "the rows are emptied without asking whether "
+                                        "every one of them is 0")
+        # guard_for has refused a `||` anywhere in the condition, the callback's
+        # included, so a row is 0 here only where both of its figures are.
+        for field in ("value", "neg"):
+            with self.subTest(field=field):
+                self.assertRegex(every[0], r"!\s*\w+\.%s\b" % field,
+                                 f"a row is taken for 0 without reading its {field}")
+        code = jslint.code_only(self.body("hbarCard"))
+        at = self.offset_of(code, "rows = []", "the emptying")
+        for later, what in (("rows.map(", "the table's rows"),
+                            ("chartCard(", "the card and its plot")):
+            with self.subTest(before=what):
+                self.assertLess(at, self.offset_of(code, later, what),
+                                f"{what} are built before the rows are emptied")
+
+    def test_the_charts_over_a_fixed_list_ask_for_it_and_no_other_does(self):
+        for fn in self.FIXED_LISTS:
+            with self.subTest(fn=fn):
+                self.assertRegex(jslint.code_only(self.body(fn)),
+                                 r"\bzeroIsEmpty: true\b",
+                                 f"{fn}() draws a row of 0 for every entry of its list")
+        # Every other chart's 0 can be a result: a player level with an opponent in
+        # Games differential by opponent, a washout's row kept on purpose in Points
+        # earned by round, a player level on games in Games differential by player,
+        # a team on no points yet in Points average by team.
+        source = self.assets()["app.js"]
+        asking = {fn for fn in re.findall(r"\nfunction (\w+)\(", source)
+                  if fn != "hbarCard"
+                  and re.search(r"\bzeroIsEmpty\b", jslint.code_only(self.body(fn)))}
+        self.assertEqual(asking, set(self.FIXED_LISTS),
+                         "a chart whose rows of 0 say something drops them")
+
+    def test_their_empty_texts_say_what_their_figures_count(self):
+        for fn, text in self.EMPTY.items():
+            with self.subTest(fn=fn):
+                said = jslint.without_comments(self.body(fn))
+                found = re.findall(r"\bempty: '([^']*)'", said)
+                self.assertEqual(found, [text])
 
 
 class TestTheGridAndTheLadderCountDifferentMeetings(WebAssetCase):
@@ -10493,6 +12229,165 @@ class TestTheHealthDetailCountsTheErrorsThePillCountsAndTheRefusedCardsApart(
                                         emits="setAttribute"), "own")
 
 
+class TestTheDataHealthListShowsItsErrorsItsWarningsOrBothAndCountsThemAll(
+        WebAssetCase):
+    """The data health detail can show its errors alone, its warnings alone, or both.
+
+    The detail listed every error and then every warning in one list, and nothing
+    on the page showed one kind. Measured in headless Chrome
+    (``/tmp/mcf/scratch/FILTER/probe.py``) on a fictional season with three errors
+    of its own, one refused card and eight warnings: twelve items, open on load
+    because of the competition's own errors, 398px of list at 1280 wide and 1061px
+    at 360, with the season's own content starting 829px and 2048px down. The
+    errors come first, so the warnings are what a club reads past to reach the
+    page. On the club's own cards there are 18 errors and 267 warnings over 17
+    dashboards, up to 3 errors and 38 warnings on one.
+
+    There is now a fieldset of three native radios between the summary and the
+    list: Both, which is checked every time the page opens, and the errors and the
+    warnings, each counted in the summary's words. Each item carries its kind from
+    the loop's own ``isError``, and a choice writes one attribute on the list,
+    which the stylesheet reads. So paper ignores the choice, and a printed list is
+    the whole list. Whatever is chosen, no count changes. The Errors option shows
+    the refused cards' F4 errors with the competition's own, because they are
+    errors, and says them apart as the summary does. Its count is therefore the
+    summary's, never a sum the pill does not show. A list of one kind gets no
+    control.
+
+    Rejected:
+
+    * ``hidden`` on each item, which is a write per item and a state that print
+      would have to undo item by item.
+    * Keeping the choice in ``localStorage``, as the theme is kept, or in the
+      address, whose fragment belongs to the router. Either would let a choice
+      made on another day hide an error.
+    * Counted labels such as ``Errors (4)``, which beside ``3 validation errors``
+      counts a refused card as one of the competition's errors again.
+    """
+
+    def said(self, fn: str) -> str:
+        return " ".join(jslint.without_comments(self.body(fn)).split())
+
+    def handler(self) -> str:
+        """The change handler's body, from its opening brace to its closing one."""
+        said = self.said("healthFilter")
+        start = said.index("change: function () {")
+        return said[start:said.index("}", start) + 1]
+
+    def test_the_choice_is_offered_only_where_the_list_holds_both_kinds(self):
+        # A list of errors alone, or of warnings alone, would offer two choices
+        # that show the same list and a third that shows nothing.
+        self.assertEqual(self.guard_for("renderHealth", "healthFilter(list"),
+                         "errors.length && warnings.length")
+
+    def test_it_sits_between_the_summary_and_the_list_it_narrows(self):
+        said = self.said("renderHealth")
+        summary = said.index("det.appendChild(el('summary'")
+        offered = said.find("det.appendChild(healthFilter(list")
+        listed = said.index("det.appendChild(list);")
+        self.assertGreater(offered, 0, "renderHealth() offers no choice of what "
+                                       "the list shows")
+        self.assertLess(summary, offered, "the choice is above the summary that "
+                                          "counts what it chooses between")
+        self.assertLess(offered, listed, "the choice is below the list it "
+                                         "narrows, where a long list hides it")
+
+    def test_each_item_carries_its_kind_from_the_loops_own_test(self):
+        self.assertIn("var isError = i < errors.length; var li = el('li', "
+                      "{ 'data-kind': isError ? 'error' : 'warning' });",
+                      self.said("renderHealth"))
+
+    def test_it_is_a_fieldset_of_native_radios_under_a_legend(self):
+        said = self.said("healthFilter")
+        self.assertIn("el('fieldset', { class: 'health-filter' }, "
+                      "[el('legend', { text: 'Show' })])", said)
+        # The label holds its radio and then its counted words, which are the
+        # radio's name to a screen reader: words beside the label name nothing.
+        self.assertIn("box.appendChild(el('label', null, [el('input', { type: "
+                      "'radio', name: 'health-show', value: choice[0], checked: "
+                      "choice[0] === 'both', on: { change: function () { "
+                      "list.setAttribute('data-show', choice[0]); } } }), "
+                      "choice[1]]));", said)
+        self.assertEqual(re.findall(r"\['(\w+)', ", said),
+                         ["both", "errors", "warnings"])
+        # Native elements carry their own names and their own keys, arrows included.
+        self.assertNotIn("aria-", said)
+        self.assertNotIn("keydown", said)
+
+    def test_each_option_counts_what_it_shows_in_the_summarys_words(self):
+        said = self.said("healthFilter")
+        self.assertIn("['both', 'Both']", said)
+        self.assertIn("['errors', inWords([own + ' ' + plural(own, 'error')]"
+                      ".concat(refused ? refusedWords(refused, 'card', "
+                      "' not scored') : []))]", said)
+        self.assertIn("['warnings', warned + ' ' + plural(warned, 'warning')]", said)
+        self.assertIn("healthFilter(list, own, refused, warnings.length)",
+                      self.said("renderHealth"))
+        # The refused cards' clause is written twice, because the summary's own
+        # test pins it inline. Read here off the summary, so the option's words
+        # can only change with the line they quote.
+        quoted = re.search(r"\.concat\(refused \? refusedWords\(refused, [^)]*\) : "
+                           r"\[\]\)", self.said("renderHealth"))
+        self.assertIsNotNone(quoted, "the summary says no refused card apart")
+        self.assertIn(quoted.group(0), said)
+
+    def test_the_page_opens_on_both_every_time(self):
+        self.assertIn("checked: choice[0] === 'both',", self.said("healthFilter"))
+        # Nothing is hidden until a choice is made: the list's attribute is written
+        # in the handler and nowhere else.
+        for fn in ("healthFilter", "renderHealth"):
+            with self.subTest(function=fn):
+                said = self.said(fn)
+                self.assertEqual(said.count("data-show"),
+                                 self.handler().count("data-show")
+                                 if fn == "healthFilter" else 0)
+                code = jslint.code_only(self.body(fn))
+                for memory in ("localStorage", "sessionStorage", "cookie",
+                               "location", "history"):
+                    self.assertNotIn(memory, code,
+                                     f"{fn}() reads or keeps {memory}, so a "
+                                     f"choice made on another day can hide an "
+                                     f"error on this one")
+
+    def test_choosing_writes_one_attribute_on_the_list_and_no_word(self):
+        self.assertEqual(self.handler(), "change: function () { "
+                         "list.setAttribute('data-show', choice[0]); }")
+
+    def test_the_stylesheet_hides_the_other_kind_on_every_screen(self):
+        # Outside every @media, so a choice narrows the list at 360 wide as at 1280.
+        screen = {rule.selector: rule for rule in csslint.rules(
+                      self.assets()["styles.css"]) if not rule.at_rule}
+        hides = '.health ul[data-show="errors"] > li[data-kind="warning"], ' \
+                '.health ul[data-show="warnings"] > li[data-kind="error"]'
+        self.assertTrue(hides in screen, "no rule for every screen hides the kind "
+                                         "not chosen, so a choice changes nothing "
+                                         "on the page")
+        self.assertEqual(screen[hides].value("display"), "none")
+
+    def test_the_control_shows_on_every_screen(self):
+        screen = [rule for rule in csslint.rules(self.assets()["styles.css"])
+                  if not csslint.paper_only(rule.at_rule)]
+        self.assertEqual([rule.value("display") for rule in screen
+                          if rule.selector == ".health-filter"], ["flex"],
+                         "the choice is not drawn as one row, legend first")
+        self.assertEqual([rule.where for rule in screen
+                          if "health-filter" in rule.selector
+                          and rule.value("display") == "none"], [],
+                         "a screen rule hides the choice or its radios, so the "
+                         "list cannot be narrowed")
+
+    def test_a_printed_list_is_the_whole_list_and_carries_no_control(self):
+        printed = {rule.selector: rule for rule in self.print_rules()}
+        whole = ".health ul[data-show] > li[data-kind]"
+        self.assertTrue(whole in printed, "a list printed after a choice prints "
+                                          "only the kind chosen, to a reader who "
+                                          "never chose")
+        self.assertEqual(printed[whole].value("display"), "list-item")
+        self.assertTrue(".health-filter" in printed, "the choice prints, and paper "
+                                                     "takes no input")
+        self.assertEqual(printed[".health-filter"].value("display"), "none")
+
+
 class TestThePageCountsAFolderItCouldNotListAsAFolderAndNotACard(WebAssetCase):
     """A folder the build could not list is on the refused list, and said as one.
 
@@ -10704,9 +12599,10 @@ class TestPlayerListsSortNumbersAsNumbers(WebAssetCase):
 class TestAOneFileDashboardDoesNotLinkToTheCareersPage(WebAssetCase):
     """The player page links its careers anchor only where the page can be there.
 
-    The careers page is written only in multi-season mode, at the site root, and a
-    one-file dashboard travels without the site around it, so a link from one is a
-    link to nothing. Nor by a build that withholds players' names, which writes no
+    The careers page is written at the site root (in either mode since 4.430,
+    which moved the first two tests below: before it, only in multi-season mode),
+    and a one-file dashboard travels without the site around it, so a link from
+    one is a link to nothing. Nor by a build that withholds players' names, which writes no
     careers page (a withheld label belongs to one season), and whose documents are
     the only ones that carry ``meta.players``. The guard used to ask the mode and
     the file alone, so a withheld multi-season player page would link a careers
@@ -10715,18 +12611,22 @@ class TestAOneFileDashboardDoesNotLinkToTheCareersPage(WebAssetCase):
     constants site.py and careers.py write them under.
     """
 
-    def test_the_link_is_only_made_in_a_multi_season_site_page(self):
+    def test_the_link_is_only_made_in_a_site_page(self):
+        # Moved by 4.430: was test_the_link_is_only_made_in_a_multi_season_site_page,
+        # asserting the mode was in the guard. Every build printing names now writes
+        # the page, so the mode is no longer one of the ways the link is kept off.
         guard = self.guard_for("careersHref", "'careers.html'", emits="return",
                                exits=True, disjunction=True)
         self.assertIn("isSingleFile()", guard)
-        self.assertIn("meta().seasons_mode !== 'multi'", guard)
+        self.assertNotIn("seasons_mode", guard)
 
     def test_nor_on_a_page_that_withholds_players_names(self):
         guard = self.guard_for("careersHref", "'careers.html'", emits="return",
                                exits=True, disjunction=True)
         terms = [term.strip() for term in guard.split("||")]
         self.assertIn("meta().players", terms)
-        self.assertEqual(len(terms), 3, guard)
+        # Moved by 4.430: three terms before it, the mode's the third.
+        self.assertEqual(len(terms), 2, guard)
 
     def test_the_link_is_made_from_the_root_link_and_the_written_names(self):
         from matchcentre import careers, site
@@ -10744,6 +12644,42 @@ class TestAOneFileDashboardDoesNotLinkToTheCareersPage(WebAssetCase):
         self.assertEqual(guard, held.group(1))
 
 
+class TestASingleSeasonPlayerPageLinksItsEntryOnTheSeasonsPlayersPage(WebAssetCase):
+    """A player page in a single-season site links the season's players page too.
+
+    Before 4.430 ``careersHref`` returned '' unless ``meta.seasons_mode`` was
+    'multi', because only a multi-season build wrote the careers page; measured on
+    the fictional three-competition season (/tmp/mcf/scratch/CLUB/measure/
+    before.txt), none of its 19 player pages, 17 people's, had a way to the rest
+    of a player's season. Now a single-season build that prints names writes the page as the
+    season's players, so the link is kept off by the one-file dashboard and by
+    withheld names alone, and is worded for the page it opens: "Career across
+    seasons" where it lists seasons, "Season across competitions" where it lists
+    one season's competitions. Rejected: "All competitions this season", which
+    beside the topbar's "All competitions" reads as a second way to the front page.
+    """
+
+    def test_the_mode_is_not_one_of_the_ways_the_link_is_kept_off(self):
+        guard = self.guard_for("careersHref", "'careers.html'", emits="return",
+                               exits=True, disjunction=True)
+        self.assertEqual(sorted(term.strip() for term in guard.split("||")),
+                         ["isSingleFile()", "meta().players"])
+        self.assertNotIn("seasons_mode", jslint.code_only(self.body("careersHref")))
+
+    def test_the_link_is_worded_for_the_page_it_opens(self):
+        body = jslint.without_comments(self.body("renderPlayer"))
+        held = re.search(r"var (\w+) = careersHref\(", body)
+        self.assertIsNotNone(held, "renderPlayer() never asks careersHref()")
+        worded = re.findall(r"text: meta\(\)\.seasons_mode === 'multi'\s*\?\s*"
+                            r"'([^']*)'\s*:\s*'([^']*)'", body)
+        self.assertEqual(worded, [("Career across seasons →",
+                                   "Season across competitions →")])
+        for phrase in worded[0]:
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.guard_for("renderPlayer", phrase, emits="push"),
+                                 held.group(1))
+
+
 class TestTheCareersTopbarDoesNotCoverWhatAnAnchorLandsOn(WebAssetCase):
     """On the careers page the topbar scrolls away with the page.
 
@@ -10757,6 +12693,255 @@ class TestTheCareersTopbarDoesNotCoverWhatAnAnchorLandsOn(WebAssetCase):
                  if rule.selector == "body.careers .topbar" and not rule.at_rule]
         self.assertTrue(found, "styles.css never un-sticks the careers topbar")
         self.assertEqual(found[-1].value("position"), "static")
+
+
+class TestAPairNamingOnePlayerMarksThePlaceNobodyFilled(WebAssetCase):
+    """A doubles side naming one player shows the place left over as not recorded.
+
+    ``names()`` in ``setRow`` marked a side 'not recorded' only where its list was
+    empty, so a pair naming one player above Match Centre's 'Unspecified player'
+    showed the one name alone, as a full side reads. Measured in headless Chrome
+    on the match page of a fictional card, Riverside Rockets v Hilltop Aces
+    played 6-1, 6-2, 6-3, 6-4 with the away pairs naming one player beside the
+    placeholder (/tmp/mcf/scratch/UNSPEC/probe/page.py, case
+    played-away-placeholder): "Doubles 1 Ana Fernandez + Bo Nakamura | 6 | 1 |
+    Dev Raman | —", Doubles 2 the same, beside "Singles 2 ... not recorded" for
+    the placeholder alone; the card with those cells blank read the same. Now
+    each place the side's list leaves over of its rubber's, two for a doubles
+    rubber and one for singles, follows the names as ' + not recorded', the
+    mark an empty side already carries, and an empty side keeps its one mark.
+    Marked by the slot, so a blank second cell is marked too: half that rubber
+    is credited to nobody either way. Rejected: exporting each side's
+    placeholder count so the page marks only a placeholder, two keys on every
+    set of every season.json for a distinction the page draws for no empty
+    cell; a word of its own, 'not entered', which makes one placeholder read
+    two ways on one card; and a mark per place on an empty doubles side, which
+    doubles the mark on every washout's and forfeit's rows.
+    """
+
+    MARK = r"el\('span',\s*\{\s*class:\s*'muted',\s*text:\s*'not recorded'\s*\}\)"
+    # The places left over: counted up from the list's length, on a list that
+    # names somebody, to the rubber's places, read off st.doubles, which every set
+    # of season.json carries.
+    LOOP = (r"for\s*\(\s*var\s+(\w+)\s*=\s*\(list\s*\|\|\s*\[\]\)\.length\s*;"
+            r"\s*\1\s*&&\s*\1\s*<\s*\(st\.doubles\s*\?\s*2\s*:\s*1\)\s*;"
+            r"\s*\1\+\+\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}")
+
+    def names(self) -> str:
+        """``names()`` inside ``setRow``, its comments taken out."""
+        body = jslint.without_comments(self.body("setRow"))
+        start = body.find("function names(")
+        self.assertGreater(start, 0, "setRow defines no names()")
+        end = body.find("return wrap;", start)
+        self.assertGreater(end, start, "names() returns no wrap")
+        return body[start:end]
+
+    def test_each_place_left_over_follows_the_names_as_not_recorded(self):
+        names = self.names()
+        found = re.search(self.LOOP, names)
+        self.assertIsNotNone(found, "names() marks no place a side's list leaves "
+                                    "over of its rubber's, so a pair naming one "
+                                    "player reads as a full side")
+        # After the names, which the forEach lays out: marked before them, the
+        # place left over would lead the pair's one name and run into it.
+        laid = names.find("});", names.find(".forEach("))
+        self.assertGreater(names.find(".forEach("), 0, "names() lays out no names")
+        self.assertGreater(found.start(), laid,
+                           "names() marks the places left over before the names")
+        self.assertRegex(found.group(2),
+                         r"^\s*wrap\.appendChild\(document\.createTextNode\("
+                         r"' \+ '\)\);\s*wrap\.appendChild\(" + self.MARK
+                         + r"\);\s*$")
+
+    def test_an_empty_side_keeps_its_one_mark(self):
+        names = self.names()
+        self.assertEqual(len(re.findall(self.MARK, names)), 2)
+        self.assertRegex(names, r"if\s*\(!list\s*\|\|\s*!list\.length\)\s*"
+                                r"wrap\.appendChild\(" + self.MARK + r"\);")
+
+
+# --- 4.428, 4.438, 4.439: the ladder's state, its leader, and the rounds played ---
+
+
+class TestTheOverviewsHeroCrownsTheLeaderTheDocumentNames(WebAssetCase):
+    """The hero's figure is ``meta.leader``'s, and with none it says why (4.438).
+
+    It read ``ladder[0]``, the top row whatever the ladder's state, where the front
+    page crowned a team only on a settled ladder. Measured on the base with round
+    3's Rockets v Wanderers missing (/tmp/mcf/scratch/EMPTY/before.txt, prog): the
+    hero ``6.30 | Riverside Rockets · 12.6 points from 2 matches`` over a front-page
+    card naming no leader; and on a round rained off, ``— | Hilltop Aces · 0.0 points
+    from 0 matches``, the first name in the alphabet crowned on nothing. Python names
+    the leader once, for both, and the hero says why it names none. Rejected:
+    crowning on both surfaces, which with five of the owner's ten divisions of five
+    teams, a bye every round, names a leader on unequal counts all season against
+    F10; and the page asking ``ladder_complete`` itself, a second copy of the rule.
+    """
+
+    def hero(self) -> str:
+        return jslint.without_comments(self.body("renderOverview"))
+
+    def test_it_reads_the_leader_python_named_and_not_the_top_row(self):
+        code = jslint.code_only(self.body("renderOverview"))
+        self.assertNotIn("ladder[0]", code)
+        self.assertIn("var top = m.leader ? teamOf(m.leader.slug) : null;", code)
+        self.assertIn("text: top ? num(m.leader.value, 2) : '—'", self.hero())
+
+    def test_with_no_leader_its_foot_says_why(self):
+        self.assertRegex(self.hero(), r"text: top\s*\?\s*top\.name \+[^:]*"
+                                      r":\s*noLeaderReason\(m\) \}")
+
+    def test_a_ladder_in_progress_names_none_until_the_counts_are_level(self):
+        # 4.458 moved this: the reason is the document's sentence for what F10
+        # compared, played or counted, and not played whatever it compared; a
+        # document without the sentence falls through to No leader named.
+        self.assertEqual(
+            self.guard_for("noLeaderReason", "'No leader while ' + m.ladder_detail",
+                           emits="return"),
+            "m.ladder_state === 'in-progress' && m.ladder_detail")
+
+    def test_a_ladder_not_started_says_nothing_has_been_counted(self):
+        self.assertEqual(
+            self.guard_for("noLeaderReason",
+                           "'No regular-season match has been counted yet'",
+                           emits="return"),
+            "m.ladder_state === 'empty'")
+
+
+class TestALadderNotStartedIsNotCalledOneInProgress(WebAssetCase):
+    """The ladder's note and its history chart say nothing was counted (4.428).
+
+    Measured on the base with round 1 rained off on both courts
+    (/tmp/mcf/scratch/EMPTY/before.txt, wash1): ``In progress — teams have played
+    unequal numbers of matches, so this order is a snapshot and not a standing.``
+    over four teams on 0 matches, and ``Ladder position by round`` drawing R1 at 1, 2,
+    3 and 4. The document places nobody now and puts no such round on the chart, so
+    the chart's empty text is the one shown, and the note reads ``meta.ladder_state``.
+    Rejected: the note working the state out from the rows' ``counted``, which is
+    Python's rule (F10) a second time.
+    """
+
+    def test_the_note_says_no_match_has_been_counted(self):
+        self.assertEqual(
+            self.guard_for("ladderNote", "No regular-season match has been counted "
+                           "yet", emits="return"),
+            "m.ladder_state === 'empty'")
+
+    def test_and_says_it_before_the_unequal_numbers_could_be(self):
+        code = jslint.without_comments(self.body("ladderNote"))
+        empty = code.index("m.ladder_state === 'empty'")
+        # 4.458 moved this: the unequal numbers are the document's sentence now.
+        self.assertLess(empty, code.index("m.ladder_detail"))
+        self.assertNotIn("unequal", code[empty:code.index("No regular-season")
+                                       + 200])
+
+    def test_the_history_chart_waits_for_a_counted_match_and_not_a_round(self):
+        code = jslint.without_comments(self.body("ladderHistoryChart"))
+        self.assertIn("empty: 'Positions appear once a regular-season match has been "
+                      "counted.'", code)
+
+
+class TestATeamWithNoPlaceIsADashWhereverItsPlaceIsSaid(WebAssetCase):
+    """A null ``position`` is said as ``—``, never as ``null`` (4.428).
+
+    A ladder that has not started places nobody, so its rows' ``position`` is null,
+    and ``String(null)`` is the word ``null`` on the page. The ladder's ``#`` column
+    and the team page's tile said ``—`` already; the points-average chart's tooltip
+    said ``String(t.position)``. No document reaches that one today: the chart draws
+    only teams with an average, and a team with one has counted a match, so its
+    ladder has started and placed it. It is guarded as the other two are all the
+    same, so that nothing rests on that. Rejected: leaving it to that reasoning,
+    which a change to who is given an average would undo with no test failing.
+    """
+
+    GUARD = "t.position === null || t.position === undefined ? '—' : "
+
+    def test_every_position_said_as_text_has_a_dash_for_none(self):
+        code = " ".join(jslint.without_comments(self.assets()["app.js"]).split())
+        said = [match.start() for match in re.finditer(r"String\(t\.position\)", code)]
+        self.assertTrue(said, "app.js no longer says a position as text")
+        for at in said:
+            with self.subTest(said=code[at - 80:at + 20]):
+                self.assertTrue(code[:at].endswith(self.GUARD))
+
+
+class TestTheProgressBoxSaysItsRoundCountAsACount(WebAssetCase):
+    """``3 of 10 rounds played``, label and meter alike, not ``Round 3 of 10`` (4.439).
+
+    ``meta.rounds_played`` counts the regular rounds with cards (4.69), and the
+    label put that count in the shape of a round's label. Measured on the base with
+    cards for rounds 2, 3 and 5 of ten (/tmp/mcf/scratch/EMPTY/before.txt, gap):
+    ``Season progress | Round 3 of 10``, where the latest card is round 5's, over a
+    meter whose aria-label already said ``3 of 10 rounds played``. Now one string
+    says both. Rejected: the latest round's label, which a label is text and no
+    ordinal, and which hides the round with no card.
+    """
+
+    def test_the_label_and_the_meter_say_one_count(self):
+        code = jslint.without_comments(self.body("seasonProgress"))
+        said = re.search(r"var (\w+) = playedRounds \+ ' of ' \+ total \+ ' ' \+ "
+                         r"plural\(total, 'round'\) \+ ' played';", code)
+        self.assertIsNotNone(said, code)
+        self.assertIn(f"el('span', {{ text: {said[1]} }})", code)
+        self.assertIn(f"'aria-label': {said[1]} }}", code)
+        self.assertNotIn("'Round ' + playedRounds", code)
+
+
+
+# --- 4.458, 4.468: what the ladder's state compared, and what the foot counts -------
+
+
+class TestTheLadderNoteAndTheHeroSayWhatPythonCompared(WebAssetCase):
+    """The note and the hero read ``meta.ladder_detail`` while in progress (4.458).
+
+    Both said ``teams have played unequal numbers of matches`` and ``No leader until
+    every team has played the same number of matches`` of F10's state, which is
+    asked of counted matches. Measured on the base in headless Chrome
+    (/tmp/mcf/scratch/LADDER/before2.txt, mirror-average): ``In progress — teams have
+    played unequal numbers of matches`` over a P column of 1 for every team, whose
+    counts were 2, 2, 1 and 1. Python words the state once, for the report, F10 and
+    both pages. A document written before the key has no sentence: the note then
+    says it is in progress and no more, and the hero ``No leader named``. Rejected:
+    the page choosing the words from the rows' ``counted`` and ``played``, which is
+    F10's rule a second time in the language the suite cannot run.
+    """
+
+    def test_the_note_reads_the_document_s_sentence(self):
+        code = jslint.without_comments(self.body("ladderNote"))
+        self.assertIn("' In progress' + (m.ladder_detail ? ' — ' + m.ladder_detail "
+                      ": '') +", code)
+        self.assertNotIn("unequal numbers", code)
+
+    def test_the_hero_reads_it_too(self):
+        code = jslint.without_comments(self.body("noLeaderReason"))
+        self.assertNotIn("played the same number", code)
+        self.assertIn("'No leader while ' + m.ladder_detail", code)
+
+
+class TestTheProgressFootCountsMatchesPlayedAndTheChipCardsScored(WebAssetCase):
+    """The foot says matches played; the chip keeps cards scored (4.468).
+
+    ``scored`` is F4's word for a card: read, and given a result or a reason, a
+    washout among them. The foot counted matches with a result in the same word, so
+    a card rained off was scored in the chip and not in the foot. Measured on the
+    base in headless Chrome (/tmp/mcf/scratch/LADDER/before2.txt, foot-nolength, the
+    suite's six cards and a washout): ``6 matches scored`` over ``7 of 7 cards
+    scored``. Every other count of matches on the page says played. Rejected:
+    rewording the chip, whose ``scored`` is the report's and F4's; and counting
+    cards in the foot, which puts the washout back in a count of the rounds' matches
+    beside the percentage of rounds played.
+    """
+
+    def test_both_shapes_of_the_foot_say_matches_played(self):
+        foot = jslint.without_comments(self.body("seasonProgress"))
+        said = re.findall(r"plural\(\w+\.played, 'match', 'matches'\) \+\s*' (\w+)",
+                          foot)
+        self.assertEqual(said, ["played", "played"])
+        self.assertNotIn("' scored", foot)
+
+    def test_the_chip_keeps_cards_scored(self):
+        self.assertIn("' ' + plural(m.cards_seen || 0, 'card') + ' scored'",
+                      jslint.without_comments(self.body("renderHealth")))
 
 
 if __name__ == "__main__":

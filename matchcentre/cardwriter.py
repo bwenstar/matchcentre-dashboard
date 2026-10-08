@@ -39,7 +39,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .format import DEFAULT_SET_RULE, SetRule, set_rule as named_set_rule, set_winner
-from .model import SetStatus, forfeit_set_winner, other_side, stopped_short
+from .model import (SetStatus, forfeit_set_winner, other_side, retired_set_winner,
+                    rubber_award, stopped_short)
 
 __all__ = ["CardSpec", "SetRow", "RosterRow", "write_card", "write_card_file",
            "MAX_SET_ROWS", "AUTO", "NO_TICK"]
@@ -514,19 +515,45 @@ def _row_set_winner(row: SetRow, rule: SetRule) -> str | None:
                                   away_forfeit=away_forfeit,
                                   home_games=row.home_games,
                                   away_games=row.away_games)
+    if row.status is SetStatus.RETIRED:
+        home_retired, away_retired = _row_status_sides(row)
+        stayed = retired_set_winner(home_retired=home_retired,
+                                    away_retired=away_retired)
+        if stayed is not None:
+            return stayed
     if stopped_short(row.status):
         return None
     return set_winner(row.home_games, row.away_games, rule)
 
 
 def _tallies(spec: CardSpec) -> tuple[int, int, int, int]:
-    """``(home sets, home games, away games, away sets)`` from the rows."""
+    """``(home sets, home games, away games, away sets)`` from the rows.
+
+    As Match Centre totals them (4.421, 4.422): a rubber ticked Forfeit against
+    one side is a love set under the spec's set rule, and one a side retired from
+    is the other side's, raised to win it, by the rule the model scores them with.
+    Under a Match Forfeited box the rows are totalled as printed, each set to the
+    side its row gives it, which the reader and validate accept of a box beside
+    its award. Laying the box over them would make every such fixture's TOTAL row
+    restate the award, and awarding a rubber of them without the box is a
+    reckoning neither accepts.
+    """
     rule = spec.rule
-    winners = [_row_set_winner(row, rule) for row in spec.rows]
-    return (winners.count("home"),
-            sum(row.home_games for row in spec.rows),
-            sum(row.away_games for row in spec.rows),
-            winners.count("away"))
+    home_sets = home_games = away_games = away_sets = 0
+    for row in spec.rows:
+        home_ticked, away_ticked = _row_status_sides(row)
+        award = None if spec.forfeited_by in ("home", "away") else rubber_award(
+            status=row.status, home_games=row.home_games,
+            away_games=row.away_games, games_to_win=rule.games_to_win,
+            home_forfeit=home_ticked, away_forfeit=away_ticked,
+            home_retired=home_ticked, away_retired=away_ticked)
+        winner, home, away = award or (_row_set_winner(row, rule), row.home_games,
+                                       row.away_games)
+        home_sets += winner == "home"
+        away_sets += winner == "away"
+        home_games += home
+        away_games += away
+    return home_sets, home_games, away_games, away_sets
 
 
 def _decided_side(spec: CardSpec) -> str | None:

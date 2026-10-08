@@ -94,6 +94,15 @@ class Team:
     from a (C) mark. A declared captain need not be on any card, and then the
     slug is all that is left of the name unless the spelling is kept beside it --
     "Devi O'Raman" does not come back out of ``devi-o-raman``.
+
+    ``home_court`` is the club's, ``None`` unless declared, and ``courts_printed``
+    is what the team's home cards print: each court and on how many cards, the one
+    printed most first. The config writer offers :attr:`court_printed` behind a #;
+    nothing else reads it, so the page shows a court once the club declares one.
+
+    ``captain_marked`` is the one player the (C) marks on the team's cards that
+    count name, and ``None`` for none or more than one: the captain where the club
+    names none, and the writer's offer beside a declared one who differs.
     """
 
     slug: str
@@ -104,6 +113,8 @@ class Team:
     captain: str | None = None
     players: tuple[Player, ...] = ()
     captain_declared: str = ""
+    courts_printed: tuple[tuple[int, int], ...] = ()
+    captain_marked: str | None = None
 
     @property
     def short_name(self) -> str:
@@ -121,6 +132,34 @@ class Team:
             if player.slug == slug:
                 return player
         return None
+
+    @property
+    def court_printed(self) -> int | None:
+        """The court the team's home cards print most, or ``None``.
+
+        ``None`` with no home card, and where two courts are printed as often: a
+        tie is no evidence for either, and one of them chosen by its number would
+        be a guess offered as the cards' word.
+        """
+        if not self.courts_printed:
+            return None
+        if len(self.courts_printed) > 1 and (self.courts_printed[1][1]
+                                             == self.courts_printed[0][1]):
+            return None
+        return self.courts_printed[0][0]
+
+    @property
+    def captain_source(self) -> Provenance:
+        """Where the captain came from: the club's line, else a (C) mark.
+
+        Read from the team and not from the captain's player record, which a
+        declared captain on no card that counts does not have: asked of the
+        records, a division whose captains were all declared that way read
+        "derived", and the page told the club to declare them. Meaningful only
+        where :attr:`captain` is set; nothing guesses a captain, so it is never
+        ``DERIVED``.
+        """
+        return Provenance.DECLARED if self.captain_declared else Provenance.CARD
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +217,17 @@ class Competition:
     block here registers, decided where every registered player's is and from the
     spelling the first card to print them gives, so that a ``[player_names]`` line
     reaches a fill-in the way it reaches anybody else.
+
+    ``season_key_from`` is what discovery keyed the season by: "folder" where
+    ``season_key`` is the name of the folder its cards are in, "date" where it is
+    the year on cards that sit in no season folder, and "" with no key. Both read
+    as the season's name where nobody gave one, and a message about that name has
+    to say which: a year called a folder's name sends the club looking for a
+    folder its cards are not in.
+
+    ``strangers`` is the display name of each team the cards name that a declared
+    team list lacks, which is no team of the competition, and so for the config
+    writer to offer in the list behind a #.
     """
 
     id: str
@@ -187,6 +237,7 @@ class Competition:
     rules: Ruleset
     season: str = ""
     season_key: str = ""
+    season_key_from: str = ""
     label: str = ""
     teams: dict[str, Team] = field(default_factory=dict)
     rounds: dict[str, Round] = field(default_factory=dict)
@@ -202,6 +253,7 @@ class Competition:
     provenance: dict[str, Provenance] = field(default_factory=dict)
     source: str = ""
     fill_in_names: dict[str, str] = field(default_factory=dict)
+    strangers: tuple[str, ...] = ()
 
     # --- naming ---------------------------------------------------------
 
@@ -739,14 +791,20 @@ def is_finals_label(number: str) -> bool:
     return _looks_final(number)
 
 
-def rounds_played_words(count: int) -> str:
+def rounds_played_words(count: int, total: int | None = None) -> str:
     """``"1 round played"``, ``"3 rounds played"``: what the dashboard says of *count*.
 
     Worded as the page words it (``plural`` in app.js), for every sentence that
     tells a club what the dashboard will say -- discovery's note, the review, the
     comment ``--force`` writes and the front page. Written out in each, three of
     the four said ``"1 rounds played"`` and the page said ``1 round played``.
+
+    With the season's declared length, ``"3 of 10 rounds played"``: a count, as the
+    progress box says it, and not ``Round 3 of 10``, a round's label, which with
+    cards for rounds 2, 3 and 5 names a round other than the latest (4.439).
     """
+    if total is not None:
+        return f"{count} of {total} round{'' if total == 1 else 's'} played"
     return f"{count} round{'' if count == 1 else 's'} played"
 
 

@@ -15,15 +15,16 @@ the predecessor project was written against.
 
 The season is built to exercise the parts of the pipeline that a run of ordinary
 6-2 results never reaches: a whitewash, a match decided by a single game, a
-forfeit, a washout, a retirement mid-set, and a player filling in for a team they
-are not rostered to. An odd ``--teams`` gives every round a bye, which is a
+forfeit, a washout, a retirement mid-set, a player filling in for a team they
+are not rostered to, and a last rubber the clock stopped with no box ticked,
+leaving the games level and the match to the side with more finished sets. An odd ``--teams`` gives every round a bye, which is a
 different path again (F1: a bye is only ever materialised from a *declared* team
 list, so the demo prints the byes it intends rather than leaving them to be
 guessed).
 
 ``--seasons multi`` writes two seasons of that club instead, one player changed
-between them, for the careers page, which only a build of more than one season
-writes (:func:`write_archive`).
+between them, for the careers page, whose careers across seasons only a build of
+more than one season has to show (:func:`write_archive`).
 
 Deterministic by construction: the only randomness comes from ``--seed``, and the
 card writer stamps no date into the PDF, so two runs with the same arguments
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import itertools
 import random
 import sys
 from dataclasses import dataclass
@@ -124,10 +126,11 @@ FORFEIT = "forfeit"
 RETIRED = "retired set"
 WASHOUT = "washout"
 FILL_IN = "fill-in"
+OUT_OF_TIME = "out of time"
 
 # In this order, one per fixture slot, spread across rounds before repeating a
 # round. Every one of them is a state the rest of the program has a branch for.
-SPECIALS = (WHITEWASH, CLOSE, FORFEIT, RETIRED, WASHOUT, FILL_IN)
+SPECIALS = (WHITEWASH, CLOSE, FORFEIT, RETIRED, WASHOUT, FILL_IN, OUT_OF_TIME)
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +378,34 @@ def unfinished_pair(rule: SetRule) -> tuple[int, int]:
     return 0, 0                  # a rule where every score finishes the set
 
 
+def out_of_time_rows(fmt: MatchFormat) -> list[tuple[int, int]] | None:
+    """A night the clock stopped, level on games and won on its finished sets.
+
+    The last rubber is left at :func:`unfinished_pair`, the home side leading, with
+    no box ticked: what a club whose play stops at a fixed hour writes, whatever
+    the score. The finished rubbers before it go one more to the away side than to
+    the home side, two more where their number is even, at the closest margins
+    that level the games, so the card is the away side's on sets. ``None`` where
+    the set rule allows no such rows: three rubbers of first to 6, two finished,
+    cannot make up the leader's game.
+    """
+    rule = fmt.set_rule
+    leader, trailer = unfinished_pair(rule)
+    finished = len(fmt.slots) - 1
+    if finished < 1 or leader == trailer:
+        return None
+    winners = ["away" if index % 2 == 0 else "home" for index in range(finished)]
+    if winners.count("away") == winners.count("home"):
+        winners[-1] = "away"
+    closest = sorted(finished_pairs(rule), key=lambda pair: (pair[0] - pair[1], pair))
+    for chosen in itertools.product(closest, repeat=finished):
+        rows = [pair if side == "home" else (pair[1], pair[0])
+                for side, pair in zip(winners, chosen)] + [(leader, trailer)]
+        if sum(home for home, _ in rows) == sum(away for _, away in rows):
+            return rows
+    return None
+
+
 def washout_completed(fmt: MatchFormat) -> int:
     """How many rubbers finished before the night was called off.
 
@@ -429,9 +460,11 @@ def score_rows(flavour: str, fmt: MatchFormat,
         # A forfeited set still carries games: the club's card is filled in as
         # played, awarding the set to whoever turned up. Which side that is comes
         # off the ticked Forfeit box (`model.forfeit_set_winner`), so 0-0 would
-        # award the set just the same; the games are printed because the default
+        # award the set just the same; the games are printed because
         # `forfeit_award = "as-played"` prices the night from them, and a card of
-        # nil-alls would pay the side that turned up for a win and no games.
+        # nil-alls would pay the side that turned up for a win and no games there.
+        # Under full-games and fixed each row is scored a love set to that side,
+        # whatever it prints, as Match Centre's TOTAL row counts it (4.421).
         return [(widest[1], widest[0])] * slots
 
     if flavour == WASHOUT:
@@ -441,6 +474,14 @@ def score_rows(flavour: str, fmt: MatchFormat,
         # the opposite of the case worth shipping.
         done = washout_completed(fmt)
         return [widest, narrowest][:done] + [(0, 0)] * (slots - done)
+
+    if flavour == OUT_OF_TIME:
+        # Drawn as an ordinary card draws them, so every card after this one is
+        # the card it was before this special existed, and kept only where the
+        # format cannot level the games.
+        ordinary = score_rows(NORMAL, fmt, rng)
+        level = out_of_time_rows(fmt)
+        return level if level is not None else ordinary[:-1] + [unfinished_pair(rule)]
 
     # An ordinary match: one side is stronger tonight, and takes most rows.
     favour_home = rng.random() < 0.5
@@ -494,14 +535,16 @@ def substitute(names: list[tuple[str, ...]], missing: str, stand_in: str
 def decided(rows: tuple[SetRow, ...], fmt: MatchFormat) -> bool:
     """Whether enough sets finished for this card to claim a result.
 
-    The same count :class:`~matchcentre.model.Match` uses. A card that printed a
-    verb or ticked a winner without it would be stating a result its own rows
-    cannot support, which the reader reports as ``verb-no-result``; the washout and
-    the three-set retirement are both in that position, and both leave the verb and
-    the tick off.
+    The same count :class:`~matchcentre.model.Match` uses, a set one side retired
+    from being the other side's (4.422). A card that printed a verb or ticked a
+    winner without it would be stating a result its own rows cannot support, which
+    the reader reports as ``verb-no-result``; the washout is in that position, and
+    leaves the verb and the tick off.
     """
     finished = sum(1 for row in rows
                    if row.status is SetStatus.FORFEIT
+                   or (row.status is SetStatus.RETIRED
+                       and row.status_side in ("home", "away"))
                    or (row.status is SetStatus.PLAYED
                        and completed(row.home_games, row.away_games, fmt.set_rule)))
     return finished >= fmt.min_sets_for_result
@@ -554,7 +597,7 @@ def build_card(fixture: Fixture, fmt: MatchFormat, division: str, day: str,
     if fixture.flavour == FORFEIT:
         status, status_side = SetStatus.FORFEIT, "home"
         notes.append(f"{fixture.home.name} forfeited; every set is ticked "
-                     f"Forfeit against them and awarded as played")
+                     f"Forfeit against them and awarded to {fixture.away.name}")
     elif fixture.flavour == WASHOUT:
         status, status_side = SetStatus.INCOMPLETE, "both"
         finished_rows = washout_completed(fmt)
@@ -570,7 +613,9 @@ def build_card(fixture: Fixture, fmt: MatchFormat, division: str, day: str,
 
     if fixture.flavour == RETIRED:
         # One set abandoned partway. Which row matters: taking the last one keeps
-        # the earlier sets complete, so the match still has a result.
+        # the earlier sets complete, so the match still has a result. The away side
+        # retires, so the set is the home side's, its games raised to win it
+        # (`model.rubber_award`, 4.422).
         index = len(rows) - 1
         leader, trailer = unfinished_pair(fmt.set_rule)
         rows[index] = SetRow(home_games=leader, away_games=trailer,
@@ -579,6 +624,21 @@ def build_card(fixture: Fixture, fmt: MatchFormat, division: str, day: str,
                              away_players=rows[index].away_players,
                              status=SetStatus.RETIRED, status_side="away")
         notes.append(f"{fmt.slots[index].label} retired at {leader}-{trailer}")
+
+    if fixture.flavour == OUT_OF_TIME:
+        # The row is played as far as it went and its box left empty, which is the
+        # whole of the special: nothing on the card says it stopped.
+        leader, trailer = scores[-1]
+        said = (f"{fmt.slots[-1].label} ran out of court time at {leader}-{trailer} "
+                f"with no box ticked")
+        games = sum(home for home, _ in scores)
+        if games == sum(away for _, away in scores):
+            done = [(home, away) for home, away in scores[:-1]
+                    if completed(home, away, fmt.set_rule)]
+            home_sets = sum(home > away for home, away in done)
+            said += (f", leaving the games level at {games}-{games} and the "
+                     f"finished sets {home_sets}-{len(done) - home_sets}")
+        notes.append(said)
 
     frozen_rows = tuple(rows)
     has_result = decided(frozen_rows, fmt)

@@ -3,6 +3,7 @@
 
     python3 build.py                 # data/ -> site/, writing config.toml if absent
     python3 build.py --check         # read and validate, write nothing
+    python3 build.py --discover      # propose a config beside config.toml
     python3 build.py --discover --force   # rewrite config.toml from the cards
 
 Two steps that should feel like one: copy the PDFs into ``data/``, run this. A run
@@ -96,6 +97,7 @@ from matchcentre.config import ConfigError                    # noqa: E402
 from matchcentre.discover import DiscoveryError               # noqa: E402
 from matchcentre.format import FormatError                    # noqa: E402
 from matchcentre.scope import EVERY_SEASON, Scope, echoed, in_words  # noqa: E402
+from matchcentre.scope import in_words_capped                # noqa: E402
 from matchcentre.scoring import ScoringError                  # noqa: E402
 from matchcentre.site import SiteError                        # noqa: E402
 from matchcentre.slugs import label_key                       # noqa: E402
@@ -320,8 +322,9 @@ def _record_failure(args: argparse.Namespace, kind: str, count: int = 0) -> bool
     run that found ``data/`` empty leaves exactly the stale page a scheduled one
     would. So does the run that built every document and stopped rather than write
     a player's name, whose figures never reach the page either. A flag refused
-    before anything is built is not a failed build (``--discover`` over a config,
-    either ``--only`` refusal): the figures are as current as they were.
+    before anything is built is not a failed build (a proposal ``--discover``
+    will not write over, either ``--only`` refusal): the figures are as current as
+    they were.
     ``--check`` is the exception, because it promises to write nothing.
     """
     if args.check:
@@ -364,10 +367,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--check", action="store_true",
                     help="read and validate everything; write nothing at all")
     ap.add_argument("--discover", action="store_true",
-                    help="rewrite the config file from the cards; needs --force "
-                         "if it already exists")
+                    help=f"write a config file from the cards: where one exists, "
+                         f"a proposal beside it that nothing reads "
+                         f"({config_mod.proposal_path(config_mod.DEFAULT_PATH)} for "
+                         f"{config_mod.DEFAULT_PATH}), or over it with --force; "
+                         f"with --check, neither")
     ap.add_argument("--force", action="store_true",
-                    help="allow --discover to overwrite an existing config file")
+                    help="with --discover, rewrite the existing config file rather "
+                         "than write a proposal beside it")
     ap.add_argument("--prune", action="store_true",
                     help="delete the dashboards under --out that no card builds "
                          "any more; refuses any directory holding a file this "
@@ -462,14 +469,36 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
     # 2. Load the config. A missing file is normal -- it is what a first run looks
     #    like -- but a file that exists and is malformed is not, and `load` raises.
     cfg = config_mod.load(args.config)
-    if args.discover and cfg.exists and not args.force:
+    # `--discover` over a config that exists writes the file `--force` would write
+    # beside it, and builds as a plain run (4.431). It refused, exit 2, before a card
+    # was read, so a club with a file it typed could not ask what the cards would
+    # write without losing the draw and its comments. A file of the proposal's name
+    # this program did not write, or cannot read, is refused here, before the work.
+    proposed = config_mod.proposal_path(args.config) if _proposes(args, cfg) else None
+    in_the_way, unread = (_in_the_way(proposed) if proposed is not None
+                          else (False, None))
+    if in_the_way and not args.check:
         _flush(report, args)            # the other refusal that precedes the work
-        print(f"error: {args.config} already exists and --discover would "
-              f"overwrite it.", file=sys.stderr)
-        # 118 columns as it stood, with no path in it at all: the only line of this
-        # program's output that ran over on its own words.
-        print(fill(f"Add --force if that is what you want. {_what_force_drops(cfg)}"),
-              file=sys.stderr)
+        # A file it could not read is not known to be a club's either, so it is not
+        # said to be one: the reason is named, as for a config that will not open.
+        if unread is None:
+            print(f"error: {proposed} is there, and this program did not write it.",
+                  file=sys.stderr)
+        else:
+            print(f"error: {proposed}: cannot be read — {unread.strerror or unread}",
+                  file=sys.stderr)
+        # The marker on a line of its own, as it stands in the file: flowed into
+        # the sentence, its own comma ran on into the words after it.
+        print(fill(("" if unread is None else
+                    "So this run cannot tell whether it wrote that file. ")
+                   + f"--discover writes its proposal under that name, beside "
+                     f"{args.config}, and writes over only a file whose first line "
+                     f"is the one each proposal it writes begins with:",
+                   keep=(str(args.config),)), file=sys.stderr)
+        print(f"    {config_mod.PROPOSAL_MARKER}", file=sys.stderr)
+        print("  Make it readable by you, or move it aside, and run this again."
+              if unread is not None and unread.errno in (errno.EACCES, errno.EPERM)
+              else "  Rename it or move it, and run this again.", file=sys.stderr)
         return 2
     if args.only and not cfg.multi_season:
         return _refuse_only_single(report, args, cfg)
@@ -507,6 +536,7 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
 
     config_text = ""
     config_unwritable: OSError | None = None
+    config_target = args.config
     try:
         config_text = _maybe_write_config(args, cfg, found, len(cards))
     except OSError as exc:
@@ -518,6 +548,22 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
         # program offered to write, and not the evening's tennis. What it does change is
         # the exit status, in `_finish`.
         config_unwritable = exc
+    proposal: _Proposal | None = None
+    if proposed is not None:
+        # The same file `--discover --force` would write, from the same call, so the
+        # summary the review gives of it is read off what a club would adopt. A
+        # proposal that cannot be written is carried as the config's write is.
+        proposal = _Proposal(proposed, _config_written(cfg, found, len(cards)),
+                             in_the_way=in_the_way, unread=unread)
+        if not args.check:
+            try:
+                text, kept = _proposal_text(proposal, args=args, cfg=cfg,
+                                            cards=len(cards))
+                if not kept:
+                    proposed.write_text(text, encoding="utf-8")
+                proposal = proposal._replace(written=True, kept=kept)
+            except OSError as exc:
+                config_unwritable, config_target = exc, proposed
 
     # Every competition here has cards behind it: `discover` builds this list from
     # the cards it read, and drops a competition whose cards it could not use. A
@@ -540,7 +586,8 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
             comp_matches, competition=comp, source_dir=str(args.data),
             generated=args.generated, club=found.club, cards=comp_cards,
             rejected=found.rejected, seasons_mode=cfg.seasons_mode,
-            sheet=sheets[comp.id], config_name=config_mod.named(args.config)))
+            sheet=sheets[comp.id], config_name=config_mod.named(args.config),
+            strays=found.strays.get(comp.id, ())))
 
     # What the build before this one left where these documents are about to go.
     # Read here, before the write, because that is the only moment both versions
@@ -645,7 +692,7 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
              orphans=orphans, pruned=pruned, refusals=refusals,
              previous=previous, sheets=sheets, withholding=withholding,
              scope=scope, known=known, players=players,
-             status_written=status_written)
+             status_written=status_written, proposal=proposal)
 
     # Two stages can refuse a card and the run has to count both. The reader refuses a
     # file it cannot read; the filing above refuses a card it cannot turn into a
@@ -674,6 +721,7 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
                      seasons=seasons, written=written, unscored=unscored,
                      unlisted=unlisted, errors=errors, unwritable=unwritable,
                      config_unwritable=config_unwritable,
+                     config_target=config_target, proposal=proposal,
                      prune_failed=sum(1 for orphan in kept
                                       if orphan.kind != "careers"),
                      withholding=withholding,
@@ -696,9 +744,14 @@ def _run(args: argparse.Namespace, report: _Report) -> int:
         # file was being written at all, let alone which one, on a run given `--config`.
         # Named the way `config.load` names the other direction, so the two refusals read
         # as the pair they are.
-        print(f"error: {args.config}: cannot be written — {config_unwritable}",
+        print(f"error: {config_target}: cannot be written — {config_unwritable}",
               file=sys.stderr)
-        _refuse_config(config_unwritable, writing=True)
+        if proposal is not None:
+            advice = _proposal_advice(config_unwritable, args=args)
+            if advice:
+                print(fill(advice), file=sys.stderr)
+        else:
+            _refuse_config(config_unwritable, writing=True)
     if unwritable is not None:
         # On stderr as well, in the one-line form every other refusal in this program
         # uses, so that a cron job which keeps only stderr still learns why.
@@ -1048,6 +1101,31 @@ def _config_advice(exc: OSError, *, writing: bool) -> str:
     return table.get(errno.errorcode.get(exc.errno, ""), "")
 
 
+def _proposal_advice(exc: OSError, *, args: argparse.Namespace) -> str:
+    """What to do about a proposal the operating system would not write.
+
+    Not the config's table: each of those ends in ``--config``, and a proposal is
+    written beside the file ``--config`` names, so moving that would move the club's
+    own config to get a file this program suggests. ``""`` for a reason with none,
+    as there.
+    """
+    folder = f"the folder {args.config} is in"
+    return {
+        "EACCES": f"this program is not allowed to write in {folder}, and the "
+                  f"proposal is written beside it. Check who owns the folder.",
+        "EPERM": f"this program is not allowed to write in {folder}, and the "
+                 f"proposal is written beside it. Check who owns the folder.",
+        "EISDIR": "a folder is already there under the name the proposal needs. "
+                  "Move it aside, and run this again.",
+        "EROFS": "that disk is mounted read-only, so nothing at all can be written "
+                 "to it. Remount it, and run this again.",
+        "ENOSPC": "the disk is full. Free some space, and run this again.",
+        "EDQUOT": "you are over your disk quota, so the disk has room and this "
+                  "account may not use it. Ask for more, or delete something of "
+                  "your own.",
+    }.get(errno.errorcode.get(exc.errno, ""), "")
+
+
 def _refuse_config(exc: OSError, *, writing: bool) -> None:
     """The way out of a config file that would not open, under the line naming it.
 
@@ -1218,7 +1296,9 @@ def _maybe_write_config(args: argparse.Namespace, cfg: config_mod.Config,
     """Write ``config.toml`` when this is a first run, or when asked to.
 
     Returns the text written, empty when nothing was, so the review section can
-    report what the file actually says instead of assuming.
+    report what the file actually says instead of assuming. ``--discover`` over a
+    file that exists, without ``--force``, writes nothing here: ``_run`` writes
+    the proposal beside the file instead (4.431).
 
     The dashboard is still built in the same run, from the config as it was *read*.
     `config.render` writes what this run worked out commented, the names among it,
@@ -1239,9 +1319,93 @@ def _maybe_write_config(args: argparse.Namespace, cfg: config_mod.Config,
 
 
 def _writes_config(args: argparse.Namespace, cfg: config_mod.Config) -> bool:
-    """Whether this run writes the config: a first run, or ``--discover``, and
-    never ``--check``, which writes nothing."""
-    return not args.check and (not cfg.exists or args.discover)
+    """Whether this run writes the config: a first run, or ``--discover --force``,
+    and never ``--check``, which writes nothing."""
+    return not args.check and (not cfg.exists or (args.discover and args.force))
+
+
+def _proposes(args: argparse.Namespace, cfg: config_mod.Config) -> bool:
+    """Whether this run proposes a config beside the one there: ``--discover``
+    over a file that exists, without ``--force``. ``--check`` proposes one in the
+    report, and writes nothing."""
+    return args.discover and cfg.exists and not args.force
+
+
+def _in_the_way(path: Path) -> tuple[bool, OSError | None]:
+    """Whether a file is at the proposal's *path* that this run may not write
+    over, and the reason it could not be read, where that is why.
+
+    Known by its first line, as the demo's config is: a file of the name that does
+    not begin so is a club's, and ``--discover`` will not write over it. Only the
+    line is read, and as bytes, so a file saved in another encoding is one that
+    does not begin so. What this program writes there is a file, so a folder or a
+    link to nothing is not one of its own. A file it cannot read is not known to
+    be either, and is not written over; the reason is returned, so the refusal
+    says that and not whose the file is. Said as a club's, the refusal of a
+    proposal this program wrote and could not read back sent the club to rename a
+    file whose permissions were the trouble.
+    """
+    if not os.path.lexists(path):
+        return False, None
+    if not path.is_file():
+        return True, None
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(len(config_mod.PROPOSAL_MARKER) + 1)
+    except OSError as exc:
+        return True, exc
+    return not config_mod.written_as_proposal(head.decode("utf-8", "replace")), None
+
+
+class _Proposal(NamedTuple):
+    """The config a ``--discover`` over one that exists proposes beside it.
+
+    ``body`` is the file ``--discover --force`` would write, which the review's
+    summary is read off; ``written`` whether the file there holds this run's
+    proposal once it is done, which ``--check`` and a write that failed leave it
+    not, and ``kept`` whether it held it already, and so was left as it was;
+    ``in_the_way`` whether a file of its name that this program did not write, or
+    could not read, is there, which only ``--check`` gets past, and ``unread`` the
+    reason it could not be read.
+    """
+    path: Path
+    body: str
+    written: bool = False
+    in_the_way: bool = False
+    kept: bool = False
+    unread: OSError | None = None
+
+
+def _proposal_text(proposal: _Proposal, *, args: argparse.Namespace,
+                   cfg: config_mod.Config, cards: int) -> tuple[str, bool]:
+    """The proposal this run writes at ``proposal.path``, and whether the file
+    there holds it already.
+
+    Dated as the site's pages are (``site._dated_as_last_changed``): rendered with
+    the date the file there was written on, and where that is the file there byte
+    for byte, kept with it, and left alone. Dated by the run, every ``--discover``
+    without ``--generated`` wrote the file again with the clock's minute, 9:35am
+    and then 9:36am over the same cards and config, in a run that said all 9 files
+    of the site already held what it would write. A file edited by hand, or one
+    whose body the cards have since moved, is the run's to date. Rejected:
+    comparing the body under the row of dashes alone, which would keep a header
+    another version of this program wrote, with its version and its words.
+    """
+    def text(written: str) -> str:
+        return config_mod.proposal(proposal.body, config_name=args.config.name,
+                                   written=written, cards=cards,
+                                   drops=_what_force_drops(cfg))
+
+    try:
+        on_disk = proposal.path.read_bytes()
+    except OSError:
+        on_disk = b""
+    was = config_mod.proposal_written(on_disk.decode("utf-8", "replace"))
+    if was is not None and text(was).encode("utf-8") == on_disk:
+        return text(was), True
+    return text(site.pretty_date(
+        args.generated or datetime.now().replace(microsecond=0).isoformat(),
+        with_time=True, with_year=True)), False
 
 
 def _config_written(cfg: config_mod.Config, found, card_count: int) -> str:
@@ -1266,7 +1430,8 @@ def _compose(report: _Report, *, args: argparse.Namespace,
              config_text: str, strays=(), orphans=(), pruned=None,
              refusals=None, previous=None, sheets=None,
              withholding=None, scope: Scope = EVERY_SEASON, known=None,
-             players: str = "names", status_written: bool = False) -> None:
+             players: str = "names", status_written: bool = False,
+             proposal: _Proposal | None = None) -> None:
     # Counted from the documents this run built, which are the ones the careers
     # page is written from, so --check prints the figure a build would publish.
     # First, and through the page's own conversion, so a document the page cannot
@@ -1276,10 +1441,13 @@ def _compose(report: _Report, *, args: argparse.Namespace,
     # A write that returned says what it wrote, and is not worked out again.
     careers_said = None
     if seasons and careers_mod.writes_careers(cfg, players):
-        careers_said = _careers_line(*(written.careers if written is not None
-                                       else site.careers_summary(args.out, seasons)))
+        careers_said = _careers_line(
+            *(written.careers if written is not None
+              else site.careers_summary(args.out, seasons, multi=cfg.multi_season)),
+            multi=cfg.multi_season)
     elif seasons and _careers_withheld(cfg, players):
-        careers_said = CAREERS_WITHHELD
+        careers_said = CAREERS_WITHHELD.format(
+            part=careers_mod.part(cfg.multi_season))
     _rules_section(report, cfg, found)
     _cards_section(report, args=args, cards=cards, rejected=rejected,
                    found=found, cfg=cfg, strays=strays, careers=careers_said,
@@ -1297,7 +1465,7 @@ def _compose(report: _Report, *, args: argparse.Namespace,
                                          else withholding.anonymised[competition]))
     _review_section(report, seasons=seasons, found=found, cfg=cfg,
                     args=args, config_text=config_text, scope=scope,
-                    cards=len(cards))
+                    cards=len(cards), proposal=proposal)
     _problems_section(report, seasons, scope=scope)
     # After the warnings, because what it counts is theirs and the review's, and
     # before the changes, which stay the last thing said about the figures.
@@ -1321,7 +1489,7 @@ def _compose(report: _Report, *, args: argparse.Namespace,
     _left_behind_section(report, args=args, cfg=cfg, orphans=orphans,
                          pruned=pruned or {}, refusals=refusals or {},
                          withheld=withholding is not None, players=players,
-                         wrote=written is not None)
+                         wrote=written is not None, seasons=seasons)
     if withholding is not None and withholding.refused:
         _players_refusal_section(report, args=args, refused=withholding.refused,
                                  before=_players_before(args, cfg, seasons,
@@ -1457,9 +1625,11 @@ def _cards_section(report: _Report, *, args: argparse.Namespace, cards,
         report.note(note)
 
 
-# The careers field of a multi-season run that withholds names, which writes no
-# careers page: that it wrote none, and why, in the place the count would be.
-CAREERS_WITHHELD = "no page: this run withholds names, and a label is one season's"
+# The careers field of a run that withholds names, which writes no careers page:
+# that it wrote none, and why, in the place the count would be. A label is one
+# season document's, which in single-season mode is one competition's: *part* is
+# the page's own word for one of its rows (`careers.part`).
+CAREERS_WITHHELD = "no page: this run withholds names, and a label is one {part}'s"
 
 
 def _careers_withheld(cfg: config_mod.Config, players: str) -> bool:
@@ -1473,12 +1643,14 @@ def _careers_withheld(cfg: config_mod.Config, players: str) -> bool:
 
 
 def _careers_line(counts: careers_mod.Counts,
-                  split: site.CareersSplit | None = None) -> str:
+                  split: site.CareersSplit | None = None, *,
+                  multi: bool = True) -> str:
     """What the careers page adds up, in one field under ``seasons``.
 
     People who played, never people named: somebody who is only ever on a roster
     has no season to span, and counting them would make the page's whole point --
-    how many careers run across seasons -- look smaller than it is.
+    how many careers run across seasons -- look smaller than it is. In
+    single-season mode the page adds up competitions, and *counts* is of them.
 
     And, once the page is split by initial, why: the size it would be as one
     page, or that an earlier build split it. Never a size on a page that fits,
@@ -1487,13 +1659,14 @@ def _careers_line(counts: careers_mod.Counts,
     careers, is named with its size, so a split never reads as the page brought
     under it.
     """
-    if counts.seasons == 0:
-        said = "no season has a result in it yet"
-    elif counts.seasons == 1:
-        said = "one season so far; totals add up from the second"
+    part = careers_mod.part(multi)
+    if counts.with_results == 0:
+        said = f"no {part} has a result in it yet"
+    elif counts.with_results == 1:
+        said = f"one {part} so far; totals add up from the second"
     else:
         said = (f"{counts.spanning} of {counts.players} player(s) played in more "
-                f"than one season")
+                f"than one {part}")
     if split is None:
         return said
     limit = _megabytes(site.CAREERS_LIMIT)
@@ -1648,11 +1821,15 @@ def _competition_section(report: _Report, season: dict, *,
         report.field("rounds", f"{meta['rounds_played']} of "
                                f"{meta['rounds_total']} played")
     report.field("draw", f"{meta['draw_source']} ({prov['draw']})")
-    if meta["ladder_complete"]:
-        report.field("ladder", "complete: every team has played the same number")
+    # The state's words are the document's, as F10's and the pages' are: played
+    # where every team's counted is its P, and counted where not (4.458).
+    if meta["ladder_state"] == "complete":
+        report.field("ladder", f"complete: {meta['ladder_detail']}")
+    elif meta["ladder_state"] == "empty":
+        # Every team on nothing is no unequal numbers, and nobody is placed (4.428).
+        report.field("ladder", f"not started: {meta['ladder_detail']}")
     else:
-        report.field("ladder", "in progress: teams have played unequal numbers "
-                               "of matches")
+        report.field("ladder", f"in progress: {meta['ladder_detail']}")
     _ladder(report, season)
     _sheet_sentence(report, sheet, {t["slug"]: t["name"] for t in season["teams"]})
 
@@ -1719,9 +1896,15 @@ def _ladder(report: _Report, season: dict) -> None:
     if not teams:
         return
     width = max(8, min(28, max(len(t["short"]) for t in teams)))
+    # What each average divides by, where a credited round makes it more than P, as
+    # the page's Counted column is shown (4.459). Three wide and a space: at the
+    # name's cap of 28 the table was 74 columns, and the report's width is 78.
+    credited = stats_mod.rounds_credited({t["slug"]: t["counted"] for t in teams},
+                                         {t["slug"]: t["played"] for t in teams})
+    count = f" {'cnt':>3}" if credited else ""
     report.line()
     report.line(f"   {'#':>2}  {'team':<{width}}  {'P':>2} {'W':>2} {'L':>2} "
-                f"{'D':>2}  {'pts':>6}  {'avg':>5}  {'games':>9}")
+                f"{'D':>2}  {'pts':>6}{count}  {'avg':>5}  {'games':>9}")
     for team in teams:
         # Half-up on the printed decimal, which is what the spreadsheet a club
         # compares this against does. A plain format spec rounds the stored double
@@ -1730,25 +1913,31 @@ def _ladder(report: _Report, season: dict) -> None:
         average = stats_mod.round_half_up(team.get("points_average"), 2)
         shown = "    -" if average is None else f"{average:5.2f}"
         points = stats_mod.round_half_up(team["points"], 1)
+        count = f" {team['counted']:>3}" if credited else ""
         report.line(f"   {team.get('position') or '-':>2}  "
                     f"{team['short'][:width]:<{width}}  "
                     f"{team['played']:>2} {team['won']:>2} {team['lost']:>2} "
-                    f"{team['drawn']:>2}  {points:>6.1f}  {shown}  "
+                    f"{team['drawn']:>2}  {points:>6.1f}{count}  {shown}  "
                     f"{team['games_won']:>4}-{team['games_lost']:<4}")
 
 
 def _review_section(report: _Report, *, seasons: list[dict], found,
                     cfg: config_mod.Config, args: argparse.Namespace,
                     config_text: str, scope: Scope = EVERY_SEASON,
-                    cards: int = 0) -> None:
+                    cards: int = 0, proposal: _Proposal | None = None) -> None:
     """Every identity this program worked out, and the line that would declare it.
 
     This is the part of the report that earns the config file. A derived value is
     not wrong, but it is a guess this program made and cannot check, and the only
     way a club can tell it apart from a fact is if something says so.
+
+    A run that proposed a config says here, before the values, what the proposal
+    offers that the config lacks (:func:`_proposal_summary`), on a run with no
+    value to list too: the proposal is this section's question asked of the whole
+    file.
     """
     items = _review_list(seasons, found, cfg, scope=scope)
-    if not items:
+    if not items and proposal is None:
         return
 
     report.head(f"review: {len(items)} value(s) worked out, not declared")
@@ -1763,7 +1952,9 @@ def _review_section(report: _Report, *, seasons: list[dict], found,
     # the draw, which every other run says is for the report only. With no file it
     # is asked of an empty one, whose answer is "not in it" for every value.
     text = config_text or _config_on_disk(args.config)
-    if config_text:
+    if not items:
+        pass
+    elif config_text:
         report.flow("  ", f"{args.config} has just been written from the cards, and "
                           f"each value below says whether it is in there live, "
                           f"behind a #, or not in it at all. The dashboard already "
@@ -1783,6 +1974,9 @@ def _review_section(report: _Report, *, seasons: list[dict], found,
                           f"fact, except any said below to be for this report "
                           f"only. The dashboard works either way; declared values "
                           f"simply stop being marked as derived on it.")
+    if proposal is not None:
+        _proposal_summary(report, args=args, cfg=cfg, found=found, items=items,
+                          text=text, proposal=proposal)
     # A table two values open is one the file can hold once, so those two are told
     # to share it; one the file has already, that its lines go under it.
     tables = [item.table for item in items]
@@ -1806,17 +2000,183 @@ def _review_section(report: _Report, *, seasons: list[dict], found,
                 report.line(part)
 
 
+def _proposal_summary(report: _Report, *, args: argparse.Namespace,
+                      cfg: config_mod.Config, found, items: list[_Item], text: str,
+                      proposal: _Proposal) -> None:
+    """What a proposed config offers that the config it was written beside lacks.
+
+    In the config's terms, since that is the file a club has to change: the
+    competitions the cards reach that it does not declare, the teams the cards
+    name that a list it declares, or its draw, lacks, the captains and home courts
+    the cards give where it names none or another, and every other value below
+    that it does not hold at all, each counted, with the lines that declare it.
+    An offer the file holds already, behind a ``#`` or live, is not one it lacks,
+    so a first run's file asked again is told it is offered nothing; one that
+    differs from a line the file declares is listed whatever else the file holds,
+    since the holding reader calls any declared key live, and two values for one
+    line are for the club to choose between. Read off the proposal's own rules
+    (:func:`config.captain_offers`, :func:`config.court_offers`), so a line
+    listed here is a line in the file, and each group stops at ``REVIEW_LIMIT``
+    lines, as a value of the review does.
+    """
+    name, proposed = args.config.name, proposal.path
+    # Under the values' own paragraph; a review with none opens with this.
+    if items:
+        report.line()
+    besides = (f"the file --discover --force would write over {name}, with "
+               f"everything {name} declares kept live and what the cards offer "
+               f"besides behind a #")
+    if proposal.written:
+        # Kept as the site's pages are, and said in the words of their line.
+        done = (f"{proposed}, beside {args.config}, {_HELD}, so it was left as it "
+                f"was" if proposal.kept
+                else f"{proposed} has been written beside {args.config}")
+        lead = (f"{done}: {besides}. Nothing reads it, and {name} is as it was. Its "
+                f"first lines say how to adopt it, and what adopting it whole loses.")
+    elif args.check:
+        lead = (f"--check writes nothing, so {proposed} was not written. It would "
+                f"be {besides}.")
+        if proposal.in_the_way:
+            whose = ("this run cannot read" if proposal.unread is not None
+                     else "this program did not write")
+            lead += (f" A file of that name is there already that {whose}, so a run "
+                     f"without --check would refuse to write over it.")
+    else:
+        lead = (f"{proposed} could not be written, as the end of this report says. "
+                f"It would be {besides}.")
+    report.flow("  ", lead, keep=(str(proposed), str(args.config)))
+
+    by_id = {comp.id: comp for comp in found.club.competitions}
+    undeclared = [comp_id for comp_id in sorted(by_id)
+                  if cfg.competition(comp_id) is None]
+    groups: list[tuple[str, list[list[str]]]] = []
+
+    def header(comp_id: str, table: str = "") -> str:
+        return (f"[competitions.{config_mod.toml_key(comp_id)}"
+                f"{'.' + table if table else ''}]")
+
+    def lacks(lines: list[str]) -> bool:
+        return config_mod.held_in(lines, text) == "absent"
+
+    if undeclared:
+        groups.append((f"{len(undeclared)} competition(s) the cards reach that "
+                       f"{name} does not declare:",
+                       [[header(comp_id)] for comp_id in undeclared]))
+    declared = [(by_id[comp_id], cfg.competition(comp_id))
+                for comp_id in sorted(by_id) if comp_id not in undeclared]
+    # Whichever closed the list, its ``teams`` or its draw: the draw's list missed
+    # Riverside Rockets, which F8 named on the same run.
+    lists, strangers = [], []
+    for comp, section in declared:
+        if comp.strangers:
+            lists.append(config_mod.team_list_lines(
+                comp.id, [*config_mod.listed_teams(comp, section), *comp.strangers]))
+            strangers.extend(comp.strangers)
+    if lists:
+        groups.append((f"{len(strangers)} team(s) the cards name that a declared "
+                       f"list lacks, {in_words(_capped(strangers))}, with "
+                       + ("the list that adds " + ("it:" if len(strangers) == 1
+                                                   else "them:")
+                          if len(lists) == 1 else "the lists that add them:"),
+                       lists))
+    for table, offered, words in (
+            ("captains", config_mod.captain_offers,
+             ("captain(s) the (C) marks give where", "names")),
+            ("courts", config_mod.court_offers,
+             ("home court(s) the home cards print where", "declares"))):
+        new: list[list[str]] = []
+        other: list[list[str]] = []
+        for comp, section in declared:
+            for offer in offered(comp, section):
+                line = (f"{config_mod.toml_key(offer.key)} = "
+                        f"{config_mod.toml_value(offer.value)}")
+                if offer.instead is None:
+                    if lacks([header(comp.id, table), line]):
+                        new.append([header(comp.id, table), line])
+                    continue
+                # A captain typed as "" names nobody, so it is one the file names
+                # none for; its line is shown all the same, which the offer replaces.
+                (other if offer.named else new).append(
+                    [header(comp.id, table),
+                     f"# in place of {config_mod.toml_key(offer.key)} = "
+                     f"{config_mod.toml_value(offer.instead)}", line])
+        for entries, verb in ((new, "none"), (other, "another")):
+            if entries:
+                groups.append((f"{len(entries)} {words[0]} {name} {words[1]} "
+                               f"{verb}:", entries))
+    # The review's own values, of the competitions the file declares: a value it
+    # holds nowhere that the proposal holds behind a # is one more offer, and is
+    # listed below already, with its lines.
+    whole = {header(comp_id) for comp_id in undeclared}
+    others = [item.subject for item in items
+              if not item.report_only and item.table not in whole
+              and lacks(item.lines)
+              and config_mod.held_in(item.lines, proposal.body) == "commented"]
+    if others:
+        groups.append((f"{len(others)} other value(s) {name} does not hold at all, "
+                       f"each listed below and behind a # in {proposed.name}: "
+                       f"{in_words(_capped(others))}.", []))
+
+    report.line()
+    would = "offers" if proposal.written else "would offer"
+    if groups:
+        report.flow("  ", f"Against {name}, it {would}:")
+    else:
+        report.flow("  ", f"{proposed.name} {would} nothing {name} lacks.")
+    missing = [comp_id for comp_id in sorted(cfg.competitions) if comp_id not in by_id]
+    if missing:
+        groups.append((f"{len(missing)} competition(s) {name} declares that no card "
+                       f"reached this run, which {proposed.name} writes back as "
+                       f"{name} has them:",
+                       [[header(comp_id)] for comp_id in missing]))
+    for words, entries in groups:
+        report.line()
+        report.flow("    ", words)
+        _offer_lines(report, entries)
+
+
+def _capped(words: list[str]) -> list[str]:
+    """*words* to ``REVIEW_LIMIT``, and how many more, for :func:`in_words`."""
+    if len(words) <= REVIEW_LIMIT:
+        return list(words)
+    return [*words[:REVIEW_LIMIT], f"{len(words) - REVIEW_LIMIT} more"]
+
+
+def _offer_lines(report: _Report, entries: list[list[str]]) -> None:
+    """The lines of a group of offers, each under its table's header once, to
+    ``REVIEW_LIMIT`` entries and then a count of the rest, six columns in."""
+    shown: str | None = None
+    for entry in entries[:REVIEW_LIMIT]:
+        table, *lines = entry
+        if table != shown:
+            report.line(f"      {table}")
+            shown = table
+        for line in lines:
+            for part in config_mod.toml_lines(line, width=WIDTH, indent=" " * 6):
+                report.line(part)
+    if len(entries) > REVIEW_LIMIT:
+        report.line(f"      # and {len(entries) - REVIEW_LIMIT} more")
+
+
 class _Item(NamedTuple):
     """One value the review lists: what it is, why, and the TOML that declares it.
 
     ``report_only`` is what to do instead, for a value that is not the club's to
     declare as it stands, and "" for every value that is. The draw read from the
     cards is the one: it is the club's to check its association's draw against.
+
+    ``to_type`` is what the club types after the ``=`` of a value only it can
+    know, which is printed with nothing there and does not load until it is
+    typed, and "" for every value printed whole. The season's length is the one,
+    and a season's name where no card or date gave one: offered as the rounds
+    played, ``rounds_total = 7`` declared a season of ten over at round 7, and
+    round 8's cards stopped the next run on F3.
     """
     subject: str
     why: str
     lines: list[str]
     report_only: str = ""
+    to_type: str = ""
 
     @property
     def table(self) -> str:
@@ -1850,6 +2210,11 @@ def _held_status(item: _Item, held: str, *, opens: bool = True,
                  if held in ("commented", "split")
                  else "not in it, and in this report only")
         return f"{where}: {item.report_only}"
+    if held == "commented" and item.to_type:
+        # Not "delete the # to adopt it": the line deleted of its # alone stops
+        # the next run at exit 2, "not valid TOML".
+        return (f"commented out, with nothing after the =: type there "
+                f"{item.to_type}, then delete the #")
     if held == "commented":
         return "commented out; delete the # to adopt it"
     if held == "split":
@@ -1863,13 +2228,14 @@ def _held_status(item: _Item, held: str, *, opens: bool = True,
         return (f"commented out, but split between the # {item.table} at lines "
                 f"{in_words(at)}, and a file declares a table once: move its "
                 f"lines under {where}, and delete the # to adopt it")
+    typed = f", with {item.to_type} typed after the =," if item.to_type else ""
     if not opens:
         return (f"not in it; add the lines below to the {item.table} it has "
-                f"already, to adopt it")
+                f"already{typed or ','} to adopt it")
     if shared:
-        return (f"not in it; add the lines below to adopt it, under the same "
-                f"{item.table} as any other value here you adopt")
-    return "not in it; add the lines below to adopt it"
+        return (f"not in it; add the lines below{typed} to adopt it, under the "
+                f"same {item.table} as any other value here you adopt")
+    return f"not in it; add the lines below{typed} to adopt it"
 
 
 def _review_list(seasons: list[dict], found, cfg: config_mod.Config, *,
@@ -1900,7 +2266,9 @@ def _review_list(seasons: list[dict], found, cfg: config_mod.Config, *,
 
 
 def _what_force_drops(cfg: config_mod.Config) -> str:
-    """What the refusal says a rewrite loses, which is the draw and the comments.
+    """What a rewrite loses, which is the draw and the comments: said by the
+    header of the proposal ``--discover`` writes beside a config, of adopting it
+    whole, since 4.431, and by the refusal it replaced before.
 
     It said "Everything you have declared in it would be replaced by what the cards
     say", which named nothing a club could check the rewritten file against. What a
@@ -1917,9 +2285,10 @@ def _what_force_drops(cfg: config_mod.Config) -> str:
     whose rounds move the length written is named beside them, moved or not; a
     ``rounds_total`` typed is not moved by them, and is not named. A length its
     cards have played past, the one the draw gave or the one the labels give, is
-    written commented out, and this is said before the cards are read, so each
-    length named is said with that. Once for the list, it read as said of a section
-    that has no length written, and not of the one before it that had.
+    written commented out, and this is said from the file alone, without the
+    cards, so each length named is said with that. Once for the list, it read as
+    said of a section that has no length written, and not of the one before it
+    that had.
 
     A sheet table is written back as it was read, and one the loader could compare
     no line of was read as nothing, so it would come back as the blank template.
@@ -1958,7 +2327,7 @@ def _what_force_drops(cfg: config_mod.Config) -> str:
                 lengths.append(f"no rounds_total is written for {comp_id} where "
                                f"your draw gave it {gave}")
                 continue
-            # The cards are not read yet to say which. Played past the length the
+            # Said from the file alone, so not which. Played past the length the
             # draw gave, F3 stops this run; past the labels', it would stop the run
             # after; either way it is written commented out.
             where = ("as your draw gave it" if was == now
@@ -2028,28 +2397,35 @@ def _rewrite_offer(report: _Report, *, cfg: config_mod.Config,
     Offered only while the file describes no competition: that is the one state in
     which a rewrite can lose nothing a card cannot supply. A config with a
     ``[competitions.…]`` section in it can hold a declared draw, and ``--force``
-    drops the draw -- which :func:`_what_force_drops` says, in the refusal a club
-    meets before it can add the flag.
+    drops the draw -- which :func:`_what_force_drops` says, in the header of the
+    proposal plain ``--discover`` writes beside the file (4.431).
 
     How many of the values below land in it behind a ``#`` is asked of *rewrite*,
     the file that command would write: said of every value, it was false of the
     draw, which no file is written with, and of players' spellings, which a
     rewrite leaves to the club. One lands at least, each competition's team list,
-    which a file that describes no competition cannot have declared.
+    which a file that describes no competition cannot have declared. A value
+    written with nothing after its ``=`` is said apart, since deleting its ``#``
+    is not all adopting it takes.
     """
     if not cfg.exists or cfg.competitions:
         return
     adoptable = [item for item in items if not item.report_only]
-    landed = sum(1 for item in adoptable
-                 if config_mod.held_in(item.lines, rewrite) == "commented")
-    if landed == len(adoptable):
+    landed = [item for item in adoptable
+              if config_mod.held_in(item.lines, rewrite) == "commented"]
+    if len(landed) == len(adoptable):
         lands = ("each value below that can be adopted lands in it commented out, "
                  "so adopting one is deleting a # rather than typing the line "
                  "yourself")
     else:
-        lands = (f"{landed} of the {len(adoptable)} values below that can be "
+        lands = (f"{len(landed)} of the {len(adoptable)} values below that can be "
                  f"adopted land in it commented out, so adopting one of those is "
                  f"deleting a # rather than typing the line yourself")
+    # A value only the club knows lands too, with nothing after its =, and the #
+    # deleted alone leaves a file that does not load.
+    if any(item.to_type for item in landed):
+        lands += ("; any of those with nothing after the = needs its value typed "
+                  "there too")
     report.line()
     report.flow("  ", f"Or have them written for you. {args.config} describes no "
                       f"competition yet, so a rewrite has nothing of yours to "
@@ -2178,27 +2554,37 @@ def _review_items(comp: Competition, season: dict, cfg: config_mod.Config, *,
             config_mod.team_list_lines(comp.id, names)))
 
     if comp.rounds_total is None:
+        # No number, as the file writes none: no card prints the length, and the
+        # rounds played, adopted, declared the season over where it had reached.
         out.append(_Item(
             f"the season length for {comp.id}",
             f"without it the dashboard says "
             f"\"{rounds_played_words(meta['rounds_played'])}\" and shows no "
             f"percentage, rather than implying the season is over",
-            [header, f"rounds_total = {max(meta['rounds_played'], 1)}"]))
+            [header, "rounds_total ="],
+            to_type="the number of rounds your association's draw gives the "
+                    "season"))
 
     if comp.provenance_of("season") is not Provenance.DECLARED:
-        # Only what the cards actually support: the season string if one was
-        # printed, else the year the matches were played in, else nothing. A
-        # plausible-looking invented season name here would be pasted into
-        # config.toml unread and become a declared fact.
-        guess = comp.season or meta["season_label"] or _year_seen(season)
+        # The one offer the file makes too, asked of export.season_offer. Where
+        # there is none, a bare line to type: ``season = ""`` added as printed was
+        # "live already, so the next run reads it as declared", and declared
+        # nothing.
+        offer = export.season_offer(
+            comp, [match.get("date") or "" for match in season["matches"]])
+        shown = export.season_label_from(comp)
+        made = ("the year on the season's cards"
+                if shown == export.SEASON_FROM_DATE
+                else "the season's folder name made readable")
         out.append(_Item(
             f"the season name for {comp.id}",
+            f"no card prints it, so the dashboard shows {made} until a human "
+            f"says what it is" if shown else
             "scorecards do not reliably print it, so the dashboard leaves it "
             "out until a human says what it is",
-            [header, f"season = {config_mod.toml_value(guess)}"]
-            + ([] if guess else
-               ["# no card printed a season and no date gave a year: "
-                "fill this in"])))
+            [header, f"season = {config_mod.toml_value(offer)}" if offer
+             else "season ="],
+            to_type="" if offer else "the season's name in double quotes"))
 
     if comp.provenance_of("draw") is not Provenance.DECLARED:
         # Not a draw to adopt: measured on the demo's first three rounds pasted in
@@ -2259,17 +2645,6 @@ def _review_items(comp: Competition, season: dict, cfg: config_mod.Config, *,
             "mixed case; check the spelling and the capitals",
             lines))
     return out
-
-
-def _year_seen(season: dict) -> str:
-    """The year the matches were played in, from their own dates.
-
-    Empty when no card printed a date, which is the honest answer: a season name
-    this program made up would be indistinguishable from one a human checked.
-    """
-    years = sorted({m["date"][:4] for m in season["matches"]
-                    if len(m.get("date") or "") >= 4})
-    return years[0] if len(years) == 1 else " to ".join(years)
 
 
 def _draw_lines(comp: Competition, key: str, season: dict) -> list[str]:
@@ -2627,7 +3002,8 @@ def _changes_list(report: _Report, *, args: argparse.Namespace,
 def _left_behind_section(report: _Report, *, args: argparse.Namespace,
                          cfg: config_mod.Config, orphans, pruned: dict,
                          refusals: dict, withheld: bool = False,
-                         players: str = "names", wrote: bool) -> None:
+                         players: str = "names", wrote: bool,
+                         seasons=()) -> None:
     """The dashboards under ``--out`` that this run did not write, and a careers page.
 
     Loud -- ``always=True`` on every line -- because it is the one way this program
@@ -2651,7 +3027,8 @@ def _left_behind_section(report: _Report, *, args: argparse.Namespace,
         report.line(f"  {orphan.path}", always=True)
         report.flow("      ", _orphan_evidence(orphan), always=True)
         report.flow("      ", _orphan_reason(orphan, args=args, cfg=cfg,
-                                             players=players, wrote=wrote),
+                                             players=players, wrote=wrote,
+                                             seasons=seasons),
                     always=True)
         if withheld and orphan.players == "names":
             # The one reason a copy this run did not write breaks a promise this run
@@ -2672,54 +3049,40 @@ def _left_behind_section(report: _Report, *, args: argparse.Namespace,
             report.flow("      kept: ", reason, under=" " * 6, always=True)
     report.line("", always=True)
     if not pruning:
-        _left_behind_lead(report, args=args, orphans=orphans,
-                          withheld=_careers_withheld(cfg, players), wrote=wrote)
+        _left_behind_lead(report, args=args, orphans=orphans, wrote=wrote)
     else:
         _pruned_summary(report, args=args, orphans=orphans, pruned=pruned,
                         refusals=refusals)
 
 
 def _left_behind_lead(report: _Report, *, args: argparse.Namespace,
-                      orphans, withheld: bool = False, wrote: bool) -> None:
+                      orphans, wrote: bool) -> None:
     """What to do about the list above: the command, and what it will not do.
 
     A careers page is one file and not a dashboard, so it has a paragraph of its
     own -- ahead of the dashboards' when both are listed, and alone when it is --
-    and the dashboards' paragraphs are the words they always were. *withheld*
-    says the page is listed because this run withholds names, in multi-season
-    mode, and not because it is in single-season mode: it is then the names it
-    shows that matter, and the seasons it adds up are not only the ones listed.
-    Its paragraphs leave out why this run did not write the page, which the
-    reason and the names line above them have just said: as first written they
-    said it again, the same point three times over one page.
+    and the dashboards' paragraphs are the words they always were. A page is
+    listed only by a run that withholds names, in either mode (4.430), so it is
+    the names it shows that matter, and the seasons or competitions it adds up
+    are not only the ones listed. Its paragraphs leave out why this run did not
+    write the page, which the reason and the names line above them have just
+    said: as first written they said it again, the same point three times over
+    one page.
     """
     page = any(orphan.kind == "careers" for orphan in orphans)
     dashboards = any(orphan.kind != "careers" for orphan in orphans)
     if page and not dashboards:
-        if withheld:
-            said = (f"{_unlinked(args, 'the careers page above', wrote=wrote)}, "
-                    f"but it opens by double-click and shows every name it was "
-                    f"built with, which is why this run names it. To delete it:")
-        else:
-            said = (f"The careers page above was written by a multi-season build, "
-                    f"and this run, in single-season mode, did not write it. "
-                    f"{_unlinked(args, 'it', wrote=wrote)}, but it opens by "
-                    f"double-click and shows the figures it was built with, which "
-                    f"is why this run names it. To delete it:")
+        said = (f"{_unlinked(args, 'the careers page above', wrote=wrote)}, "
+                f"but it opens by double-click and shows every name it was "
+                f"built with, which is why this run names it. To delete it:")
         report.flow("  ", said, always=True)
         report.line("", always=True)
         for line in _command_hint(args, "--prune"):
             report.line(line, always=True)
         return
-    if page and withheld:
+    if page:
         report.flow("  ", "The command below removes the careers page above with "
                           "the dashboards.", always=True)
-        report.line("", always=True)
-    elif page:
-        report.flow("  ", "The careers page above adds up the seasons of the "
-                          "dashboards listed with it. A multi-season build wrote "
-                          "it and this run, in single-season mode, did not; the "
-                          "command below removes it with them.", always=True)
         report.line("", always=True)
     # Written without a singular and a plural of itself. One stale dashboard is
     # the common case and six is what a mode switch produces, and a sentence
@@ -2749,12 +3112,12 @@ def _left_behind_lead(report: _Report, *, args: argparse.Namespace,
 def _unlinked(args: argparse.Namespace, what: str, *, wrote: bool) -> str:
     """That nothing under ``--out`` links *what*, in the tense of the run.
 
-    Said by the three leads above of a folder or page this run did not write. A
+    Said by the two leads above of a folder or page this run did not write. A
     run that wrote rewrote the front page, and says what that page does. Under
     --check, the one other run that lists what it left, the front page is the
     last build's and still links everything that build wrote, so the sentence
     is what a build would leave. One function, so that no lead can be in a
-    different tense from the other two.
+    different tense from the other.
     """
     if wrote:
         return f"Nothing under {args.out} links {what} any more"
@@ -2815,7 +3178,7 @@ def _orphan_evidence(orphan) -> str:
 
 def _orphan_reason(orphan, *, args: argparse.Namespace,
                    cfg: config_mod.Config, players: str = "names",
-                   wrote: bool) -> str:
+                   wrote: bool, seasons=()) -> str:
     """Why this run did not write it, in the order the answers are most use.
 
     The mode switch comes first, because it is the one cause that orphans a club's
@@ -2826,22 +3189,27 @@ def _orphan_reason(orphan, *, args: argparse.Namespace,
     orphans is never one this run wrote.
 
     A careers page has a reason of its own, ahead of all of that: it sits at the
-    root in either mode, so the sentence about depth would be untrue of it. Two,
-    in fact: in multi-season mode the only run that does not write one is a run
-    that withholds names.
+    root in either mode, so the sentence about depth would be untrue of it. Every
+    build that prints names writes one, in either mode (4.430), so the one run
+    that lists one is a run that withholds names, and the reason is that, worded
+    for what a label is one of in this run's mode.
 
     A second copy's reason is the one in a tense, asked of the ``wrote`` that
     :func:`_unlinked` takes: a run that wrote says where it wrote the
     competition, and ``--check``, which wrote nothing, says where a build
     writes it. The rest are as true of either run.
+
+    Last, a copy whose every card this run read, in *seasons*, and filed under
+    another competition: a card filed under the night of a date printed wrong,
+    since put right. It is not a copy whose cards are gone, and "no card under
+    data belongs to it" sent a club looking for one, so it says where they were
+    filed: :func:`_refiled`.
     """
     if orphan.kind == "careers":
-        if _careers_withheld(cfg, players):
-            return ("only a build that prints players' names writes a careers "
-                    "page: a withheld label belongs to one season, not to a "
-                    "person")
-        return ("only a multi-season build writes a careers page, and this run "
-                "is in single-season mode")
+        part = careers_mod.part(cfg.multi_season)
+        return (f"only a build that prints players' names writes a careers "
+                f"page: a withheld label belongs to one {part}, not to a "
+                f"person")
     if orphan.mode and orphan.mode != cfg.seasons_mode:
         was = "multi-season" if orphan.mode == "multi" else "single-season"
         now = "multi-season" if cfg.multi_season else "single-season"
@@ -2853,7 +3221,112 @@ def _orphan_reason(orphan, *, args: argparse.Namespace,
                    f"{orphan.duplicate_of} now"
         return f"a second copy: a build writes this competition to " \
                f"{orphan.duplicate_of}"
+    found = _read_elsewhere(orphan, seasons)
+    if found:
+        return _refiled(orphan, found, args=args, cfg=cfg, wrote=wrote)
     return f"no card under {args.data} belongs to it any more"
+
+
+def _read_elsewhere(orphan, seasons) -> list[tuple[dict, str]]:
+    """This run's cards of a stale copy's fixtures, and where each was filed.
+
+    A fixture as :func:`changes.fixture_of` keys it, the round and the two teams
+    as the card printed them, home first, looked for in the copy's own season,
+    because a draw repeats from one season to the next. And then only where one
+    competition of that season fields both teams, and holds the cards of the
+    fixture the copy holds, as many and printing the same ids
+    (:func:`site.card_of`). Two nights can field teams of one name, and the
+    other night's card of the same round and teams is not this copy's: matched
+    on the fixture alone, a copy whose card was deleted was said to have been
+    filed under the other night, and one whose card was put right could be said
+    to be wherever the other night's card was. The ids answer the one case the
+    nights cannot, a card deleted whose own night fields one of its teams no
+    more, where the two nights' cards print ids of their own. And a copy
+    holding a card this run did not read, or not holding one it did, holds a
+    result no card this run read accounts for.
+
+    Rejected: one card per fixture rather than one night per pair of teams,
+    since a deleted card leaves the other night's the only one; the id alone,
+    which some cards leave out and others share; either way round, one more
+    thing two nights' cards would have to share; the file's path, which a
+    re-export renames. A card re-exported under a new id is not found, which
+    leaves the copy the reason a deleted season gets, true of it still.
+
+    Every fixture or none: a copy one of whose cards was not read holds a result
+    no card under data accounts for, and so does a copy whose matches cannot be
+    read, so both keep the reason a deleted season gets.
+    """
+    fielding: dict[tuple[str, str], set[str]] = {}
+    held: dict[tuple[str, ...], list[tuple[str, dict, str]]] = {}
+    for season in seasons:
+        key = str(season["meta"].get("season_key", ""))
+        competition = season["meta"]["competition"]
+        for team in season["teams"]:
+            fielding.setdefault((key, str(team.get("slug", ""))),
+                                set()).add(competition)
+        for row in season["matches"]:
+            *fixture, printed = site.card_of(row)
+            held.setdefault((key, *fixture), []).append(
+                (printed, row, competition))
+    found = []
+    for fixture in dict.fromkeys(match[:3] for match in orphan.matches):
+        _, home, away = fixture
+        nights = (fielding.get((orphan.season_key, home), set())
+                  & fielding.get((orphan.season_key, away), set()))
+        cards = held.get((orphan.season_key, *fixture), [])
+        ids = sorted(m[3] for m in orphan.matches if m[:3] == fixture)
+        if len(nights) != 1 or sorted(card[0] for card in cards) != ids:
+            return []
+        found.extend((row, competition) for _, row, competition in cards)
+    return found
+
+
+# The fixtures a left-behind copy's reason names before it counts the rest. The
+# owner's stray competitions held one or two cards each, and a whole night filed
+# wrong holds a season, which named in full is a paragraph to say one thing.
+_FIXTURES_NAMED = 3
+
+
+def _refiled(orphan, found: list[tuple[dict, str]], *, args: argparse.Namespace,
+             cfg: config_mod.Config, wrote: bool) -> str:
+    """Where this run filed the cards of a copy left behind, and what is left of it.
+
+    One card is named with the file it was read from, so the club can open it;
+    several are counted, with a few of their fixtures, and no file, which the
+    dashboard they were filed under names on each one's page. Then that the copy
+    is stale, and that --prune removes it where it would and this run is not one.
+
+    And while config.toml declares the copy's competition with a day and a
+    division, that the section is all that keeps it on the front page: the first
+    run writes one live for every night it files a card under, and nothing else
+    says this one now names a night no card is filed under. The name is the one
+    the front page prints for it, the section's. The command is the lead's to
+    print, below the list, so it is not said here. Rejected: hiding the entry,
+    which would make a published page depend on what an earlier build left.
+    """
+    filed = in_words(dict.fromkeys(competition for _, competition in found))
+    if len(found) == 1:
+        row = found[0][0]
+        said = (f"its 1 card's fixture, {changes_mod._subject(row)}, was read this "
+                f"run from {row['source']} and filed under {filed}")
+    else:
+        named = dict.fromkeys(changes_mod._subject(row) for row, _ in found)
+        listed = in_words_capped(named, _FIXTURES_NAMED)
+        said = (f"its {len(found)} cards' fixtures, {listed}, were read this run "
+                f"and filed under {filed}")
+    said += ", so this copy is stale"
+    # Not under --prune, whose line under this one says what it did with the copy.
+    if orphan.removable and not args.prune:
+        said += " and --prune removes it"
+    section = cfg.competition(orphan.competition)
+    if section is not None and section.can_claim_cards:
+        front = "the front page" if wrote else "the front page a build writes"
+        cards = "that card" if len(found) == 1 else "those cards"
+        said += (f". [competitions.{config_mod.toml_key(orphan.competition)}] in "
+                 f"{args.config} is all that keeps {site._declared_label(section)} "
+                 f"on {front}, with no results: if it was written for {cards}, "
+                 f"delete it")
+    return said
 
 
 def _paste_lines(words: list[tuple[str, ...]], *, cd: Path | None = None,
@@ -3019,6 +3492,7 @@ def _finish(report: _Report, *, args: argparse.Namespace, cards, filed: int,
             seasons: list[dict], written: site.SiteWrite | None, unscored: int,
             errors: int, unwritable: OSError | None = None, unlisted: int = 0,
             config_unwritable: OSError | None = None,
+            config_target: Path | None = None, proposal: _Proposal | None = None,
             prune_failed: int = 0, withholding=None, named_left: int = 0,
             before=(), careers_kept: bool = False,
             careers_named: bool = False,
@@ -3038,13 +3512,21 @@ def _finish(report: _Report, *, args: argparse.Namespace, cards, filed: int,
         # below can end the run where they already did -- a folder with no readable card
         # in it returns three lines from here -- without any of them having to remember
         # to mention a file they know nothing about.
-        _config_not_written(report, args=args, exc=config_unwritable)
+        target = config_target or args.config
+        _config_not_written(report, args=args, exc=config_unwritable, path=target,
+                            proposal=proposal is not None)
         # `--discover` was asked for exactly one thing and did not get it, so that run is
         # a refusal like any other. A plain run's write is a courtesy on top of a
         # dashboard that is correct without it, so it is exit 1: worth a script noticing,
-        # and not the same as a build that produced nothing.
+        # and not the same as a build that produced nothing. A proposal is that one
+        # thing too.
         floor = 2 if args.discover else 1
-        unfinished.append(f"{args.config} not written")
+        unfinished.append(f"{target} not written")
+    if proposal is not None and proposal.written:
+        # Beside the config, which is as it was: the one file of this run outside
+        # --out, so the line names it where a club reads what was written.
+        report.field("proposed", str(proposal.path), always=True,
+                     keep=(str(proposal.path),))
     if prune_failed:
         # Exit 1, like every other thing this program was asked to do and could
         # not. A club that prunes from a script has no other way to learn that a
@@ -3312,7 +3794,8 @@ def _not_written(report: _Report, *, args: argparse.Namespace,
 
 
 def _config_not_written(report: _Report, *, args: argparse.Namespace,
-                        exc: OSError) -> None:
+                        exc: OSError, path: Path | None = None,
+                        proposal: bool = False) -> None:
     """The lines about a starter config that would not write, above the last word.
 
     Shorter than its sibling above, and on purpose. That one is about the thing a club
@@ -3321,8 +3804,13 @@ def _config_not_written(report: _Report, *, args: argparse.Namespace,
     anybody typed. So it says which file, why, what to do -- and then that the dashboard
     is unaffected, because "config" sounds like something a build depends on and the
     club has no way to know from here that this one is not.
+
+    A *proposal* is the same file written beside a config that is there, and is
+    *path*: what it says to do sends no club to ``--config``, which names the file
+    it is beside and not where it goes, and what it says is not at stake is the
+    config, which was only read.
     """
-    report.flow("  ", f"{args.config} could not be written.", always=True)
+    report.flow("  ", f"{path or args.config} could not be written.", always=True)
     if exc.filename:
         report.field("file", str(exc.filename), always=True,
                      keep=(str(exc.filename),))
@@ -3332,9 +3820,15 @@ def _config_not_written(report: _Report, *, args: argparse.Namespace,
     if exc.errno:
         reason = f"{reason} (errno {exc.errno})"
     report.field("reason", reason, always=True)
-    advice = _config_advice(exc, writing=True)
+    advice = (_proposal_advice(exc, args=args) if proposal
+              else _config_advice(exc, writing=True))
     if advice:
         report.sentence("what to do", advice, always=True)
+    if proposal:
+        report.flow("  ", f"Nothing you entered is at stake: {args.config} was only "
+                          f"read, and is as it was. The dashboard was built from it, "
+                          f"so it is unaffected.", always=True)
+        return
     # Not loud: under --quiet there is nothing above this to reassure anybody about.
     # Flowed rather than hand-wrapped so that the next club to reword a sentence of it
     # cannot leave a line hanging over the margin.

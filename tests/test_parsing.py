@@ -409,6 +409,306 @@ class TestTheWeekdayIsReadAsPrintedAndNotWorkedOutFromTheDate(CardCase):
         self.assertIn("date 2026-08-18 (printed Wednesday)", described)
 
 
+TUESDAY_LINE = "Brindle Tuesday Night Fixtures 2026"
+
+
+def filed(card) -> str:
+    """The weekday the build files *card* under, asked of the build's own rule."""
+    from matchcentre import discover
+    return discover.filing_day(card)
+
+
+class TestTheNightIsTheWeekdayTheCompetitionLineNames(CardCase):
+    """A card's competition line names the night it is played, and nothing read it.
+
+    Match Centre prints ``<club words> <Weekday> Night Fixtures <year>`` above the
+    identity line. The reader read the weekday beside the date and no other, so a
+    card printing ``Thu 24/09/2026`` under ``Brindle Tuesday Night Fixtures 2026``
+    read as a Thursday and was filed as one, and ``Wed 23/09/2026`` under a Monday
+    line as a Wednesday (``/tmp/mcf/scratch/FILE/probe_read.py``). On a club's
+    export of 201 cards every competition line names a night, 96 Monday and 105
+    Tuesday, and every card sits in that night's folder, while 2 print a date off
+    it and 6 a range of days in place of one; 0.1.0 built 17 competitions there of
+    the 10 there are.
+
+    ``card.night`` is the weekday the line printing ``Night Fixtures`` names in
+    front of ``Night``, in full, when no other word of that line spells another
+    weekday, and it files the card before the date does. Of two such lines it is
+    the one nearest the set table, the team names apart: the template prints the
+    letterhead and the venue, the club's own words, above the competition line,
+    and only its season line and identity line below. ``card.weekday`` is still
+    the word printed beside the date, so the competition line's ``Wednesday`` is
+    not that (the subtest "competition line" above). Row 4.16(b) rejected filing
+    by the line's weekday because a weekday word away from the date could be a
+    team's (``FRI 3``) or a letterhead's; read from that one line it is neither,
+    and the cards' own nights now outweigh it. Rejected: any weekday word in the
+    header, which reads a letterhead ``SUN QUILLBOROUGH`` or a team ``FRI 3`` as
+    the night; any weekday word on the line, which reads ``Sun Valley Night
+    Fixtures`` as Sunday; the word in front of ``Night`` alone, which reads
+    ``Monday and Tuesday Night Fixtures`` as Tuesday; the folder a card sits in,
+    which is a label the club typed; the first line printing ``Night Fixtures``,
+    which reads a venue's or a letterhead's night; no night where two lines name
+    two, which takes from every card of a club whose venue names one the night its
+    competition line names.
+    """
+
+    def test_the_weekday_in_front_of_night_fixtures_is_the_night(self):
+        # The first is the subtest's own line: its Wednesday is the night, and
+        # still not the weekday printed beside the date.
+        for line, night in (
+                ("Example Tennis Wednesday Night Fixtures 2026", "Wednesday"),
+                (TUESDAY_LINE, "Tuesday"),
+                ("BRINDLE MONDAY NIGHT FIXTURES 2026", "Monday"),
+                ("Brindle Tues Night Fixtures", "Tuesday"),
+                ("Brindle Weds Night Fixtures 2026", "Wednesday")):
+            with self.subTest(line=line):
+                card = self.read(cw.CardSpec(competition_line=line,
+                                             when="18/08/2026 7:00 PM"))
+                self.assertEqual(card.night, night)
+                self.assertEqual(card.weekday, "")
+
+    def test_a_line_naming_no_night_or_more_than_one_names_none(self):
+        for label, spec in (
+                ("the writer's own line", cw.CardSpec()),
+                ("two nights", cw.CardSpec(
+                    competition_line="Brindle Monday and Tuesday Night Fixtures 2026")),
+                ("a weekday that is a club's word", cw.CardSpec(
+                    competition_line="Sun Valley Night Fixtures 2026")),
+                ("a club's word and a night", cw.CardSpec(
+                    competition_line="Sun Valley Tuesday Night Fixtures 2026")),
+                ("no Fixtures", cw.CardSpec(
+                    competition_line="Brindle Tuesday Night Tennis 2026")),
+                ("a letterhead", cw.CardSpec(
+                    club_lines=("SUN QUILLBOROUGH TENNIS", "CLUB INC"))),
+                ("a team", cw.CardSpec(away_name="FRI 3"))):
+            with self.subTest(label):
+                self.assertEqual(self.read(spec).night, "")
+
+    def test_the_night_files_a_card_its_date_puts_on_another(self):
+        for line, when, date, printed, night in (
+                (TUESDAY_LINE, "Thu 24/09/2026 7:00 PM", "2026-09-24", "Thursday",
+                 "Tuesday"),
+                ("Brindle Monday Night Fixtures 2026", "Wed 23/09/2026 7:00 PM",
+                 "2026-09-23", "Wednesday", "Monday")):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(competition_line=line, when=when))
+                self.assertEqual((card.date, card.weekday), (date, printed))
+                self.assertEqual(filed(card), night)
+
+    def test_a_card_whose_line_names_no_night_is_filed_as_it_was(self):
+        # With no night, the date files the card before the weekday printed beside
+        # it, and the weekday printed files a card whose date did not read.
+        for when, day in (("Thu 24/09/2026 7:00 PM", "Thursday"),
+                          ("Wed 24/09/2026 7:00 PM", "Thursday"),
+                          ("Tue 7:00 PM", "Tuesday")):
+            with self.subTest(when=when):
+                self.assertEqual(filed(self.read(cw.CardSpec(when=when))), day)
+
+    def test_a_date_that_does_not_read_is_filed_by_the_night_and_says_so(self):
+        for when in ("Wed 7:00 PM", "7:00 PM", "Wed 32/13/2026 7:00 PM"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(competition_line=TUESDAY_LINE,
+                                             when=when))
+                said = [w for w in card.warnings if "date" in w]
+                self.assertEqual(len(said), 1, card.warnings)
+                self.assertIn("so the match is undated and is filed by the "
+                              "Tuesday its competition line names", said[0])
+                self.assertEqual(filed(card), "Tuesday")
+
+    def test_the_competition_line_is_the_one_under_the_clubs_own_words(self):
+        # The first line printing Night Fixtures was taken, and the template prints
+        # the letterhead and the venue above the competition line: a venue printing
+        # 'Monday Night Fixtures' read Monday under a Tuesday line, and so did a
+        # letterhead's second line, while its first, beside the date, named none
+        # (/tmp/mcf/scratch/FILE/fix/probe_lines.py). The team names, the largest
+        # print, are below it and are no line the competition is read from.
+        for label, spec in (
+                ("a venue", cw.CardSpec(venue="Monday Night Fixtures Courts")),
+                ("a letterhead", cw.CardSpec(
+                    club_lines=("BRINDLE TENNIS", "MONDAY NIGHT FIXTURES"))),
+                ("a letterhead beside the date", cw.CardSpec(
+                    club_lines=("MONDAY NIGHT FIXTURES", "CLUB INC"))),
+                ("a team", cw.CardSpec(away_name="MONDAY NIGHT FIXTURES"))):
+            with self.subTest(label):
+                card = self.read(dataclasses.replace(spec,
+                                                     competition_line=TUESDAY_LINE))
+                self.assertEqual(card.night, "Tuesday")
+
+
+class TestADateRangeIsReadAsTheDayOfItOnTheNight(CardCase):
+    """A card printing a range of days was undated, and filed by its last day.
+
+    ``Tue 29/09 - Sun 04/10 7:00 PM`` is in no form the reader dates, so it read
+    no date, and the weekday was the word in front of the start time over what was
+    left of the range: ``Sun``. Measured (``/tmp/mcf/scratch/FILE/probe_read.py``):
+    every range without years read date ``''`` and weekday ``Sunday``, was filed
+    on a Sunday, and was warned that no date is printed in a form the reader
+    accepts. A club's export of 201 cards prints 6 such ranges, ``Mon 17/08 - Sun
+    23/08``, ``Mon 28/09 - Sun 04/10`` and ``Tue 29/09 - Sun 04/10`` four times,
+    each opening on its competition's night and on the date every other card of
+    its round prints, and 0.1.0 built five Sunday competitions of them.
+
+    A range ``<Wd> dd/mm - <Wd> dd/mm``, with a four-digit year on both ends or on
+    neither, is read as the week it prints: in the year its competition line
+    prints when it prints none, closing in the next year when its closing day
+    comes earlier in the calendar, and only when it is a week or less and its two
+    weekdays are its two days'. Its date is the day of it that falls on the night
+    the competition line names, and with no night the day it opens on, which is
+    how a range printed with years was always read. A range that is no such week
+    is undated, and the warning says why without quoting the range, which
+    ``--redact`` would not see as a date: that its weekdays are not its days', or
+    that it is longer than a week. Rejected: the build clock's year, which
+    dates a card by when it was built; any four-digit year in the header, which
+    takes a letterhead's ``EST 2015``; the year the weekdays fit, which always
+    finds one; undated and filed by the day it opens on (an earlier draft), which
+    loses the date every other card of its round prints; an en dash, ``to``, or
+    a dash with no space round it between the two, which no card measured
+    prints, and the last of which the doctor finds as a date, so that the
+    reader's not dating it shows.
+    """
+
+    def test_a_range_on_a_tuesday_line_is_dated_its_tuesday(self):
+        card = self.read(cw.CardSpec(competition_line=TUESDAY_LINE,
+                                     when="Tue 29/09 - Sun 04/10 7:00 PM"))
+        self.assertEqual((card.date, card.weekday), ("2026-09-29", "Tuesday"))
+        self.assertEqual(filed(card), "Tuesday")
+        self.assertEqual([w for w in card.warnings if "date" in w], [])
+
+    def test_the_day_on_the_night_is_taken_wherever_it_falls_in_the_range(self):
+        # The weekday is the word printed beside the day taken, and in the middle
+        # of a range there is none. A range holding no day of the night is dated
+        # the day it opens on, and filed by the night.
+        for night, when, date, printed in (
+                ("Monday", "Mon 28/09 - Sun 04/10", "2026-09-28", "Monday"),
+                ("Monday", "Mon 17/08 - Sun 23/08", "2026-08-17", "Monday"),
+                ("Thursday", "Tue 29/09 - Sun 04/10", "2026-10-01", ""),
+                ("Sunday", "Tue 29/09 - Sun 04/10", "2026-10-04", "Sunday"),
+                ("Monday", "Tue 29/09 - Sun 04/10", "2026-09-29", "Tuesday")):
+            with self.subTest(night=night, when=when):
+                card = self.read(cw.CardSpec(
+                    competition_line=f"Brindle {night} Night Fixtures 2026",
+                    when=f"{when} 7:00 PM"))
+                self.assertEqual((card.date, card.weekday), (date, printed))
+                self.assertEqual(filed(card), night)
+                self.assertEqual([w for w in card.warnings if "date" in w], [])
+
+    def test_a_range_printed_with_years_is_dated_on_the_night_too(self):
+        for line, date in (("Brindle Thursday Night Fixtures 2026", "2026-10-01"),
+                           (TUESDAY_LINE, "2026-09-29"),
+                           ("Example District Tennis Club Night Fixtures 2026",
+                            "2026-09-29")):
+            with self.subTest(line=line):
+                card = self.read(cw.CardSpec(
+                    competition_line=line,
+                    when="Tue 29/09/2026 - Sun 04/10/2026 7:00 PM"))
+                self.assertEqual(card.date, date)
+
+    def test_a_range_across_the_new_year_closes_in_the_next_one(self):
+        for night, date in (("Tuesday", "2026-12-29"), ("Sunday", "2027-01-03")):
+            with self.subTest(night=night):
+                card = self.read(cw.CardSpec(
+                    competition_line=f"Brindle {night} Night Fixtures 2026",
+                    when="Tue 29/12 - Sun 03/01 7:00 PM"))
+                self.assertEqual(card.date, date)
+
+    def test_a_range_on_a_line_naming_no_night_is_dated_the_day_it_opens(self):
+        card = self.read(cw.CardSpec(when="Tue 29/09 - Sun 04/10 7:00 PM"))
+        self.assertEqual((card.date, card.weekday), ("2026-09-29", "Tuesday"))
+        self.assertEqual(filed(card), "Tuesday")
+        self.assertEqual([w for w in card.warnings if "date" in w], [])
+
+    def test_a_range_with_no_year_on_the_card_is_undated_and_says_so(self):
+        # A season printed as 2026/27, 2025-2026 or with two years names no one of
+        # them; and a card printing no Night Fixtures line has no competition line
+        # to blame.
+        lines = "its competition line prints no single year"
+        for line, lacking, files in (
+                ("Brindle Tuesday Night Fixtures", lines,
+                 "Tuesday its competition line names"),
+                ("Brindle Tuesday Night Fixtures 2026/27", lines,
+                 "Tuesday its competition line names"),
+                ("Brindle Tuesday Night Fixtures 2025-2026", lines,
+                 "Tuesday its competition line names"),
+                ("Brindle Tuesday Night Fixtures 2026 and 2027", lines,
+                 "Tuesday its competition line names"),
+                ("Example Night Fixtures", lines, "Tuesday it prints"),
+                ("", "no line printing Night Fixtures to take one from",
+                 "Tuesday it prints")):
+            with self.subTest(line=line):
+                card = self.read(cw.CardSpec(competition_line=line,
+                                             when="Tue 29/09 - Sun 04/10 7:00 PM"))
+                self.assertEqual((card.date, card.weekday), ("", "Tuesday"))
+                self.assertEqual(filed(card), "Tuesday")
+                said = [w for w in card.warnings if "date" in w or "days" in w]
+                self.assertEqual(said, [
+                    f"the card prints a range of days with no year, and {lacking}, "
+                    f"so the match is undated and is filed by the {files}"])
+
+    def test_a_range_that_is_no_such_week_in_the_lines_year_is_undated(self):
+        # 29/09/2025 is a Monday and 04/10/2025 a Saturday; then a day that is no
+        # date, and a 2026 range wrong at one end each.
+        for line, when, opens, closes in (
+                ("Brindle Tuesday Night Fixtures 2025", "Tue 29/09 - Sun 04/10",
+                 "Tuesday", "Sunday"),
+                (TUESDAY_LINE, "Tue 31/09 - Sun 04/10", "Tuesday", "Sunday"),
+                (TUESDAY_LINE, "Wed 29/09 - Sun 04/10", "Wednesday", "Sunday"),
+                (TUESDAY_LINE, "Tue 29/09 - Sat 04/10", "Tuesday", "Saturday")):
+            with self.subTest(line=line, when=when):
+                card = self.read(cw.CardSpec(competition_line=line,
+                                             when=f"{when} 7:00 PM"))
+                self.assertEqual(card.date, "")
+                self.assertEqual(filed(card), "Tuesday")
+                said = [w for w in card.warnings if "date" in w or "days" in w]
+                self.assertEqual(said, [
+                    f"the range of days the card prints is no week from a {opens} "
+                    f"to a {closes} in the year its competition line prints, so "
+                    f"the match is undated and is filed by the Tuesday its "
+                    f"competition line names"])
+
+    def test_a_range_longer_than_a_week_is_undated_and_says_so(self):
+        # A Tuesday to the Tuesday after, and to the Sunday a fortnight on: each
+        # printed weekday is its day's, so "no week from a Tuesday to a Tuesday" was
+        # no reason (/tmp/mcf/scratch/FILE/fix/probe_lines.py). A Tuesday to the
+        # Monday after is a week, the longest range read.
+        for when in ("Tue 29/09 - Tue 06/10", "Tue 22/09 - Sun 04/10"):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(competition_line=TUESDAY_LINE,
+                                             when=f"{when} 7:00 PM"))
+                self.assertEqual(card.date, "")
+                self.assertEqual(filed(card), "Tuesday")
+                said = [w for w in card.warnings if "date" in w or "days" in w]
+                self.assertEqual(said, [
+                    "the range of days the card prints is longer than a week, so "
+                    "the match is undated and is filed by the Tuesday its "
+                    "competition line names"])
+        card = self.read(cw.CardSpec(competition_line=TUESDAY_LINE,
+                                     when="Tue 29/09 - Mon 05/10 7:00 PM"))
+        self.assertEqual((card.date, card.weekday), ("2026-09-29", "Tuesday"))
+
+    def test_a_range_this_reader_does_not_take_for_one_is_read_as_before(self):
+        # A year on one end only, years whose weekdays are not their days', and
+        # years closing before they open: the first date is read, as it was, and
+        # its printed weekday beside it. And a range opening or closing on no
+        # weekday is no date, as it was, with the weekday in front of the start
+        # time.
+        for night, when, date, printed in (
+                ("Thursday", "Tue 29/09/2026 - Sun 04/10", "2026-09-29", "Tuesday"),
+                ("Thursday", "Wed 29/09/2026 - Sun 04/10/2026", "2026-09-29",
+                 "Wednesday"),
+                ("Sunday", "Tue 29/12/2026 - Sun 03/01/2026", "2026-12-29",
+                 "Tuesday"),
+                ("Tuesday", "Week 29/09 - Sun 04/10", "", "Sunday"),
+                ("Tuesday", "Tue 29/09 - Week 04/10", "", "")):
+            with self.subTest(when=when):
+                card = self.read(cw.CardSpec(
+                    competition_line=f"Brindle {night} Night Fixtures 2026",
+                    when=f"{when} 7:00 PM"))
+                self.assertEqual((card.date, card.weekday), (date, printed))
+                said = [w for w in card.warnings if "date" in w or "days" in w]
+                self.assertEqual([w[:40] for w in said], [] if date else [
+                    "no date above the set table is printed i"])
+
+
 class TestADateLineWithinTheCourtsReachIsNotReadAsTheCourt(CardCase):
     """The court reader skipped the date's line only if one word of it was a date.
 
@@ -492,7 +792,7 @@ class TestADivisionNamedTwiceOnOneLineIsOneDivision(CardCase):
     merged-seasons bug, arrived at from the other direction.
 
     Only another of those four words extends the name. The rest of the line is not
-    part of it -- `Division C / Yellow Ball / Round 1 / #3665611` is one division, a
+    part of it -- `Division C / Yellow Ball / Round 1 / #1000100` is one division, a
     ball colour, a round and an id -- and reading to the end of the line would have
     swallowed all three on a card whose template separates them with spaces.
     """
@@ -515,10 +815,10 @@ class TestADivisionNamedTwiceOnOneLineIsOneDivision(CardCase):
 
     def test_the_rest_of_the_line_is_still_not_part_of_the_division(self):
         card = self.read(cw.CardSpec(division="C", ball="Yellow Ball",
-                                     round_label="1", match_id="3665611"))
+                                     round_label="1", match_id="1000100"))
         self.assertEqual(card.division, "C")
         self.assertEqual(card.round, "1")
-        self.assertEqual(card.match_id, "3665611")
+        self.assertEqual(card.match_id, "1000100")
 
     def test_the_fixture_prints_the_line_without_slashes_when_asked(self):
         # The claim the test below rests on. A fixture that quietly printed the
@@ -526,25 +826,25 @@ class TestADivisionNamedTwiceOnOneLineIsOneDivision(CardCase):
         # the slashes end a name on their own.
         page = pdf.extract(self.write(cw.CardSpec(
             division="3 Grade B", ball="Yellow Ball", round_label="1",
-            match_id="3665611", identity_separator=" ")))
+            match_id="1000100", identity_separator=" ")))
         printed = [" ".join(word.text for word in line)
                    for line in page.lines()]
         identity = [text for text in printed if "Division" in text]
         self.assertEqual(identity, ["Division 3 Grade B Yellow Ball Round 1 "
-                                    "#3665611"])
+                                    "#1000100"])
 
     def test_a_template_without_slashes_ends_the_division_at_the_right_word(self):
-        # `Division C Yellow Ball Round 1 #3665611`, all one run of words. The
+        # `Division C Yellow Ball Round 1 #1000100`, all one run of words. The
         # slashes are what a name read to the end of the line stops at, so with
         # them gone this is the only line that says where the division ends.
         for division in ("C", "3 Grade B"):
             with self.subTest(division=division):
                 card = self.read(cw.CardSpec(
                     division=division, ball="Yellow Ball", round_label="1",
-                    match_id="3665611", identity_separator=" "))
+                    match_id="1000100", identity_separator=" "))
                 self.assertEqual(card.division, division)
                 self.assertEqual(card.round, "1")
-                self.assertEqual(card.match_id, "3665611")
+                self.assertEqual(card.match_id, "1000100")
 
 
 class IdentityCase(CardCase):
@@ -571,11 +871,11 @@ class IdentityCase(CardCase):
 
 
 class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
-    """`Division: C / Yellow Ball / Round: 1 / #3665611` was refused, and it names both.
+    """`Division: C / Yellow Ball / Round: 1 / #1000100` was refused, and it names both.
 
     The division and the round were found by the word, then an optional dot, then a
     space. Measured, one card per line: `Division: C / Yellow Ball / Round: 1 /
-    #3665611`, `Division C / Yellow Ball / Rd 1 / #3665611`, `Division C / Rnd 1`
+    #1000100`, `Division C / Yellow Ball / Rd 1 / #1000100`, `Division C / Rnd 1`
     and `C Grade / Round 1` were all refused with "no line above the set table names
     both a division and a round" -- a sentence the line it is about disproves -- and
     the difference between the first of them and a card that reads is one colon, the
@@ -605,16 +905,16 @@ class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
     """
 
     def test_a_colon_after_the_word_reads_as_the_space_it_replaces(self):
-        for line in ("Division: C / Yellow Ball / Round: 1 / #3665611",
-                     "Division:C / Yellow Ball / Round:1 / #3665611",
-                     "Div: C / Yellow Ball / Round: 1 / #3665611"):
+        for line in ("Division: C / Yellow Ball / Round: 1 / #1000100",
+                     "Division:C / Yellow Ball / Round:1 / #1000100",
+                     "Div: C / Yellow Ball / Round: 1 / #1000100"):
             with self.subTest(line=line):
                 card = self.read_line(line)
                 self.assertEqual((card.division, card.round, card.match_id),
-                                 ("C", "1", "3665611"))
+                                 ("C", "1", "1000100"))
 
     def test_a_colon_with_a_space_before_it_is_not_an_empty_division(self):
-        card = self.read_line("Division : C / Yellow Ball / Round : 3 / #3665611")
+        card = self.read_line("Division : C / Yellow Ball / Round : 3 / #1000100")
         self.assertEqual((card.division, card.round), ("C", "3"))
         # The one line was quoted twice as two lines, because the same line had
         # been found once for each field and each find had come back empty.
@@ -622,23 +922,23 @@ class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
                          card.warnings)
 
     def test_rd_and_rnd_are_the_round_when_a_number_follows(self):
-        for line in ("Division C / Yellow Ball / Rd 1 / #3665611",
-                     "Division C / Yellow Ball / Rd. 1 / #3665611",
-                     "Division C / Yellow Ball / Rnd 1 / #3665611",
-                     "Division: C / Yellow Ball / Rd: 1 / #3665611"):
+        for line in ("Division C / Yellow Ball / Rd 1 / #1000100",
+                     "Division C / Yellow Ball / Rd. 1 / #1000100",
+                     "Division C / Yellow Ball / Rnd 1 / #1000100",
+                     "Division: C / Yellow Ball / Rd: 1 / #1000100"):
             with self.subTest(line=line):
                 card = self.read_line(line)
                 self.assertEqual((card.division, card.round), ("C", "1"))
 
     def test_the_grade_printed_after_its_letter_is_the_division(self):
-        for line, expected in (("C Grade / Yellow Ball / Round 1 / #3665611", "C"),
-                               ("A Grade Rd 2 / #3665611", "A"),
-                               ("3 Grade / Round 2 / #3665611", "3")):
+        for line, expected in (("C Grade / Yellow Ball / Round 1 / #1000100", "C"),
+                               ("A Grade Rd 2 / #1000100", "A"),
+                               ("3 Grade / Round 2 / #1000100", "3")):
             with self.subTest(line=line):
                 self.assertEqual(self.read_line(line).division, expected)
 
     def test_c_grade_round_1_is_division_c_and_not_division_round(self):
-        card = self.read_line("C Grade Round 1 / #3665611")
+        card = self.read_line("C Grade Round 1 / #1000100")
         self.assertEqual((card.division, card.round), ("C", "1"))
 
     def test_a_line_is_read_from_the_left(self):
@@ -646,9 +946,9 @@ class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
         # `Yellow`: `Grade Yellow`, read out of the middle. Trying `Grade C`
         # before `C Grade` still reads that, and trying `C Grade` first reads a
         # competition's name printed after the division as division `A`.
-        for line in ("C Grade Yellow Ball Round 1 / #3665611",
+        for line in ("C Grade Yellow Ball Round 1 / #1000100",
                      "Division C / Yellow Ball / Round 1 / Night Tennis A Grade / "
-                     "#3665611"):
+                     "#1000100"):
             with self.subTest(line=line):
                 card = self.read_line(line)
                 self.assertEqual((card.division, card.round), ("C", "1"))
@@ -657,25 +957,25 @@ class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
         # `3 Grade B` was division `B`. Read from the left and stopped at the
         # word, measured, `3 Grade A` and `3 Grade B` are both `3`: one ladder.
         for grade in ("A", "B"):
-            for line in (f"3 Grade {grade} / Round 1 / #3665611",
-                         f"3 Grade: {grade} / Round 1 / #3665611"):
+            for line in (f"3 Grade {grade} / Round 1 / #1000100",
+                         f"3 Grade: {grade} / Round 1 / #1000100"):
                 with self.subTest(line=line):
                     self.assertEqual(self.read_line(line).division,
                                      f"3 Grade {grade}")
 
     def test_a_final_is_a_round_however_its_label_is_separated(self):
         # Only the abbreviations need a number after them; a final is a word.
-        for line, final in (("Division C / Yellow Ball / Round SF / #3665611", "SF"),
-                            ("Division: C / Yellow Ball / Round: GF / #3665611",
+        for line, final in (("Division C / Yellow Ball / Round SF / #1000100", "SF"),
+                            ("Division: C / Yellow Ball / Round: GF / #1000100",
                              "GF")):
             with self.subTest(line=line):
                 self.assertEqual(self.read_line(line).round, final)
 
     def test_a_label_in_capitals_is_the_same_label(self):
         # Each refused before; `DIVISION C ROUND 1` was already read.
-        for line in ("DIVISION C / YELLOW BALL / RD 1 / #3665611",
-                     "DIVISION: C / YELLOW BALL / RND: 1 / #3665611",
-                     "C GRADE / YELLOW BALL / ROUND 1 / #3665611"):
+        for line in ("DIVISION C / YELLOW BALL / RD 1 / #1000100",
+                     "DIVISION: C / YELLOW BALL / RND: 1 / #1000100",
+                     "C GRADE / YELLOW BALL / ROUND 1 / #1000100"):
             with self.subTest(line=line):
                 card = self.read_line(line)
                 self.assertEqual((card.division, card.round), ("C", "1"))
@@ -685,10 +985,10 @@ class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
         # read as `3`, the ladder `Division 3 / Grade B` also read as. The first
         # version of this fix read the colon forms as `3` as well.
         for grade in ("A", "B"):
-            for line in (f"Division 3 / Grade: {grade} / Round: 1 / #3665611",
-                         f"Division 3 / Grade {grade} / Round 1 / #3665611",
-                         f"Division 3/Grade {grade}/Round 1/#3665611",
-                         f"Division 3, Grade {grade}, Round 1, #3665611"):
+            for line in (f"Division 3 / Grade: {grade} / Round: 1 / #1000100",
+                         f"Division 3 / Grade {grade} / Round 1 / #1000100",
+                         f"Division 3/Grade {grade}/Round 1/#1000100",
+                         f"Division 3, Grade {grade}, Round 1, #1000100"):
                 with self.subTest(line=line):
                     self.assertEqual(self.read_line(line).division,
                                      f"3 Grade {grade}")
@@ -697,10 +997,10 @@ class TestAColonOrAnAbbreviationInTheIdentityLineIsRead(IdentityCase):
         # Measured before: `Division 3 Grade: B` read as division `3`, the ladder
         # `Division 3 Grade: A` also reads as, and `Division 3 Grade. B` as
         # `3 Grade. B`, a name no `division = "3 Grade B"` in a config matches.
-        for line in ("Division 3 Grade B / Round 1 / #3665611",
-                     "Division 3 Grade: B / Round 1 / #3665611",
-                     "Division: 3 Grade: B / Round: 1 / #3665611",
-                     "Division 3 Grade. B / Round 1 / #3665611"):
+        for line in ("Division 3 Grade B / Round 1 / #1000100",
+                     "Division 3 Grade: B / Round 1 / #1000100",
+                     "Division: 3 Grade: B / Round: 1 / #1000100",
+                     "Division 3 Grade. B / Round 1 / #1000100"):
             with self.subTest(line=line):
                 self.assertEqual(self.read_line(line).division, "3 Grade B")
 
@@ -723,7 +1023,7 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
       competition's title, as division `al`, and gives it to a card that prints no
       division;
     - `Rd` followed by anything reads `Division C / Yellow Ball / Example Rd Courts /
-      #3665611`, a template printing the venue where the round would be, as round
+      #1000100`, a template printing the venue where the round would be, as round
       `Courts`, and that card prints no round;
     - any word before `Grade` reads a title's `Example District Pennant Grade, Rd 2
       onwards` as division `Pennant` and round `2` on a card that prints neither half; a
@@ -749,12 +1049,12 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
     `event`, round `1-14`, where the old reader read `event` and `1`. Reading the
     nearest line that prints both passes over an identity line printing one: a title
     `Example District Division 1, Round 2 onwards` over `Division C / Yellow Ball /
-    #3665611` and a season line `Round 1` gave division `1`, round `2` and no id, as the
+    #1000100` and a season line `Round 1` gave division `1`, round `2` and no id, as the
     old reader did, and the season line `Season 2026 Rd 1-14 a Grade event` over the
     same identity line gave division `event`, round `1-14`, to a card the old reader
     refused. A split identity was wrong the same way before, paired from the first line
     naming each half: a title `Example District Division 1 Pennant` over `Division C /
-    Yellow Ball / #3665611` gave division `1` and no id. `Round Robin` is a format and
+    Yellow Ball / #1000100` gave division `1` and no id. `Round Robin` is a format and
     not a round: read as one, a title `Example District Division 1 Round Robin 2026`
     over a split identity gave division `1`, round `Robin`, and a card that prints no
     round took the round `Robin`, which it still does with `Robin` read as a round.
@@ -767,16 +1067,16 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
     it would decide without a card what `Division 3 Pool A` is.
     """
 
-    SPLIT = "Division C / Yellow Ball / #3665611"
+    SPLIT = "Division C / Yellow Ball / #1000100"
     DIVISIONAL = "Divisional Rules Apply To Every Round 2026"
 
     def test_divisional_is_a_word_and_not_the_division_al(self):
         # A card whose only line naming a division would be the title's. Measured
         # with the separator optional: division `al`, round `1`.
-        self.refusal("Round 1 / #3665611", competition_line=self.DIVISIONAL)
+        self.refusal("Round 1 / #1000100", competition_line=self.DIVISIONAL)
 
     def test_a_street_named_on_the_identity_line_is_not_a_round(self):
-        self.refusal("Division C / Yellow Ball / Example Rd Courts / #3665611")
+        self.refusal("Division C / Yellow Ball / Example Rd Courts / #1000100")
 
     def test_a_street_beside_the_court_number_is_not_a_round(self):
         street = {"club_lines": ("EXAMPLE DISTRICT TENNIS", "14 Example Rd"),
@@ -789,7 +1089,7 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
         title = {"competition_line": "Example District Night Tennis B Grade"}
         card = self.read_line(self.SPLIT, season_line="Round 1", **title)
         self.assertEqual(card.division, "C")
-        self.refusal("Round 1 / #3665611", **title)
+        self.refusal("Round 1 / #1000100", **title)
 
     def test_a_word_before_grade_in_a_title_is_not_a_division(self):
         # On a card that prints neither half, so that the title is the nearest line
@@ -797,11 +1097,11 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
         for title in ("Example District Pennant Grade, Rd 2 onwards",
                       "EXAMPLE DISTRICT PENNANT GRADE, RD 2 ONWARDS"):
             with self.subTest(title=title):
-                self.refusal("Yellow Ball / #3665611", competition_line=title)
+                self.refusal("Yellow Ball / #1000100", competition_line=title)
 
     def test_a_division_named_r1_is_not_also_the_round(self):
-        for line, spec in (("Division R1 / Yellow Ball / Round 2 / #3665611", {}),
-                           ("Division R1 / Yellow Ball / #3665611",
+        for line, spec in (("Division R1 / Yellow Ball / Round 2 / #1000100", {}),
+                           ("Division R1 / Yellow Ball / #1000100",
                             {"season_line": "Round 2"})):
             with self.subTest(line=line, **spec):
                 card = self.read_line(line, **spec)
@@ -815,17 +1115,17 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
         pennant = "Example District A Grade Pennant, Rd 2 onwards"
         division_1 = "Example District Division 1 Pennant, Rd 2 onwards"
         for line, title in (
-                ("Division C / Yellow Ball / Round 1 / #3665611", pennant),
-                ("Division C / Yellow Ball / Round 1 / #3665611", division_1),
-                ("Division C / Yellow Ball / Rd 1 / #3665611", division_1),
-                ("C Grade / Yellow Ball / Rd 1 / #3665611", division_1),
+                ("Division C / Yellow Ball / Round 1 / #1000100", pennant),
+                ("Division C / Yellow Ball / Round 1 / #1000100", division_1),
+                ("Division C / Yellow Ball / Rd 1 / #1000100", division_1),
+                ("C Grade / Yellow Ball / Rd 1 / #1000100", division_1),
                 ("Division C / Yellow Ball / Round 1", pennant),
-                ("Division C / Yellow Ball / Round 1 / #3665611",
+                ("Division C / Yellow Ball / Round 1 / #1000100",
                  "Example District Night Tennis A Grade Round Robin 2026")):
             with self.subTest(line=line, title=title):
                 card = self.read_line(line, competition_line=title)
                 self.assertEqual((card.division, card.round, card.match_id),
-                                 ("C", "1", "3665611" if "#" in line else ""))
+                                 ("C", "1", "1000100" if "#" in line else ""))
 
     def test_a_small_a_before_grade_is_the_article(self):
         # Measured on the first version of this fix: division `a`, round `1-14`,
@@ -833,7 +1133,7 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
         for season in ("Season 2026 Rd 1-14, a Grade-only event",
                        "Season 2026 Round 1, a Grade-only event"):
             with self.subTest(season_line=season):
-                self.refusal("Yellow Ball / #3665611", season_line=season)
+                self.refusal("Yellow Ball / #1000100", season_line=season)
 
     def test_of_two_lines_printing_both_halves_the_one_nearer_the_table_is_read(self):
         # Measured before: division `event` and round `1`, refused, and division
@@ -860,12 +1160,12 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
                               "Example District Division 1 Pennant"}),
                 (self.SPLIT, {"season_line": "Round 1",
                               "competition_line": self.DIVISIONAL}),
-                ("Round 1 / #3665611", {"season_line": "Division C", "competition_line":
+                ("Round 1 / #1000100", {"season_line": "Division C", "competition_line":
                                         "Example District Round 2 Pennant"})):
             with self.subTest(line=line, **spec):
                 card = self.read_line(line, **spec)
                 self.assertEqual((card.division, card.round, card.match_id),
-                                 ("C", "1", "3665611"))
+                                 ("C", "1", "1000100"))
 
     def test_an_identity_line_printing_one_half_is_not_passed_over(self):
         # Measured with the nearest line printing both halves read before the
@@ -878,12 +1178,12 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
                 (self.SPLIT, {"season_line": "Round 1", "competition_line": both}),
                 (self.SPLIT, {"season_line": "Round 1", "competition_line":
                               "Example District A Grade Pennant, Rd 2 onwards"}),
-                ("Round 1 / #3665611", {"season_line": "Division C",
+                ("Round 1 / #1000100", {"season_line": "Division C",
                                         "competition_line": both})):
             with self.subTest(line=line, **spec):
                 card = self.read_line(line, **spec)
                 self.assertEqual((card.division, card.round, card.match_id),
-                                 ("C", "1", "3665611"))
+                                 ("C", "1", "1000100"))
         for line in (self.SPLIT, "Yellow Ball / Rd 4"):
             with self.subTest(line=line):
                 self.refusal(line, season_line="Season 2026 Rd 1-14 a Grade event")
@@ -895,15 +1195,15 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
         for line, spec in (
                 (self.SPLIT, {"season_line": "Round 1",
                               "home_name": "EXAMPLE DIV 2 ALPHAS"}),
-                ("Round 1 / #3665611", {"season_line": "Division C",
+                ("Round 1 / #1000100", {"season_line": "Division C",
                                         "home_name": "EXAMPLE ROUND 2 ALPHAS"}),
-                ("Division C / Yellow Ball / Round 1 / #3665611",
+                ("Division C / Yellow Ball / Round 1 / #1000100",
                  {"home_name": "EXAMPLE ROUND 2 ALPHAS",
                   "away_name": "DIVISION 1 BRAVOS"})):
             with self.subTest(line=line, **spec):
                 card = self.read_line(line, **spec)
                 self.assertEqual((card.division, card.round, card.match_id),
-                                 ("C", "1", "3665611"))
+                                 ("C", "1", "1000100"))
 
     def test_a_round_robin_is_a_format_and_not_a_round(self):
         # Measured before and on the first version of this fix: division `1`, round
@@ -913,7 +1213,7 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
                               competition_line="Example District Division 1 "
                                                "Round Robin 2026")
         self.assertEqual((card.division, card.round, card.match_id),
-                         ("C", "1", "3665611"))
+                         ("C", "1", "1000100"))
         self.refusal(self.SPLIT, competition_line="Example District Night Tennis "
                                                   "Round Robin 2026")
 
@@ -921,17 +1221,17 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
         # Measured with `Pool` a division word: division `AND` on the second card,
         # which prints none.
         club = {"club_lines": ("EXAMPLE POOL AND TENNIS", "CLUB INC")}
-        card = self.read_line("Round 1 / #3665611", season_line="Division C", **club)
+        card = self.read_line("Round 1 / #1000100", season_line="Division C", **club)
         self.assertEqual(card.division, "C")
-        self.refusal("Round 1 / #3665611", **club)
+        self.refusal("Round 1 / #1000100", **club)
 
     def test_a_split_identity_is_quoted_as_every_other_echo_is(self):
         # 4.168, the review's: the warning quoted each line by its first 40
         # characters and no word that it had stopped, so lines of 51 and 64 read
         # as lines of 40 (/tmp/t7/scratch/WID/p168-review.txt). Rejected: leaving
         # the cut at 40, a second rule for one echo. Up to sixty is quoted whole.
-        whole = "Division C / Yellow Ball / Tuesday Night / #3665611"
-        long = "Division C / Yellow Ball / Tuesday Night Pennant 2026 / #3665611"
+        whole = "Division C / Yellow Ball / Tuesday Night / #1000100"
+        long = "Division C / Yellow Ball / Tuesday Night Pennant 2026 / #1000100"
         for line, quoted in ((whole, repr(whole)),
                              (long, f"'Division C /...' ({len(long)} characters)")):
             with self.subTest(line=line):
@@ -939,7 +1239,7 @@ class TestNoOtherLineAboveTheTableIsReadAsTheIdentity(IdentityCase):
                 self.assertIn(f"the division and the round are printed on different "
                               f"lines ({quoted} and 'Round 1')", card.warnings)
         # And the round's line, which is quoted by the same rule.
-        rounds = "Round 1 / Yellow Ball / Tuesday Night Pennant 2026 / #3665611"
+        rounds = "Round 1 / Yellow Ball / Tuesday Night Pennant 2026 / #1000100"
         card = self.read_line(rounds, season_line="Division C")
         self.assertIn(f"the division and the round are printed on different lines "
                       f"('Division C' and 'Round 1 / Ye...' ({len(rounds)} "
@@ -971,39 +1271,39 @@ class TestAValueIsAWordAndNeverTheNextLabel(IdentityCase):
     """
 
     def test_punctuation_is_not_a_division_or_a_round(self):
-        for line in ("Division - C / Yellow Ball / Round - 1 / #3665611",
-                     "Division C / Yellow Ball / Round . 1 / #3665611"):
+        for line in ("Division - C / Yellow Ball / Round - 1 / #1000100",
+                     "Division C / Yellow Ball / Round . 1 / #1000100"):
             with self.subTest(line=line):
                 self.refusal(line)
 
     def test_a_label_left_blank_does_not_take_the_next_label_as_its_value(self):
-        self.refusal("Division: Round: 1 / #3665611")
+        self.refusal("Division: Round: 1 / #1000100")
 
     def test_a_designation_word_is_never_the_division_it_introduces(self):
         # `Division: Grade B` was division `B`, because the colon stopped the
         # first word matching; accepting the colon must not make it `Grade`.
-        for line in ("Division: Grade B / Round 1 / #3665611",
-                     "Division Grade B / Round 1 / #3665611"):
+        for line in ("Division: Grade B / Round 1 / #1000100",
+                     "Division Grade B / Round 1 / #1000100"):
             with self.subTest(line=line):
                 self.assertEqual(self.read_line(line).division, "B")
 
     def test_a_second_designation_does_not_take_the_round_word(self):
-        card = self.read_line("Division C Grade Rd 1 #3665611")
+        card = self.read_line("Division C Grade Rd 1 #1000100")
         self.assertEqual((card.division, card.round), ("C", "1"))
 
     def test_a_label_word_in_a_title_is_not_a_value(self):
         # Measured before: division `Round`, round `Robin`, both times.
         title = "Example District Pennant Grade Round Robin 2026"
-        card = self.read_line("Division C / Yellow Ball / Round 1 / #3665611",
+        card = self.read_line("Division C / Yellow Ball / Round 1 / #1000100",
                               competition_line=title)
         self.assertEqual((card.division, card.round), ("C", "1"))
-        self.refusal("Round 1 / #3665611", competition_line=title)
+        self.refusal("Round 1 / #1000100", competition_line=title)
 
     def test_a_word_that_begins_with_a_label_word_is_still_a_value(self):
         for division in ("Divas", "Roundabout"):
             with self.subTest(division=division):
                 card = self.read_line(
-                    f"Division {division} / Yellow Ball / Round 1 / #3665611")
+                    f"Division {division} / Yellow Ball / Round 1 / #1000100")
                 self.assertEqual(card.division, division)
 
 
@@ -1040,8 +1340,8 @@ class TestARefusedIdentityLineNamesTheWordingItReads(IdentityCase):
 
     DIVISIONS = ("Division C", "Div C", "Grade C", "Section C", "C Grade")
     ROUNDS = ("Round 1", "Rnd 1", "Rd 1")
-    REFUSED = ("Pool C / Yellow Ball / Round 1 / #3665611",
-               "Division C / Yellow Ball / R1 / #3665611")
+    REFUSED = ("Pool C / Yellow Ball / Round 1 / #1000100",
+               "Division C / Yellow Ball / R1 / #1000100")
     # A wording as the reason spells one: the word and `C` or `1`, or `C Grade`.
     WORDING = re.compile(r"\b(?:[A-Z][a-z]+ [C1]|C [A-Z][a-z]+)\b")
     # A letterhead printing a street, on a card with no venue, joins into the line
@@ -1063,9 +1363,9 @@ class TestARefusedIdentityLineNamesTheWordingItReads(IdentityCase):
         self.assertTrue(divisions and rounds, named)
         for division in divisions:
             for round_ in rounds:
-                for line in (f"{division} / {round_} / #3665611",
+                for line in (f"{division} / {round_} / #1000100",
                              f"{division.replace(' ', ': ', 1)} / "
-                             f"{round_.replace(' ', ': ')} / #3665611"):
+                             f"{round_.replace(' ', ': ')} / #1000100"):
                     if line.startswith("C: Grade"):
                         continue         # `C Grade` has no word before its value
                     with self.subTest(line=line):
@@ -1079,7 +1379,7 @@ class TestARefusedIdentityLineNamesTheWordingItReads(IdentityCase):
                 self.assertEqual(self.refusal(line).detail, f'closest line: "{line}"')
 
     def test_a_page_that_prints_none_of_the_words_is_told_so(self):
-        self.assertEqual(self.refusal("Yellow Ball / #3665611").detail,
+        self.assertEqual(self.refusal("Yellow Ball / #1000100").detail,
                          "no line above the table uses any of those words")
 
     def test_the_closest_line_is_not_a_street_or_a_title(self):
@@ -1139,9 +1439,9 @@ class TestACardThatPrintsNoRoundIsRefusedBeforeAMatchIsMadeOfIt(IdentityCase):
     # "?" and not a dash of another width: the card writer prints "—" as "?", so
     # the reader would never have been handed the dash.
     LABELS = ("", " ", "-", ".", "_", ":", "?")
-    LINES = ("Division C / Yellow Ball / Round / #3665611",
-             "Division C / Yellow Ball / Round: / #3665611",
-             "Division C / Yellow Ball / Round _ / #3665611")
+    LINES = ("Division C / Yellow Ball / Round / #1000100",
+             "Division C / Yellow Ball / Round: / #1000100",
+             "Division C / Yellow Ball / Round _ / #1000100")
 
     def test_a_round_label_with_no_letter_or_digit_is_refused(self):
         for label in self.LABELS:
@@ -1384,6 +1684,284 @@ class TestTheCardsOwnTotalsAskTheModelWhoAForfeitedRubberWentTo(CardCase):
         self.assertTrue(totals.agrees, totals.detail)
 
 
+def marked(built, *marks):
+    """*built* with ``(row, status, side)`` laid over it, the side the box is on."""
+    built = list(built)
+    for index, status, side in marks:
+        built[index] = dataclasses.replace(built[index], status=status,
+                                           status_side=side)
+    return tuple(built)
+
+
+# The real cards' shapes (4.421, 4.422), on fictional rows: three rubbers ticked
+# Forfeit against the away side, each of which it won on court; the away side
+# retiring at 1-5 down; and the home side retiring at 4-2 up.
+AWARDED_ROWS = marked(rows((2, 6), (6, 2), (1, 6), (3, 6)),
+                      (0, SetStatus.FORFEIT, "away"), (2, SetStatus.FORFEIT, "away"),
+                      (3, SetStatus.FORFEIT, "away"))
+RETIRED_BEHIND = marked(rows((6, 3), (6, 0), (6, 4), (5, 1)),
+                        (3, SetStatus.RETIRED, "away"))
+RETIRED_AHEAD = marked(rows((1, 6), (4, 2), (2, 6), (6, 4)),
+                       (1, SetStatus.RETIRED, "home"))
+
+
+class TestTheReaderReadsWhichSideRetiredOffTheBoxItTicks(CardCase):
+    """A row's ``Retired`` box is read with its side, as its ``Forfeit`` box is.
+
+    4.422: the reader marked a row ``RETIRED`` from either side's box and kept no
+    side, though ``ParsedSet`` kept the side of a ``Forfeit`` tick, so nothing
+    downstream could say who retired. Measured
+    (``/tmp/mcf/scratch/RUBBER/try/reader.py``, reader-before.txt): a card whose
+    away side retired from Doubles 2 at 1-5 down read ``retired`` and no more, and
+    its TOTAL row of 4-0 24-8, Match Centre's own, was told it disagrees, ``home
+    games 24 printed against 23 in the rows; home sets 4 printed, but the rows
+    allow at most 3``. Now ``home_retired`` and ``away_retired`` say which box is
+    ticked, in the voice of ``home_forfeit``, and the set is the other side's.
+
+    Rejected: reading the side off the games, the side behind being the one that
+    gave up, since on a real card the home side retired leading 4-2 and Match
+    Centre gave the away side the set.
+    """
+
+    def stopped(self, side, status=SetStatus.RETIRED):
+        card = self.read(cw.CardSpec(rows=marked(rows((6, 3), (6, 0), (6, 4), (5, 1)),
+                                                 (3, status, side))))
+        parsed = card.sets[3]
+        return parsed.status, parsed.home_retired, parsed.away_retired
+
+    def test_the_away_box_says_the_away_side_retired(self):
+        self.assertEqual(self.stopped("away"), (SetStatus.RETIRED, False, True))
+
+    def test_the_home_box_says_the_home_side_retired(self):
+        self.assertEqual(self.stopped("home"), (SetStatus.RETIRED, True, False))
+
+    def test_both_boxes_are_both_read(self):
+        self.assertEqual(self.stopped("both"), (SetStatus.RETIRED, True, True))
+
+    def test_a_row_neither_side_retired_from_says_neither(self):
+        self.assertEqual(self.stopped("both", SetStatus.INCOMPLETE),
+                         (SetStatus.INCOMPLETE, False, False))
+        self.assertEqual(self.stopped("away", SetStatus.FORFEIT),
+                         (SetStatus.FORFEIT, False, False))
+
+    def test_a_set_the_side_ahead_retired_from_is_the_other_sides_in_the_checks(self):
+        # Away 0-6 and home 6-4 on court, the away side retiring at 2-3 in Singles
+        # 2 and Doubles 2 left level at 4-4 at the end of the night: printed 16-13
+        # to away and one set each, the retired set gives home the night on sets.
+        built = marked(rows((6, 4), (0, 6), (3, 2), (4, 4)),
+                       (2, SetStatus.RETIRED, "away"))
+        card = self.read(cw.CardSpec(rows=built, totals=(2, 16, 16, 1),
+                                     verb="DEFEATS", winner="home"))
+        self.assertEqual([(c.name, c.agrees) for c in card.checks],
+                         [("totals", True), ("verb", True), ("winner-tick", True)],
+                         [c.detail for c in card.checks])
+
+
+class TestATotalRowIsReadAgainstTheRowsAsPrintedOrAsMatchCentreCountsThem(CardCase):
+    """A TOTAL row that totals a rubber not played out as Match Centre does agrees.
+
+    4.421 and 4.422. Match Centre's TOTAL row counts a rubber ticked Forfeit
+    against one side as a love set to the other, whatever games the row prints;
+    one a side retired from as the other side's set, its games raised to win it;
+    and every rubber of a match given up whole as a love set to the side that
+    came, rows with play included. The reader held the TOTAL row to the games
+    printed alone. Measured (``/tmp/mcf/scratch/RUBBER/try/reader.py``,
+    reader-before.txt and reader-after.txt): rows 2-6, 6-2, 1-6, 3-6, the away
+    box ticked on three, under a TOTAL of 4-0 24-2 gave ``home games 24 printed
+    against 12 in the rows; away games 2 printed against 20 in the rows``; the
+    retirement at 5-1 under 4-0 24-8, and the one at 4-2 up under 1-3 13-22,
+    disagreed too; and so did a Match Forfeited box over 6-2, 6-3, 2-6, 6-1 under
+    4-0 24-0. Each now agrees, naming the reckoning it totals and the set rules
+    it totals it under, since the reader knows no set rule and asks each length of
+    set ``SET_RULES`` holds, as it asks a box's award. A TOTAL of the rows as
+    printed still agrees, as printed; one that totals neither says so of both.
+
+    Rejected: holding the TOTAL row to the awarded rows alone, since a card may
+    print its rows' games in it, and C-1's validate holding it to the scored rows
+    alone, which the spec overrules for the reader and validate both: which of
+    the two a TOTAL row totals is a question of how the card was filled in, and
+    the result is scored from the rows either way.
+    """
+
+    def totals(self, built, totals, **fields):
+        card = self.read(cw.CardSpec(rows=built, totals=totals, **fields))
+        check, = [c for c in card.checks if c.name == "totals"]
+        return check
+
+    def test_a_total_counting_each_forfeited_rubber_a_love_set_agrees(self):
+        check = self.totals(AWARDED_ROWS, (4, 24, 2, 0), verb="DEFEATS", winner="home")
+        self.assertTrue(check.agrees, check.detail)
+        self.assertEqual(check.detail,
+                         "printed games 24-2 and sets 4-0 total the 4 set rows as "
+                         "Match Centre counts them under first-to-6, advantage-6 or "
+                         "six-game-tiebreak: a rubber ticked Forfeit against one side "
+                         "as a love set to the other")
+
+    def test_a_total_of_the_rows_as_printed_still_agrees_as_printed(self):
+        check = self.totals(AWARDED_ROWS, (4, 12, 20, 0), verb="DEFEATS",
+                            winner="home")
+        self.assertTrue(check.agrees, check.detail)
+        self.assertEqual(check.detail, "printed games 12-20 match the 4 set rows, and "
+                                       "sets 4-0 are within the 4-0 they allow")
+
+    def test_a_total_of_neither_disagrees_and_says_it_totals_neither(self):
+        check = self.totals(AWARDED_ROWS, (1, 12, 20, 3), verb="DEFEATS",
+                            winner="home")
+        self.assertFalse(check.agrees)
+        self.assertEqual(check.detail,
+                         "away sets 3 printed, but the rows allow at most 0; nor does "
+                         "it total the set rows as Match Centre counts them under any "
+                         "set rule, a rubber ticked Forfeit against one side as a "
+                         "love set to the other")
+
+    def test_a_love_set_of_four_games_is_named_under_the_rules_played_to_four(self):
+        built = marked(rows((2, 4), (4, 2), (1, 4), (3, 4)),
+                       (0, SetStatus.FORFEIT, "away"), (2, SetStatus.FORFEIT, "away"),
+                       (3, SetStatus.FORFEIT, "away"))
+        check = self.totals(built, (4, 16, 2, 0), verb="DEFEATS", winner="home",
+                            set_rule="fast4")
+        self.assertTrue(check.agrees, check.detail)
+        self.assertIn("under fast4 or short-sets-4: a rubber ticked", check.detail)
+
+    def test_a_retirement_given_to_the_side_behind_raised_to_win_agrees(self):
+        check = self.totals(RETIRED_BEHIND, (4, 24, 8, 0), verb="DEFEATS",
+                            winner="home")
+        self.assertTrue(check.agrees, check.detail)
+        self.assertTrue(check.detail.endswith(
+            "under first-to-6, advantage-6 or six-game-tiebreak: a rubber one side "
+            "retired from as the other's set, its games raised to win it"),
+            check.detail)
+
+    def test_a_retirement_by_the_side_ahead_is_the_set_of_the_side_behind(self):
+        check = self.totals(RETIRED_AHEAD, (1, 13, 22, 3), verb="DEF. BY",
+                            winner="away")
+        self.assertTrue(check.agrees, check.detail)
+
+    def test_a_box_forfeit_over_play_totalled_as_love_sets_agrees(self):
+        check = self.totals(rows((6, 2), (6, 3), (2, 6), (6, 1)), (4, 24, 0, 0),
+                            forfeited_by="away")
+        self.assertTrue(check.agrees, check.detail)
+        self.assertTrue(check.detail.endswith(
+            ": every rubber to home as a love set, for the away Match Forfeited box"),
+            check.detail)
+
+
+class TestAVerbAndTickAreReadOnTheGamesAsPrintedOrAsMatchCentreCountsThem(
+        CardCase):
+    """A verb or tick the games a rubber not played out is scored at bear out agrees.
+
+    4.421 and 4.422: the verb and tick checks read games as printed alone, though
+    the TOTAL row is now read either way and the build scores a forfeited or
+    retired rubber at the games Match Centre counts. So a night level on sets and
+    won on the games scored was reported as misread. Measured on a 40-season
+    demo build through ``build.py`` (/tmp/mcf/scratch/RUBBER/careers/probe.sh,
+    mine/report.txt): two cards, each with the away side retiring at 5-4 down in
+    Doubles 2, printed DEFEATS and the home tick over sets 2-2 and games 16-16
+    printed, 17-16 scored, and exit 1 on four errors, ``the set rows give games
+    16-16 (level) and at most 2-2 sets (level)``. Now the claim agrees if the rows
+    bear it out as printed, or as counted under any length of set ``SET_RULES``
+    holds, since the reader knows no set rule.
+
+    Rejected: reading the games as scored alone, since under ``as-played`` the
+    games printed decide, and a card for such a club is right to say so.
+    """
+
+    def checks(self, built, totals, verb, winner):
+        card = self.read(cw.CardSpec(rows=built, totals=totals, verb=verb,
+                                     winner=winner))
+        return {c.name: (c.agrees, c.detail) for c in card.checks}
+
+    def test_a_retirement_that_wins_the_night_on_games_scored_agrees(self):
+        # A rubber retired from by each side, so that no set rule gives either
+        # side the night and only the games scored give it to home, 20-17 where
+        # the rows print 16-16. With away's retirement alone, the sets each set
+        # rule credits (4.425) gave it to home 1-0 under pro-8, which finishes
+        # none of the played rows, and the verb and tick agreed whatever the
+        # games scored were.
+        built = marked(rows((6, 4), (4, 6), (2, 1), (4, 5)),
+                       (2, SetStatus.RETIRED, "away"), (3, SetStatus.RETIRED, "home"))
+        checks = self.checks(built, (2, 20, 17, 2), "DEFEATS", "home")
+        self.assertEqual(checks["verb"], (True, "'DEFEATS' agrees with the set rows"))
+        self.assertEqual(checks["winner-tick"][0], True, checks)
+
+    def test_a_forfeit_that_wins_the_night_on_games_scored_agrees(self):
+        # A rubber ticked against each side, so that no set rule gives either
+        # side the night and only the games scored give it to home. With the away
+        # tick alone, the sets each set rule credits (4.425) gave it to home 1-0
+        # under pro-8, which finishes none of the played rows, and the verb and
+        # tick agreed whatever the games scored were.
+        built = marked(rows((6, 0), (2, 6), (5, 6), (4, 6)),
+                       (1, SetStatus.FORFEIT, "home"), (2, SetStatus.FORFEIT, "away"))
+        checks = self.checks(built, (2, 16, 12, 2), "DEFEATS", "home")
+        self.assertEqual(checks["verb"][0], True, checks)
+        self.assertEqual(checks["winner-tick"][0], True, checks)
+
+    def test_the_same_night_won_on_the_games_printed_agrees_too(self):
+        built = marked(rows((6, 0), (2, 6), (5, 6), (4, 6)),
+                       (1, SetStatus.FORFEIT, "home"), (2, SetStatus.FORFEIT, "away"))
+        checks = self.checks(built, (2, 17, 18, 2), "LOSES TO", "away")
+        self.assertEqual(checks["verb"][0], True, checks)
+        self.assertEqual(checks["winner-tick"][0], True, checks)
+
+    def test_a_claim_neither_bears_out_still_disagrees_on_the_games_printed(self):
+        built = marked(rows((6, 4), (6, 2), (6, 3), (6, 1)),
+                       (1, SetStatus.FORFEIT, "away"))
+        checks = self.checks(built, (4, 24, 8, 0), "LOSES TO", "away")
+        self.assertEqual(checks["verb"],
+                         (False, "the card prints 'LOSES TO', making away the "
+                                 "winner, but the set rows give games 24-10 (home) "
+                                 "and at most 4-0 sets (home)"))
+
+
+class TestTheWriterTotalsARubberNotPlayedOutAsMatchCentreDoes(CardCase):
+    """A fixture's derived TOTAL row, verb and tick are Match Centre's arithmetic.
+
+    4.421 and 4.422: ``cardwriter._tallies`` summed the games printed and gave a
+    retired set to nobody, so every fixture card with a rubber ticked Forfeit or
+    Retired printed a TOTAL row, verb and tick Match Centre does not. Measured
+    (``/tmp/mcf/scratch/RUBBER/try/reader.py``, reader-before.txt): rows 2-6, 6-2,
+    1-6, 3-6, three ticked against away, were written 4-0 12-20, ``LOSES TO`` and
+    the away tick, and the retirement at 5-1 down 3-0 23-8. Now each row is
+    totalled by ``model.rubber_award`` under the spec's set rule.
+
+    Decided: a Match Forfeited box is not laid over the rows. A fixture's TOTAL
+    row totals the rows it prints, as validate and the reader accept of a box as
+    they accept its award; laid over, every box forfeit fixture of the suite
+    would print a TOTAL its rows do not, for no card a club has shown.
+    """
+
+    def written(self, built, **fields):
+        card = self.read(cw.CardSpec(rows=built, **fields))
+        t = card.totals
+        return ((t.home_sets, t.home_games, t.away_games, t.away_sets), card.verb,
+                card.winner_tick)
+
+    def test_each_forfeited_rubber_is_totalled_a_love_set_under_the_specs_rule(self):
+        self.assertEqual(self.written(AWARDED_ROWS),
+                         ((4, 24, 2, 0), "DEFEATS", "home"))
+        fast4 = marked(rows((2, 4), (4, 2), (1, 4), (3, 4)),
+                       (0, SetStatus.FORFEIT, "away"), (2, SetStatus.FORFEIT, "away"),
+                       (3, SetStatus.FORFEIT, "away"))
+        self.assertEqual(self.written(fast4, set_rule="fast4")[0], (4, 16, 2, 0))
+
+    def test_a_retired_rubber_is_the_other_sides_raised_to_win(self):
+        self.assertEqual(self.written(RETIRED_BEHIND)[0], (4, 24, 8, 0))
+        self.assertEqual(self.written(RETIRED_AHEAD),
+                         ((1, 13, 22, 3), "LOSES TO", "away"))
+
+    def test_a_row_both_sides_ticked_is_totalled_as_printed(self):
+        self.assertEqual(self.written(marked(RETIRED_BEHIND,
+                                             (3, SetStatus.RETIRED, "both")))[0],
+                         (3, 23, 8, 0))
+        self.assertEqual(self.written(marked(AWARDED_ROWS,
+                                             (0, SetStatus.FORFEIT, "both")))[0],
+                         (3, 20, 8, 1))
+
+    def test_a_box_forfeit_is_totalled_as_its_rows_print(self):
+        self.assertEqual(self.written(rows((6, 2), (6, 3), (2, 6), (6, 1)),
+                                      forfeited_by="away")[0], (3, 20, 12, 1))
+
+
 # What a font drawing a superscript three hands a reader: the ToUnicode map reads the
 # code for ``~`` as ``³``, since the writer prints ASCII alone.
 SUPERSCRIPT_CMAP = (b"<20> <7E> <0020>\nendbfrange\n",
@@ -1590,7 +2168,10 @@ class TestARetiredOrIncompleteSetIsNobodysInTheCardsOwnChecks(CardCase):
     games 19-19 (level) and at most 2-2 sets (level)``. The claims now ask
     ``model.stopped_short``, the one rule the model, validate and the writer ask, so
     such a card agrees with itself, and a TOTAL crediting the stopped set to its
-    leader is told it disagrees with the rows.
+    leader is told it disagrees with the rows. Since 4.422 one side's Retired box
+    gives the set to the other side in all four alike, by
+    ``model.retired_set_winner``, so a retired set is nobody's only where both
+    boxes are ticked.
 
     Rejected: crediting the leader of an unfinished set, which records a lead as a
     win, and is a second answer to who won a set beside the model's.
@@ -1601,7 +2182,10 @@ class TestARetiredOrIncompleteSetIsNobodysInTheCardsOwnChecks(CardCase):
         stopped = dataclasses.replace(played[3], status=status, status_side=side)
         return cw.CardSpec(rows=played[:3] + (stopped,), **changed)
 
-    STOPPED = ((SetStatus.RETIRED, "away"), (SetStatus.INCOMPLETE, "both"))
+    # 4.422 moved this: the away side's Retired box alone now gives home the set,
+    # raised to win it, so the retired set nobody's is the one whose two boxes
+    # are both ticked, and who retired cannot be read.
+    STOPPED = ((SetStatus.RETIRED, "both"), (SetStatus.INCOMPLETE, "both"))
 
     def test_a_card_won_on_its_finished_sets_agrees_with_itself(self):
         for status, side in self.STOPPED:
@@ -1648,8 +2232,9 @@ class TestARetiredOrIncompleteSetIsNobodysInTheCardsOwnChecks(CardCase):
                                          status=SetStatus.RETIRED, rule=rule)
             parsed = ParsedSet(index=0, doubles=True, marker="1&2", home_games=6,
                                away_games=4, status=SetStatus.RETIRED)
+            # 4.422 moved this: both boxes, as STOPPED above.
             row = cw.SetRow(home_games=6, away_games=4, status=SetStatus.RETIRED,
-                            status_side="away")
+                            status_side="both")
             return (result.winner, validate_mod._set_winner_of(parsed, rule),
                     scorecard._row_claims([parsed]), cw._row_set_winner(row, rule))
 
@@ -1664,6 +2249,363 @@ class TestARetiredOrIncompleteSetIsNobodysInTheCardsOwnChecks(CardCase):
                 mock.patch.object(cw, "stopped_short", lambda status: False,
                                   create=True):
             self.assertEqual(asked(), ("home", "home", (1, 0), "home"))
+
+    def test_one_retired_box_gives_every_reading_the_set_of_the_side_that_stayed(self):
+        # 4.422: one side's Retired box gives each of the four the other side's
+        # set, complete, whoever led it: the home side retiring 5-1 up gives the
+        # away side the set, and the away side retiring 5-1 down gives the home side.
+        from matchcentre import format as fmt
+        from matchcentre import model as model_mod
+        from matchcentre import validate as validate_mod
+        from matchcentre.card import ParsedSet
+        rule = fmt.set_rule("first-to-6")
+        slot = fmt.match_format("doubles-singles-doubles").slots[0]
+        for retired, stayed, claims in (("home", "away", (0, 1)),
+                                        ("away", "home", (1, 0))):
+            with self.subTest(retired=retired):
+                sides = {"home_retired": retired == "home",
+                         "away_retired": retired == "away"}
+                result = model_mod.SetResult(slot=slot, home_games=5, away_games=1,
+                                             status=SetStatus.RETIRED, rule=rule,
+                                             **sides)
+                parsed = ParsedSet(index=0, doubles=True, marker="1&2", home_games=5,
+                                   away_games=1, status=SetStatus.RETIRED, **sides)
+                row = cw.SetRow(home_games=5, away_games=1, status=SetStatus.RETIRED,
+                                status_side=retired)
+                self.assertEqual(
+                    (result.completed, result.winner,
+                     validate_mod._set_finished(parsed, rule),
+                     validate_mod._set_winner_of(parsed, rule),
+                     scorecard._row_claims([parsed]), cw._row_set_winner(row, rule)),
+                    (True, stayed, True, stayed, claims, stayed))
+
+
+class TestACardLevelOnGamesAndWonOnItsFinishedSetsAgreesWithItself(CardCase):
+    """A verb and tick for the side with more finished sets agree, the games level.
+
+    Row 4.425. ``_row_claims`` is the most sets each side can have won: it credits
+    the leader of every unequal row whose box says nothing, since whether ``4-2``
+    finished a set is the club's set rule, which the reader cannot see. The verb
+    and tick were held to that ceiling as though it were a count, so a last rubber
+    the clock stopped with no box ticked was its leader's, and a correct card won
+    on its finished sets was misread twice. Measured with cardwriter cards on the
+    tree before this (/tmp/mcf/scratch/F6/probe/fictional.py, before/cards): rows
+    4-6, 2-6, 6-2 and 4-2, every field the writer's own, print ``LOSES TO``, the
+    away tick and a TOTAL of 1, 16, 16, 2, and the verb and the tick each said
+    ``the set rows give games 16-16 (level) and at most 2-2 sets (level)``; so did
+    the mirror, and 4.217's rows with no box, at 19-19. One club's real season
+    holds two such cards, each failed with two F6 errors. Under the set rules the
+    first rows give 1-2 (first-to-6, advantage-6, six-game-tiebreak), 2-2
+    (short-sets-4) or 0-0 (the pro sets), and fast4 cannot have printed them.
+
+    So a claim for a side is also asked of each set rule every row is a score
+    under, the rows credited as the model credits them: a finished set to its
+    winner, a forfeited rubber by its box, a rubber stopped short to nobody. The
+    ceiling still answers first, and still words a disagreement. The guards are
+    the misreads the ceiling was for, which still disagree: the same rows with the
+    other side's verb and tick, the columns swapped, and rows only a rule they
+    break would give the claim (the fast4 trap).
+
+    Rejected: dropping the ceiling from side claims, holding them to the games or
+    some rule alone, which is more churn and leaves the detail saying 'at most' of
+    a bound nothing asks. Rejected: standing F6 down in
+    validate where the club's rule agrees, which makes two places answer one
+    question and leaves the reader's own record false, in the doctor's table and in
+    describe. Rejected: holding the verb to the printed TOTAL row, which may be
+    blank or unread (4.250, 4.252).
+    """
+
+    CLUBS = rows((4, 6), (2, 6), (6, 2), (4, 2))
+    LEVEL = "the set rows give games 16-16 (level) and at most 2-2 sets (level)"
+
+    @staticmethod
+    def printed(card) -> tuple:
+        totals = card.totals
+        return (card.verb, card.winner_tick, (totals.home_sets, totals.home_games,
+                                              totals.away_games, totals.away_sets))
+
+    @staticmethod
+    def said(card) -> dict[str, tuple[bool, str]]:
+        return {check.name: (check.agrees, check.detail) for check in card.checks}
+
+    def test_a_card_won_on_its_finished_sets_with_its_last_rubber_unfinished_agrees(
+            self):
+        for label, played, printed in (
+                ("the club's shape", self.CLUBS, ("LOSES TO", "away", (1, 16, 16, 2))),
+                ("its mirror", rows((6, 4), (6, 2), (2, 6), (2, 4)),
+                 ("DEFEATS", "home", (2, 16, 16, 1))),
+                ("4.217's rows with no box", rows((5, 6), (6, 3), (3, 6), (5, 4)),
+                 ("LOSES TO", "away", (1, 19, 19, 2)))):
+            with self.subTest(card=label):
+                card = self.read(cw.CardSpec(rows=played))
+                # The premise: the writer's own verb, tick and TOTAL row, decided
+                # on games and then sets, as the club's cards are.
+                self.assertEqual(self.printed(card), printed)
+                said = self.said(card)
+                self.assertEqual(said["verb"],
+                                 (True, f"{card.verb!r} agrees with the set rows"))
+                self.assertEqual(said["winner-tick"], (
+                    True, f"the {card.winner_tick} Match Winner tick agrees with "
+                          "the set rows"))
+                self.assertTrue(said["totals"][0], said["totals"])
+
+    def test_the_same_rows_with_the_other_sides_verb_and_tick_still_disagree(self):
+        card = self.read(cw.CardSpec(rows=self.CLUBS, verb="DEFEATS", winner="home"))
+        said = self.said(card)
+        self.assertEqual(said["verb"], (False, "the card prints 'DEFEATS', making "
+                                               f"home the winner, but {self.LEVEL}"))
+        self.assertEqual(said["winner-tick"], (False, "the card ticks home as Match "
+                                                      f"Winner, but {self.LEVEL}"))
+
+    def test_a_read_with_the_games_columns_swapped_still_disagrees(self):
+        # A home win of 6-2, 6-3, 6-1 and 4-6 read the wrong way round.
+        card = self.read(cw.CardSpec(rows=rows((2, 6), (3, 6), (1, 6), (6, 4)),
+                                     verb="DEFEATS", winner="home"))
+        for name in ("verb", "winner-tick"):
+            with self.subTest(check=name):
+                agrees, detail = self.said(card)[name]
+                self.assertFalse(agrees)
+                self.assertIn("the set rows give games 12-22 (away) and at most 1-3 "
+                              "sets (away)", detail)
+
+    def test_rows_only_a_rule_they_break_would_give_the_claim_still_disagree(self):
+        # Under fast4 alone 2-4 is a finished set and nothing else is, which gives
+        # away the match; but 6-2 and 6-3 are no scores fast4 allows, so it is not
+        # asked, and no rule that could have printed these rows gives away more.
+        card = self.read(cw.CardSpec(rows=rows((6, 2), (6, 3), (2, 4), (0, 0)),
+                                     verb="LOSES TO", winner="away"))
+        for name in ("verb", "winner-tick"):
+            with self.subTest(check=name):
+                agrees, detail = self.said(card)[name]
+                self.assertFalse(agrees)
+                self.assertIn("the set rows give games 14-9 (home) and at most 2-1 "
+                              "sets (home)", detail)
+
+    def test_a_stopped_row_a_rule_cannot_have_printed_rules_it_out_too(self):
+        # Fast4 alone finishes the two 3-4s, away's, and the retired 5-1 is home's
+        # under every rule (4.422), 2-1 to away there; but no fast4 set reaches the
+        # 5 of the 5-1, so fast4 is not asked. Asked of the played rows alone, away
+        # agreed.
+        played = rows((3, 4), (3, 4), (3, 2), (3, 2), (5, 1))
+        retired = dataclasses.replace(played[4], status=SetStatus.RETIRED,
+                                      status_side="away")
+        card = self.read(cw.CardSpec(rows=played[:4] + (retired,),
+                                     verb="LOSES TO", winner="away"))
+        self.assertEqual(card.sets[4].status, SetStatus.RETIRED)
+        for name in ("verb", "winner-tick"):
+            with self.subTest(check=name):
+                agrees, detail = self.said(card)[name]
+                self.assertFalse(agrees)
+                self.assertIn("the set rows give games 17-13 (home) and at most 3-2 "
+                              "sets (home)", detail)
+
+    def test_a_side_the_ceiling_backs_still_agrees_whatever_the_rules_give(self):
+        # The ceiling still answers first, since a disagreement's detail names it.
+        # Asked of the games and the set rules alone, DEFEATS over these rows
+        # would be faulted with 'at most 3-2 sets (home)', a reading that backs
+        # it: the games are away's, and every rule the rows could have been
+        # printed under gives away the two 0-6 sets or nothing. As on the tree
+        # before this (/tmp/mcf/scratch/F6/probe/ceiling_first.py).
+        card = self.read(cw.CardSpec(rows=rows((5, 4), (5, 4), (0, 6), (0, 6), (5, 4)),
+                                     verb="DEFEATS", winner="home"))
+        said = self.said(card)
+        self.assertEqual(said["verb"], (True, "'DEFEATS' agrees with the set rows"))
+        self.assertEqual(said["winner-tick"], (
+            True, "the home Match Winner tick agrees with the set rows"))
+
+    def test_a_rubber_one_side_retired_from_is_the_others_under_every_rule(self):
+        # 4-1 finishes no set under first-to-6, and the box says away retired, so
+        # it is home's under every rule (4.422), and home's second set there, 2-1
+        # and the claim's. Under 4.425 alone it was nobody's, the sets level under
+        # first-to-6, and the claim disagreed with games 10-16 (away) and at most
+        # 1-2 sets (away). The games stay away's however Match Centre raises the
+        # 4-1 (4.421), 16-16 at the most at 10-1, so only a rule's sets back the
+        # claim: with 2-3 for the 0-5, 8-1 gave home the games, 16-14, and no rule
+        # was asked.
+        played = rows((6, 4), (0, 6), (4, 1), (0, 5))
+        retired = dataclasses.replace(played[2], status=SetStatus.RETIRED,
+                                      status_side="away")
+        card = self.read(cw.CardSpec(rows=played[:2] + (retired,) + played[3:],
+                                     verb="DEFEATS", winner="home"))
+        self.assertEqual(card.sets[2].status, SetStatus.RETIRED)
+        self.assertEqual(card.sets[2].away_retired, True)
+        for name in ("verb", "winner-tick"):
+            with self.subTest(check=name):
+                agrees, detail = self.said(card)[name]
+                self.assertTrue(agrees, detail)
+
+    def test_a_rubber_stopped_short_and_given_to_no_side_is_nobodys_under_every_rule(
+            self):
+        # 4-1 finishes a set under short-sets-4: credited to its leader, it would
+        # be home's second set there, 2-1 and the claim's. This was 4.425's retired
+        # rubber, until 4.422 gave a rubber one side retired from to the other (the
+        # test above); a rubber stopped short is still nobody's where no one side's
+        # box gives it away, retired from with both boxes ticked or left
+        # incomplete, as 4.217's are, and Match Centre awards it to nobody either.
+        played = rows((6, 4), (0, 6), (4, 1), (2, 3))
+        for status in (SetStatus.RETIRED, SetStatus.INCOMPLETE):
+            stopped = dataclasses.replace(played[2], status=status, status_side="both")
+            card = self.read(cw.CardSpec(rows=played[:2] + (stopped,) + played[3:],
+                                         verb="DEFEATS", winner="home"))
+            self.assertEqual(card.sets[2].status, status)
+            for name in ("verb", "winner-tick"):
+                with self.subTest(status=status.value, check=name):
+                    agrees, detail = self.said(card)[name]
+                    self.assertFalse(agrees)
+                    self.assertIn("the set rows give games 12-14 (away) and at most "
+                                  "1-2 sets (away)", detail)
+
+    def test_a_rubber_forfeited_is_the_side_that_stayed_under_every_rule(self):
+        # The away Forfeit box gives home the 0-0 rubber, its second set under
+        # first-to-6, where the ceiling also credits away the unfinished 0-5. The
+        # games stay away's however Match Centre scores the forfeit (4.421), 16-16
+        # at the most as a love set of 10-0, so only a rule's sets back the claim:
+        # beside 6-2, 2-6 and 3-4 a love set of 4-0 gave home the games, 15-12,
+        # and no rule was asked.
+        played = rows((6, 5), (0, 6), (0, 0), (0, 5))
+        forfeited = dataclasses.replace(played[2], status=SetStatus.FORFEIT,
+                                        status_side="away")
+        card = self.read(cw.CardSpec(rows=played[:2] + (forfeited,) + played[3:],
+                                     verb="DEFEATS", winner="home"))
+        self.assertEqual((card.sets[2].status, card.sets[2].away_forfeit),
+                         (SetStatus.FORFEIT, True))
+        said = self.said(card)
+        self.assertEqual(said["verb"], (True, "'DEFEATS' agrees with the set rows"))
+        self.assertEqual(said["winner-tick"], (
+            True, "the home Match Winner tick agrees with the set rows"))
+
+
+class TestNoSetRuleBacksAClaimForTheSideThatForfeitedTheMatch(CardCase):
+    """A set rule's finished sets never back the side the Match Forfeited box names.
+
+    Row 4.425, on a whole-match forfeit. Asking each set rule, as this row does,
+    let a rule's finished sets back a tick for the side the box says forfeited,
+    and the tick check asked the rows before the box. Measured on the row's first
+    draft against the tree before it (/tmp/mcf/scratch/F6/fixup/nights2-start.txt):
+    rows 6-4, 3-5, 2-2 and 0-0 under the home box with the home tick, beside
+    ``LOSES TO`` or no verb, were F6 on the tick held to the box before, and
+    nothing in the draft, first-to-6 giving home the 6-4 alone; rows 6-4, 4-5,
+    4-5 and 0-2 the same were F6 with 'the set rows give games 14-16 (away) and
+    at most 1-3 sets (away)', and nothing. A home tick restating the away box over
+    the first rows was recorded as agreeing with the set rows, beside a verb held
+    to the box. The model gives a whole-match forfeit to the side that came,
+    whatever any set rule makes of its rows, so no rule's tally backs the side
+    that forfeited; the games and the ceiling still answer as before, and the tick
+    asks the box first, as the verb does.
+
+    Rejected: excluding the forfeiter for the tick alone, which leaves the verb
+    check saying ``DEFEATS`` for the home side that forfeited agrees with rows
+    the model gives away, in the doctor and in describe. Rejected: asking no set
+    rule on any whole-match forfeit, which leaves a tick for the side that came,
+    over rows given up part way that first-to-6 gives it, F6 as before (4.399).
+    """
+
+    BLANK = rows((6, 4), (3, 5), (2, 2), (0, 0))
+    PART_WAY = rows((6, 4), (4, 5), (4, 5), (0, 2))
+    AWAY_ON_ROWS = "the set rows give games 14-16 (away) and at most 1-3 sets (away)"
+
+    @staticmethod
+    def check(card, name: str):
+        check, = [check for check in card.checks if check.name == name]
+        return check.agrees, check.reported_by, check.held_to, check.detail
+
+    def test_a_tick_for_it_over_rows_giving_no_result_is_held_to_the_box(self):
+        for verb in ("LOSES TO", ""):
+            with self.subTest(verb=verb):
+                card = self.read(cw.CardSpec(rows=self.BLANK, forfeited_by="home",
+                                             verb=verb, winner="home"))
+                self.assertEqual(self.check(card, "winner-tick"), (
+                    False, "", "the home Match Forfeited box",
+                    "the card ticks home as Match Winner, but the home Match "
+                    "Forfeited box is ticked, giving the match to away, and the "
+                    "set rows give no result"))
+
+    def test_a_tick_for_it_over_rows_given_up_part_way_is_held_to_the_rows(self):
+        for verb in ("LOSES TO", ""):
+            with self.subTest(verb=verb):
+                card = self.read(cw.CardSpec(rows=self.PART_WAY,
+                                             forfeited_by="home", verb=verb,
+                                             winner="home"))
+                self.assertEqual(self.check(card, "winner-tick"), (
+                    False, "", "the set rows", "the card ticks home as Match "
+                                               f"Winner, but {self.AWAY_ON_ROWS}"))
+
+    def test_a_verb_for_it_over_rows_given_up_part_way_is_held_to_the_rows(self):
+        # validate's verb-mismatch reports this verb whatever the check says, so
+        # the build is the same either way; the record is what the doctor shows.
+        card = self.read(cw.CardSpec(rows=self.PART_WAY, forfeited_by="home",
+                                     verb="DEFEATS", winner="away"))
+        self.assertEqual(self.check(card, "verb"), (
+            False, "", "the set rows", "the card prints 'DEFEATS', making home the "
+                                       f"winner, but {self.AWAY_ON_ROWS}"))
+
+    def test_a_tick_restating_the_box_over_rows_giving_no_result_says_so(self):
+        card = self.read(cw.CardSpec(rows=self.BLANK, forfeited_by="away",
+                                     verb="DEFEATS", winner="home"))
+        for name in ("verb", "winner-tick"):
+            with self.subTest(check=name):
+                agrees, by, held_to, detail = self.check(card, name)
+                self.assertEqual((agrees, by, held_to),
+                                 (True, "", "the away Match Forfeited box"))
+                self.assertIn("restates", detail)
+
+    def test_the_side_that_came_is_still_backed_by_a_rules_finished_sets(self):
+        # 4.399's tick alone, F6 before this row: first-to-6 gives home the 6-4
+        # and finishes nothing else, and home is the side the box says came.
+        for verb in ("", "DEFEATS"):
+            with self.subTest(verb=verb):
+                card = self.read(cw.CardSpec(rows=self.PART_WAY,
+                                             forfeited_by="away", verb=verb,
+                                             winner="home"))
+                self.assertEqual(self.check(card, "winner-tick"), (
+                    True, "", "the set rows",
+                    "the home Match Winner tick agrees with the set rows"))
+
+
+class TestTheTotalsCheckSaysThePrintedSetsAreWithinWhatTheRowsAllow(CardCase):
+    """The TOTAL row's sets are said to be within the rows' ceiling, not to match.
+
+    Row 4.437. ``_totals_check`` holds the printed games to the rows' sums, and the
+    printed sets only to ``_row_claims``' ceiling, the most each side can have won
+    whatever the club's set rule, which the reader cannot see; and its agreeing
+    detail said both 'match'. Measured with cardwriter cards and tools/doctor.py
+    on the tree before this (/tmp/mcf/scratch/F6/probe/fictional.py and
+    nights.py): rows 6-1 four times with ``DEFEATS``, the home tick and TOTAL sets
+    2-0, games 24-4 read ``printed games 24-4 and sets 2-0 match the 4 set rows``,
+    where every set rule that finishes a row gives 4-0, and build.py --check exits
+    1 on ``totals-mismatch``. The detail now says what was checked.
+
+    Rejected: holding the printed sets to some set rule's tally here, which would
+    restate in weaker words what ``totals-mismatch`` reports once under the club's
+    own rule, F6 standing down there, and would need the forfeit award reworked
+    too; the ceiling is right for the misread it guards against, and only its
+    words were wrong.
+    """
+
+    def totals(self, played, **fields):
+        card = self.read(cw.CardSpec(rows=rows(*played), **fields))
+        check, = [check for check in card.checks if check.name == "totals"]
+        return check.agrees, check.detail
+
+    def test_sets_short_of_every_rules_tally_are_said_to_be_within_the_ceiling(self):
+        self.assertEqual(
+            self.totals(((6, 1),) * 4, verb="DEFEATS", winner="home",
+                        totals=(2, 24, 4, 0)),
+            (True, "printed games 24-4 match the 4 set rows, and sets 2-0 are within "
+                   "the 4-0 they allow"))
+
+    def test_sets_at_the_ceiling_are_said_in_the_same_words(self):
+        self.assertEqual(
+            self.totals(((6, 1),) * 4),
+            (True, "printed games 24-4 match the 4 set rows, and sets 4-0 are within "
+                   "the 4-0 they allow"))
+
+    def test_an_unfinished_rubbers_leader_is_in_the_ceiling_it_names(self):
+        # The club's shape, its unfinished 4-2 in home's ceiling and nobody's set.
+        self.assertEqual(
+            self.totals(((4, 6), (2, 6), (6, 2), (4, 2))),
+            (True, "printed games 16-16 match the 4 set rows, and sets 1-2 are within "
+                   "the 2-2 they allow"))
 
 
 PLACEHOLDER = "Unspecified player"
@@ -1764,6 +2706,136 @@ class TestTheSitesPlaceholderForNobodyIsNotAPlayer(CardCase):
         described = scorecard.describe(pdf.extract(path))
         self.assertIn("placeholder", described)
         self.assertIn("no player", described)
+
+
+class TestAPlaceholderBesideANameIsAPlaceNobodyFilledAndNotANameUnread(CardCase):
+    """A doubles cell printing one name above ``Unspecified player`` is a full side.
+
+    Match Centre prints its placeholder in a place nobody filled, so a pair's cell
+    reading ``Delta Dunmore`` above it says the second place was never entered. The
+    reader kept each side's placeholder count and judged the row by the kept names
+    alone, so its note, "row 1: read 1 away player name(s) from a row its own
+    marker '1&2' says is doubles", blamed the reading for a gap the card printed,
+    word for word what a doubles row with its second cell left blank gets. Measured
+    on the tree before this (/tmp/mcf/scratch/UNSPEC/probe/probe.py, cases
+    played-away-placeholder and played-away-blank, each beside the season through
+    build.py): both cards carry the same two notes, on rows 1 and 4, and the same
+    season.json but for the one ``players-unrecorded`` finding, and
+    ``tools/doctor.py`` prints each note twice, 4 lines a card. Now each side is
+    judged by its names and its own placeholder cells together
+    (:func:`~matchcentre.model.names_miscounted`), so the note keeps to what it is
+    for, a row's cells disagreeing with its marker, and the placeholder is reported
+    once a card, by ``players-unrecorded``. Rejected: rewording the note to name
+    the placeholder, which repeats ``players-unrecorded`` on every such row; and
+    holding names and placeholders together to the places exactly, which tells a
+    singles cell of one name beside the placeholder that it read 1 player name from
+    a singles row.
+    """
+
+    SCORES = ((6, 1), (6, 2), (6, 3), (6, 4))
+    # The second cell of each pair and the s2 cell, numbered across the side's
+    # cells as rows() fills them: d1 1 2, s1 3, s2 4, d2 5 6.
+    SHAPE = {2, 4, 6}
+
+    def shaped(self, side, cells, to=PLACEHOLDER, scores=SCORES):
+        """rows() with *side*'s cells numbered in *cells* printing *to*, or blank."""
+        out, count = [], 0
+        for row in rows(*scores):
+            names = []
+            for name in getattr(row, f"{side}_players"):
+                count += 1
+                if count not in cells:
+                    names.append(name)
+                elif to is not None:
+                    names.append(to)
+            out.append(dataclasses.replace(row, **{f"{side}_players": tuple(names)}))
+        return tuple(out)
+
+    def notes(self, card):
+        return [w for w in card.warnings if "player name(s)" in w]
+
+    def test_each_side_keeps_its_own_count_of_placeholder_cells(self):
+        away = self.read(cw.CardSpec(rows=self.shaped("away", self.SHAPE)))
+        home = self.read(cw.CardSpec(rows=self.shaped("home", self.SHAPE)))
+        self.assertEqual([(s.home_unnamed, s.away_unnamed) for s in away.sets],
+                         [(0, 1), (0, 0), (0, 1), (0, 1)])
+        self.assertEqual([(s.home_unnamed, s.away_unnamed) for s in home.sets],
+                         [(1, 0), (0, 0), (1, 0), (1, 0)])
+        # Their sum is the row's, which players-unrecorded and describe() read.
+        self.assertEqual([s.unnamed for s in away.sets], [1, 0, 1, 1])
+
+    def test_a_pair_naming_one_player_above_the_placeholder_gets_no_reader_s_note(self):
+        for side in ("away", "home"):
+            with self.subTest(side=side):
+                card = self.read(cw.CardSpec(rows=self.shaped(side, self.SHAPE)))
+                self.assertEqual(self.notes(card), [])
+                # The names are read as before, the one name kept and none made up.
+                self.assertEqual([len(s.away_players if side == "away"
+                                      else s.home_players) for s in card.sets],
+                                 [1, 1, 0, 1])
+
+    def test_the_same_pair_with_its_second_cell_blank_is_still_told_it(self):
+        # A blank cell says nothing of why the place is empty: the name may be
+        # one the reader failed to read, which is what the note is for.
+        card = self.read(cw.CardSpec(rows=self.shaped("away", self.SHAPE, None)))
+        self.assertEqual(self.notes(card), [
+            "row 1: read 1 away player name(s) from a row its own marker '1&2' "
+            "says is doubles",
+            "row 4: read 1 away player name(s) from a row its own marker '1&2' "
+            "says is doubles"])
+
+    def test_each_side_is_judged_by_its_own_placeholders_and_not_the_row_s(self):
+        # d1 prints the placeholder in its home pair and leaves the away pair's
+        # second cell blank: the home placeholder fills no away place.
+        built = list(self.shaped("home", {2}))
+        built[0] = dataclasses.replace(built[0],
+                                       away_players=(AWAY_PLAYERS[0],))
+        card = self.read(cw.CardSpec(rows=tuple(built)))
+        self.assertEqual((card.sets[0].home_unnamed, card.sets[0].away_unnamed),
+                         (1, 0))
+        self.assertEqual(self.notes(card), [
+            "row 1: read 1 away player name(s) from a row its own marker '1&2' "
+            "says is doubles"])
+
+    def test_a_singles_cell_is_told_two_names_and_not_one_beside_the_placeholder(self):
+        # s1 is a singles row. Two names in its away cell are one too many; one
+        # name above the placeholder fills its one place, and the placeholder is
+        # players-unrecorded's to tell. (A cell holds two lines, so a third, a
+        # placeholder beside two names, is never read: the rule's test below.)
+        for printed, unnamed, said in (
+                ((AWAY_PLAYERS[0], AWAY_PLAYERS[2]), 0,
+                 ["row 2: read 2 away player name(s) from a row its own marker "
+                  "'1' says is singles"]),
+                ((AWAY_PLAYERS[0], PLACEHOLDER), 1, [])):
+            with self.subTest(printed=printed):
+                built = list(rows(*self.SCORES))
+                built[1] = dataclasses.replace(built[1], away_players=printed)
+                card = self.read(cw.CardSpec(rows=tuple(built)))
+                self.assertEqual(card.sets[1].away_unnamed, unnamed)
+                self.assertEqual(self.notes(card), said)
+
+    def test_the_rule_the_reader_and_validate_ask_counts_a_placeholder_as_a_place(self):
+        from matchcentre.model import names_miscounted
+        # (names, placeholder cells, places) -> miscounted
+        for named, unnamed, places, said in (
+                (0, 0, 2, False), (0, 2, 2, False), (0, 1, 1, False),
+                (1, 0, 2, True), (1, 1, 2, False), (2, 0, 2, False),
+                (2, 1, 2, False), (3, 0, 2, True), (3, 1, 2, True),
+                (1, 0, 1, False), (1, 1, 1, False), (2, 0, 1, True),
+                (2, 1, 1, True)):
+            with self.subTest(named=named, unnamed=unnamed, places=places):
+                self.assertIs(names_miscounted(named, unnamed, places), said)
+
+    def test_the_doctor_s_reading_shows_the_placeholder_and_no_note(self):
+        # describe() is what tools/doctor.py prints: each note was there twice.
+        placed = scorecard.describe(pdf.extract(self.write(
+            cw.CardSpec(rows=self.shaped("away", self.SHAPE)))))
+        blank = scorecard.describe(pdf.extract(self.write(
+            cw.CardSpec(rows=self.shaped("away", self.SHAPE, None)))))
+        self.assertNotIn("player name(s)", placed)
+        self.assertEqual(placed.count("(1 cell(s) print no player, only Match "
+                                      "Centre's placeholder)"), 3)
+        self.assertIn("row 1: read 1 away player name(s)", blank)
 
 
 class TestAHeadingInTheRosterBlockPutsNobodyOnEitherSquad(CardCase):
@@ -5299,6 +6371,181 @@ class TestWhatElseIsInTheFolder(CardCase):
         # Not an exception and not -1: the caller's next line is "and it holds N",
         # so the answer that makes it say nothing at all is zero.
         self.assertEqual(scorecard.cards_waiting(self.tmp / "nowhere"), 0)
+
+
+class TestACancelledCardTotallingAWalkoverIsReadAsTheWalkoverItDescribes(CardCase):
+    """A card ticking Match Cancelled beside a winner and a walkover's TOTAL row.
+
+    Match Centre writes a match one side gave up as Match Cancelled ticked, the
+    side that came named the winner by its Match Winner tick and its verb, and a
+    TOTAL row of every rubber to that side as a love set: sets 4-0 games 24-0 over
+    four rubbers first to 6. It ticks no Match Forfeited box. The reader took
+    ``forfeited_by`` from that box alone, so a walkover was read as a washout: its
+    three cross-checks were held to its rows, and the build left the match out of
+    the ladder and failed the run on a ``no-result`` error. Measured on the tree
+    before this (/tmp/mcf/scratch/CANCEL/probe/probe.py, cases wo-blank-home-3cells,
+    wo-blank-away-mirror, wo-play-home and wo-play-away, each beside the season
+    through build.py): exit 1 on every one, status ``cancelled``, no points, and
+    the error "A match called off has no winner, so the card contradicts itself".
+    On the owner's export 4 of 201 cards are such walkovers: 3 over rows left 0-0
+    and 1 over rows that hold play, 2-6, 6-4, 3-6 and 0-0, ticking home and
+    printing DEFEATS over a TOTAL of 4-0 and 24-0.
+
+    Now the reader keeps one interpretation beside the boxes as printed:
+    ``walkover_by``, the side the tick does not name, when Match Cancelled is ticked
+    and no Match Forfeited box is, exactly one Match Winner box is ticked or with
+    none a verb names one side, a verb printed names that side too, and the
+    printed TOTAL row, every cell of it, equals the award under some set rule.
+    Rows that hold play do not unmake it, since the owner's real walkover prints
+    play its own TOTAL row does not count. Each of the three checks is held to
+    the walkover and agrees. Rejected: B-1's condition that the rows give no
+    result, which the real card over play fails; any cancelled card naming a
+    winner as a walkover, which the five real washouts naming one refute, as
+    their TOTAL row is their rows; and a reader warning on every walkover read,
+    which is one more finding on a card that is right.
+    """
+
+    EMPTY = ((0, 0),) * 4
+    PLAY = ((2, 6), (6, 4), (3, 6), (0, 0))
+
+    def card(self, scores=EMPTY, **fields):
+        return self.read(cw.CardSpec(rows=rows(*scores), cancelled=True, **fields))
+
+    def test_the_walkover_is_read_beside_the_boxes_as_printed(self):
+        card = self.card(winner="home", verb="DEFEATS", totals=(4, 24, 0, 0))
+        self.assertEqual(card.walkover_by, "away")
+        self.assertEqual(card.forfeit_side, "away")
+        self.assertIsNone(card.forfeited_by)
+        self.assertTrue(card.cancelled)
+        self.assertEqual(card.winner_tick, "home")
+
+    def test_each_check_is_held_to_the_walkover_and_agrees(self):
+        card = self.card(winner="home", verb="DEFEATS", totals=(4, 24, 0, 0))
+        said = ("Match Cancelled is ticked beside a winner and a TOTAL row of "
+                "every rubber to home as a love set, which is how Match Centre "
+                "writes a walkover conceded by away")
+        self.assertEqual(
+            [(c.name, c.available, c.agrees, c.held_to, c.detail)
+             for c in card.checks],
+            [("totals", True, True, "the walkover conceded by away",
+              f"{said}, so the printed TOTAL row is held to the walkover rather "
+              "than to the rows, and totals its award under first-to-6, "
+              "advantage-6 or six-game-tiebreak: every rubber to home, each a love "
+              "set"),
+             ("verb", True, True, "the walkover conceded by away",
+              f"{said}, so 'DEFEATS' is held to the walkover rather than to the "
+              "rows, and restates it"),
+             ("winner-tick", True, True, "the walkover conceded by away",
+              f"the home Match Winner tick restates the walkover: {said}")])
+        self.assertEqual(card.warnings, ())
+
+    def test_the_mirror_is_a_walkover_by_home(self):
+        card = self.card(winner="away", verb="DEF. BY", totals=(0, 0, 24, 4))
+        self.assertEqual(card.walkover_by, "home")
+        self.assertTrue(card.confirmed)
+
+    def test_rows_that_hold_play_do_not_unmake_it(self):
+        # The owner's real walkover: the side ticked lost two of the three rubbers
+        # played, and Match Centre's TOTAL row still awards it every rubber.
+        for scores, fields, gave_up in (
+                (self.PLAY, dict(winner="home", verb="DEFEATS",
+                                 totals=(4, 24, 0, 0)), "away"),
+                (tuple((b, a) for a, b in self.PLAY),
+                 dict(winner="away", verb="DEF. BY", totals=(0, 0, 24, 4)),
+                 "home")):
+            with self.subTest(walkover_by=gave_up):
+                card = self.card(scores, **fields)
+                self.assertEqual(card.walkover_by, gave_up)
+                self.assertTrue(card.confirmed)
+
+    def test_the_tick_alone_or_the_verb_alone_names_the_side_that_came(self):
+        for label, fields in (("tick, no verb", dict(winner="home", omit_verb=True)),
+                              ("verb, no tick", dict(winner=cw.NO_TICK,
+                                                     verb="DEFEATS"))):
+            with self.subTest(card=label):
+                card = self.card(totals=(4, 24, 0, 0), **fields)
+                self.assertEqual(card.walkover_by, "away")
+                self.assertEqual(card.cross_checks_failed, ())
+
+    def test_an_award_under_a_rule_the_club_may_not_play_is_read_too(self):
+        # Four love sets to 4 total 16 games: validate holds it to the club's rule.
+        card = self.card(winner="home", verb="DEFEATS", totals=(4, 16, 0, 0))
+        self.assertEqual(card.walkover_by, "away")
+        totals, = [c for c in card.checks if c.name == "totals"]
+        self.assertTrue(totals.agrees)
+        self.assertIn("totals its award under fast4 or short-sets-4",
+                      totals.detail)
+
+    def test_the_award_is_the_one_the_card_s_own_rubbers_total(self):
+        # Three rubbers are three love sets, 3-0 and 18-0, and four's 4-0 and
+        # 24-0 are no award of this card's: a reader asking four rubbers whatever
+        # the rows survived every test of the unit as reviewed
+        # (/tmp/mcf/scratch/CANCEL-review/own/run.py, #3).
+        three = ((0, 0),) * 3
+        for totals, gave_up in (((3, 18, 0, 0), "away"), ((4, 24, 0, 0), None)):
+            with self.subTest(totals=totals):
+                card = self.card(three, winner="home", verb="DEFEATS",
+                                 totals=totals)
+                self.assertEqual(len(card.sets), 3)
+                self.assertEqual(card.walkover_by, gave_up)
+
+    def test_a_card_that_is_not_one_is_read_as_printed(self):
+        award = (4, 24, 0, 0)
+        for label, scores, fields in (
+                ("no TOTAL row", self.EMPTY, dict(winner="home", verb="DEFEATS",
+                                                  omit_totals=True)),
+                ("a TOTAL row of the rows", self.EMPTY,
+                 dict(winner="home", verb="DEFEATS")),
+                ("a TOTAL row of rows with play", self.PLAY,
+                 dict(winner="home", verb="DEFEATS", totals=(1, 11, 16, 2))),
+                ("a tick and a verb for different sides", self.EMPTY,
+                 dict(winner="home", verb="DEF. BY", totals=award)),
+                ("both Match Winner boxes ticked", self.EMPTY,
+                 dict(winner="home", extra_tick=True, verb="DEFEATS",
+                      totals=award)),
+                ("VS beside a tick", self.EMPTY,
+                 dict(winner="home", verb="VS", totals=award)),
+                ("a drawn verb beside a tick", self.EMPTY,
+                 dict(winner="home", verb="DRAWS WITH", totals=award)),
+                ("a word nobody knows beside a tick", self.EMPTY,
+                 dict(winner="home", verb="TROUNCES", totals=award)),
+                ("VS and no tick", self.EMPTY,
+                 dict(winner=cw.NO_TICK, verb="VS", totals=award)),
+                ("the award to the side not named", self.EMPTY,
+                 dict(winner="home", verb="DEFEATS", totals=(0, 0, 24, 4))),
+                ("Match Forfeited ticked too", self.EMPTY,
+                 dict(winner="home", verb="DEFEATS", totals=award,
+                      forfeited_by="away"))):
+            with self.subTest(card=label):
+                card = self.card(scores, **fields)
+                self.assertIsNone(card.walkover_by)
+                self.assertEqual(card.forfeit_side, card.forfeited_by)
+
+    def test_a_card_not_called_off_is_never_one(self):
+        card = self.read(cw.CardSpec(rows=rows(*self.EMPTY), winner="home",
+                                     verb="DEFEATS", totals=(4, 24, 0, 0)))
+        self.assertIsNone(card.walkover_by)
+
+    def test_a_total_row_with_a_cell_left_blank_is_not_one(self):
+        # A cell read blank is compared with nothing (Totals.differs_on), so
+        # three cells of the award beside a blank one would read as the award.
+        card = self.card(winner="home", verb="DEFEATS", totals=(4, 24, 0, 0))
+        for cell in ("home_sets", "home_games", "away_games", "away_sets"):
+            with self.subTest(blank=cell):
+                self.assertIsNone(scorecard.walkover_side(
+                    card.sets, dataclasses.replace(card.totals, **{cell: None}),
+                    card.verb, cancelled=True, forfeit_ticked=False,
+                    winner="home", winner_ticked=True))
+
+    def test_the_doctor_s_reading_holds_its_checks_to_the_walkover_too(self):
+        path = self.write(cw.CardSpec(rows=rows(*self.EMPTY), cancelled=True,
+                                      winner="home", verb="DEFEATS",
+                                      totals=(4, 24, 0, 0)))
+        page = pdf.extract(path)
+        lines = [line for line in scorecard.describe_lines(page)
+                 if isinstance(line, scorecard.CheckLine)]
+        self.assertEqual([line.check for line in lines],
+                         list(scorecard.read_page(page).checks))
 
 
 if __name__ == "__main__":

@@ -24,7 +24,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-__all__ = ["Scope", "EVERY_SEASON", "in_words", "choices", "echoed"]
+__all__ = ["Scope", "EVERY_SEASON", "in_words", "in_words_capped", "choices",
+           "echoed"]
 
 
 def in_words(items: Iterable[object], conjunction: str = "and") -> str:
@@ -43,6 +44,19 @@ def in_words(items: Iterable[object], conjunction: str = "and") -> str:
     if len(items) < 2:
         return "".join(items)
     return f"{', '.join(items[:-1])} {conjunction} {items[-1]}"
+
+
+def in_words_capped(items: Iterable[object], limit: int) -> str:
+    """The first *limit* of *items* by :func:`in_words`, then how many more there are.
+
+    ``a, b, c and 2 more``, or the whole list by :func:`in_words` when it is no
+    longer than *limit*. For a sentence that names a few of a list and counts the
+    rest, as the report's left-behind reason names a stale copy's fixtures
+    (4.457), rather than a copy of the cut at each.
+    """
+    items = [str(item) for item in items]
+    more = len(items) - limit
+    return in_words([*items[:limit], *([f"{more} more"] if more > 0 else [])])
 
 
 def choices(values: Iterable[object]) -> str:

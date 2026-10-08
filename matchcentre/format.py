@@ -134,11 +134,13 @@ class MatchFormat:
         Every rubber of the format, each a love set: 4 sets and 24 games over four
         rubbers first to 6, with or without a tiebreak, which is only played at
         6-all. The sets are what a sets-won scheme, ``rubbers``, pays such a
-        forfeit, and the games what ``forfeit_award = "full-games"`` would, which
-        no config key sets: the ladder takes a forfeit's games from its rows. The
-        reader and validate hold a TOTAL row that totals the award to these, so
-        what a card may print for a forfeit and what the ladder pays where it
-        pays the award are one reckoning.
+        forfeit, and the games what ``forfeit_award = "full-games"``, every
+        preset's default, pays a game bonus on, which are the games the ladder
+        counts of it too, every row a love set to the side that came
+        (:func:`~matchcentre.model.rubber_award`, 4.421). The reader and validate
+        hold a TOTAL row that totals the award to these, so what a card may print
+        for a forfeit and what the ladder pays where it pays the award are one
+        reckoning.
         """
         return len(self.slots), len(self.slots) * self.set_rule.games_to_win
 

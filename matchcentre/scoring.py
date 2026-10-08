@@ -43,14 +43,27 @@ class ScoringError(ValueError):
 LADDER_KEYS = ("points_average", "points", "wins", "games_diff", "games_won",
                "sets_diff", "sets_won", "head_to_head", "name")
 
-# What a forfeit is worth.
-#   as-played   the games printed on the card stand (the usual Match Centre case,
-#               where the non-forfeiting side's scoreline is filled in)
-#   full-games  the winner is credited a clean sweep, the forfeiter nothing
-#   fixed       a flat number of points, ignoring games
+# What a match forfeited whole is worth, set by `[rules] forfeit_award` and
+# `forfeit_points` in config.toml (4.420). Never by the card: a forfeit's TOTAL
+# row is a cross-check, and a card may leave it out.
+#   full-games  the default: the side that turned up is paid a win with every
+#               rubber of the format a love set (`forfeit_win_points`, 6.4 under
+#               games-bonus over four first-to-6 rubbers), the side that gave
+#               the match up nothing
+#   fixed       the side that turned up is paid `forfeit_points`, the other
+#               nothing, whatever the games
+#   as-played   paid as a played match on the games the rows print, the side
+#               that gave it up a loss; Match Centre prints a forfeit's love sets
+#               in its TOTAL row only, so over rows left 0-0 that is a win and a
+#               loss with no games
 # A scheme whose points are the sets won pays nothing for the outcome, so under
 # as-played and full-games alike its winner is paid every rubber of the format.
+# The award says what a rubber not played out is scored, too: under full-games
+# and fixed, a love set to the side that came, or a retirement raised to win it,
+# a forfeit's rows included; under as-played, the games it prints
+# (`model.rubber_award`, 4.421, 4.422).
 FORFEIT_AWARDS = ("as-played", "full-games", "fixed")
+DEFAULT_FORFEIT_AWARD = "full-games"
 
 # What a round a team did not play is worth: a bye, a washout, a week called off.
 # Every preset here ships with `zero`, and that is only a default — two
@@ -61,10 +74,12 @@ FORFEIT_AWARDS = ("as-played", "full-games", "fixed")
 # sets `unplayed = "average"` and keeps its preset.
 #
 #   average  the team is credited its own average over the matches it did play,
-#            and the round counts as played. Common where a ladder is ordered on
-#            average rather than on total points.
+#            and the round counts in that average but not in P, the matches
+#            played. Common where a ladder is ordered on average rather than on
+#            total points.
 #   zero     the round scores nothing and is not counted. The team's average is
-#            untouched either way; only its points total differs.
+#            the same either way; its points total and its count differ, and so,
+#            on a ladder ranked on points first, can its place (4.460).
 UNPLAYED_AVERAGE = "average"
 UNPLAYED_ZERO = "zero"
 UNPLAYED_MODES = (UNPLAYED_AVERAGE, UNPLAYED_ZERO)
@@ -90,7 +105,7 @@ class Ruleset:
     set_bonus: float = 0.0
     points_are_sets_won: bool = False
     decide_by: tuple[str, ...] = ("games", "sets")
-    forfeit_award: str = "as-played"
+    forfeit_award: str = DEFAULT_FORFEIT_AWARD
     forfeit_points: float | None = None
     ladder_by: tuple[str, ...] = ("points_average", "points", "games_diff",
                                   "games_won", "head_to_head", "name")
@@ -170,8 +185,15 @@ class Ruleset:
         return self.win + self.game_bonus * games + self.set_bonus * sets
 
     def forfeit_loss_points(self, fmt: MatchFormat) -> float:
-        """What a side gets for forfeiting: the loss value, no bonus earned."""
-        if self.points_are_sets_won:
+        """What a side gets for giving a match up whole: nothing, but as played.
+
+        Under ``full-games`` and ``fixed`` the side that gave the match up is paid
+        0, as the FORFEIT_AWARDS comment says and a club's rules pay it, where
+        this paid the scheme's loss value whatever the award (2.0 under
+        games-bonus, 4.420). Under ``as-played`` the loss value, no bonus earned,
+        which a scheme paying the sets won does not pay either.
+        """
+        if self.forfeit_award != "as-played" or self.points_are_sets_won:
             return 0.0
         return self.loss
 
@@ -240,14 +262,29 @@ class Ruleset:
         clauses = [", ".join(parts)]
         # Nobody wins a set on a forfeit's empty rows, so "points = sets won" alone
         # said the side that turned up was paid nothing. It is paid what
-        # forfeit_win_points pays, and this says so from the same field.
-        if self.points_are_sets_won:
-            points = self.forfeit_points
+        # forfeit_win_points pays, and this says so from the same field. So does
+        # any award but as-played, which a played match's sentence does not
+        # describe: games-bonus said "loss 2" of a forfeiter it pays 0 (4.305).
+        if self.points_are_sets_won or self.forfeit_award != "as-played":
             clauses.append("a match forfeited whole pays the side that turned up "
-                           + (f"{_num(points)} point{'' if points == 1 else 's'}"
-                              if self.forfeit_award == "fixed" else "every rubber"))
+                           + self._forfeit_worth())
         clauses.append(f"decided on {' then '.join(self.decide_by)}")
         return "; ".join(clauses)
+
+    def _forfeit_worth(self) -> str:
+        """What :meth:`forfeit_win_points` and :meth:`forfeit_loss_points` pay, in
+        the words of :meth:`describe`'s forfeit clause."""
+        if self.forfeit_award == "fixed":
+            points = self.forfeit_points
+            paid = f"{_num(points)} point{'' if points == 1 else 's'}"
+        elif self.points_are_sets_won:
+            return "every rubber"
+        else:
+            paid = "a win" + (" with every rubber a love set"
+                              if self.game_bonus or self.set_bonus else "")
+        if self.points_are_sets_won or not self.loss:
+            return paid
+        return f"{paid}, and the side that gave it up 0"
 
 
 def _num(value: float) -> str:
@@ -283,10 +320,13 @@ def unplayed_detail(average_unplayed: bool) -> str:
     """The averaging rule in a sentence, for the run report and the dashboard.
 
     One function so the terminal and the page say the same thing. It is worth
-    saying at all because it is invisible in the ladder's *order* — crediting every
-    team its own average cannot move any team's average, so only the points column
-    changes — and a club comparing totals against its association's sheet needs to
-    know which convention produced the number it is looking at.
+    saying at all because it changes the points column, and the presets that rank
+    on points first — simple, sets-first and rubbers — rank on that column, so it
+    can change their order too. Games-bonus ranks on the average, which crediting a
+    team its own average cannot move, and points are its next key, so there it
+    moves only teams level on average (4.460). A club comparing totals against its
+    association's sheet needs to know which convention produced the number it is
+    looking at.
 
     "Counts in that average" rather than "counts as a match played", which is what
     this said and is what associations call it: the ladder's ``P`` column is the
@@ -299,6 +339,26 @@ def unplayed_detail(average_unplayed: bool) -> str:
     forms of one rule cannot say different things.
     """
     return "a bye or a washout is " + unplayed_worth(average_unplayed)
+
+
+# What each of FORFEIT_AWARDS pays, in the words config.toml's option table uses.
+_FORFEIT_DETAIL = {
+    "full-games": "the side that turned up is paid a win with every rubber a "
+                  "love set, and the side that gave the match up 0",
+    "fixed": "the side that turned up is paid forfeit_points, and the side "
+             "that gave the match up 0",
+    "as-played": "paid as a match played, on the games the rows print",
+}
+
+
+def forfeit_detail(award: str) -> str:
+    """What *award* pays for a match forfeited whole, for the file a club edits.
+
+    Beside :func:`unplayed_detail` for the same reason: the option table the
+    first-run writer prints is the one place the file says what each award does
+    (4.420), so it is said here once, with the comment over FORFEIT_AWARDS.
+    """
+    return _FORFEIT_DETAIL[award]
 
 
 def draws_detail(allows_draw: bool) -> str:

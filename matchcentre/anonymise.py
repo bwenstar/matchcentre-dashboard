@@ -126,7 +126,9 @@ _CLASSES = {
         matches[].{home,away,home_name,away_name,court,forfeited_by}
         fixtures[].{home,away,home_name,away_name}
         players[].{team,team_name,team_code}
+        players[].registered_elsewhere
         meta.{label,club,day,division,competition,season,season_key,season_label}
+        meta.leader.slug
         meta.rules.slots[].label matches[].sets[].label rounds[].byes[]
         validation.duplicates[].{home,away}
     """,
@@ -134,11 +136,13 @@ _CLASSES = {
         format
         meta.{cards_rejected,cards_scored,cards_seen,draw_source,generated}
         meta.{ladder_complete,matches_total,rounds_played,rounds_total}
+        meta.{ladder_detail,ladder_state,leader,matches_played} meta.leader.value
         meta.{seasons_mode,teams_declared,teams_total,version,players}
         meta.players_detail meta.rounds_present[]
         meta.folders_unlisted
         meta.regular_fixtures.{played,total}
         meta.provenance.{captains,draw,format,players,rounds_total,season,teams}
+        meta.season_label_from
         meta.rules.{allows_draw,average_unplayed,draws,draws_detail,format}
         meta.rules.{format_detail,min_sets_for_result,scoring,scoring_detail}
         meta.rules.{set_rule,set_rule_detail,unplayed,unplayed_detail}
@@ -149,14 +153,16 @@ _CLASSES = {
         matches[].{home_points,home_sets,id,key,margin,not_counted,not_credited}
         matches[].{not_totalled,result,round,status,tied_on_games}
         matches[].other_cards[]
+        matches[].{no_rubber_played,printed_away_games,printed_home_games}
         matches[].sets[].{away_games,completed,doubles,home_games,margin,slot}
         matches[].sets[].{status,winner}
+        matches[].sets[].{nobody_played,printed_away_games,printed_home_games}
         fixtures[].{card_missing,cards,date,played,round} fixtures[].keys[]
         head_to_head{}.{draws,finals,games_high,games_low,played,undecided}
         head_to_head{}.{wins_high,wins_low}
         players[].{available,fill_in_appearances,games_diff,games_lost}
         players[].{games_won,is_captain,longest_win_streak,matches,sets_lost}
-        players[].{sets_played,sets_won,win_pct}
+        players[].{sets_played,sets_won,team_matches,win_pct}
         players[].by_slot{}.{played,win_pct,won}
         players[].contribution.{games_won,share_pct,team_games_won}
         players[].{doubles,singles}.{games_lost,games_won,lost,played,won}
@@ -164,7 +170,7 @@ _CLASSES = {
         players[].rating.{doubles,singles}
         players[].rating_history[].{doubles,round,singles}
         players[].streak.{length,type}
-        rounds[].{cards,date,is_finals,number,numbered,played,source}
+        rounds[].{cards,cards_played,date,is_finals,number,numbered,played,source}
         rounds[].keys[]
         teams[].{counted,drawn,games_diff,games_lost,games_won,lost,played}
         teams[].{points,points_average,position,sets_diff,sets_lost,sets_won}
@@ -175,6 +181,7 @@ _CLASSES = {
         teams[].contribution_gap.{games,nights_not_credited,rubbers_overfull}
         teams[].contribution_gap.{rubbers_short_a_name,rubbers_with_outsiders}
         teams[].contribution_gap.{share_pct,team_games_won}
+        teams[].contribution_gap.rubbers_nobody_played
         teams[].ladder_history[].{points_average,position,round}
         teams[].points_breakdown.{averaged,averaged_matches,earned}
         teams[].streak.{length,type}

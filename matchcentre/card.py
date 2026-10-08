@@ -100,11 +100,28 @@ class ParsedSet:
     status: SetStatus = SetStatus.PLAYED
     home_forfeit: bool = False
     away_forfeit: bool = False
+    # Which side's ``Retired`` box this row ticks: the side that retired, read off
+    # the box since it cannot be read off the games (4.422).
+    home_retired: bool = False
+    away_retired: bool = False
     # Name cells on this row that print Match Centre's ``Unspecified player``
     # rather than a person, and so produced no name above. Counted rather than
     # discarded so that one warning per card can say how much of it was never
     # filled in; read as a name it would become a player with a playing record.
-    unnamed: int = 0
+    # Kept per side, so a side is held to its own cells and the warning can say
+    # which side to fix (4.448); ``unnamed`` is the row's.
+    home_unnamed: int = 0
+    away_unnamed: int = 0
+
+    @property
+    def unnamed(self) -> int:
+        return self.home_unnamed + self.away_unnamed
+
+    def unnamed_for(self, side: str) -> int:
+        return self.home_unnamed if side == "home" else self.away_unnamed
+
+    def players_for(self, side: str) -> tuple[str, ...]:
+        return self.home_players if side == "home" else self.away_players
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,8 +189,10 @@ class CrossCheck:
 
     A scorecard states its result three times over: the per-set games, the printed
     ``TOTAL`` row, the result verb between the team names, and the ``Match Winner``
-    tick. Any one of them disagreeing with the sets means something was misread,
-    and that is the difference between a wrong number and a refused card.
+    tick. Any one of them disagreeing with the sets means something was misread
+    or misprinted, or that the card counts its rows by a rule the check does not:
+    build.py reports it as an error, which fails the run, and still records the
+    match as its rows or its ``Match Forfeited`` box give it (4.426).
 
     ``available`` is false when the card simply does not print this check — a
     perfectly normal template variation, and not evidence of anything.
@@ -239,13 +258,23 @@ def thin_card_prints(checks: tuple[CrossCheck, ...], nouns: dict[str, str],
 
 @dataclass(frozen=True, slots=True)
 class Card:
-    """One transcribed scorecard page. Names as printed; nothing interpreted."""
+    """One transcribed scorecard page. Names as printed; one thing interpreted.
+
+    That one is ``walkover_by``: the side that gave the match up, where the card
+    writes a walkover as Match Centre does, Match Cancelled ticked beside a
+    winner and a TOTAL row awarding every rubber to the side that came
+    (``scorecard.walkover_side``). It is kept beside the boxes as printed, which
+    stay as printed, as the reader's cross-checks are kept, because discover
+    reads cards and not the reader. :attr:`forfeit_side` is the side a match was
+    given up by, however the card tells it.
+    """
 
     source: str = ""
     page: int = 0
     match_id: str = ""
     date: str = ""              # ISO yyyy-mm-dd, "" if the card printed none
     weekday: str = ""           # as printed beside the date, not from the date
+    night: str = ""             # the weekday its competition line names, in full
     division: str = ""
     round: str = ""
     court: int | None = None
@@ -261,6 +290,7 @@ class Card:
     totals: Totals = field(default_factory=Totals)
     winner_tick: str | None = None      # "home" | "away" | None
     forfeited_by: str | None = None     # whole-match forfeit
+    walkover_by: str | None = None      # a walkover, Match Cancelled ticked (above)
     cancelled: bool = False
     disputed: bool = False
     checks: tuple[CrossCheck, ...] = ()
@@ -269,6 +299,13 @@ class Card:
     # above one, as a warning quotes it: in no squad, and so in no document but that
     # warning, and possibly a player.
     dropped: tuple[str, ...] = ()
+
+    @property
+    def forfeit_side(self) -> str | None:
+        """The side this card gives the whole match up by: its Match Forfeited box,
+        or the walkover it writes. Every card-level read of a whole-match forfeit
+        asks this rather than the box."""
+        return self.forfeited_by or self.walkover_by
 
     @property
     def doubles_flags(self) -> tuple[bool, ...]:

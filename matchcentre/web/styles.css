@@ -312,6 +312,29 @@ button {
 .health ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-secondary); }
 .health li { margin-bottom: 6px; }
 .health li code { color: var(--text-muted); font-size: 12px; }
+/* The detail's choice of kind (4.429): one row in the summary's colour, the
+   legend on it rather than in a frame above it. A legend that is not floated is
+   drawn in the fieldset's border, outside the flex row; floated, it is the row's
+   first item. The frame and the indent a fieldset ships with are dropped, since
+   the disclosure is already the frame. */
+.health-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-width: 0;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  color: var(--text-secondary);
+}
+.health-filter legend { float: left; padding: 0; }
+.health-filter label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.health-filter input { margin: 0; }
+/* What a choice hides: the other kind, read off the one attribute the choice
+   writes on the list. Both writes a value neither rule reads. */
+.health ul[data-show="errors"] > li[data-kind="warning"],
+.health ul[data-show="warnings"] > li[data-kind="error"] { display: none; }
 
 .pill {
   display: inline-flex;
@@ -1318,5 +1341,12 @@ body.careers tr:target > * { background: var(--surface-2); }
     margin: 0 0 10px;
     break-inside: avoid;
   }
+  /* The data health list prints whole, whatever was chosen on screen (4.429): the
+   * choice is one reader's way through a long list, and a sheet is read by people
+   * who never made it. The choice itself is a control, and paper takes no input.
+   * A detail left closed prints its summary alone, as every closed disclosure here
+   * does, and the summary counts every item. */
+  .health ul[data-show] > li[data-kind] { display: list-item; }
+  .health-filter { display: none; }
   .pick, .first-run { break-inside: avoid; box-shadow: none; }
 }

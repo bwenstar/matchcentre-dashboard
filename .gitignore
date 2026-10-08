@@ -21,6 +21,13 @@
 # or a second machine to clone onto, are both good reasons.
 /config.toml
 
+# What `python3 build.py --discover` proposes beside a config that is there
+# already: config.proposed.toml beside config.toml, and the same beside any
+# other file named with --config, public.toml among them. It holds every name
+# the file beside it holds, for the reason above, and the next --discover
+# writes it again, so there is nothing in it to keep.
+*.proposed.toml
+
 # Generated dashboard. Rebuilt from data/ by `python3 build.py`, so it is not
 # committed by default. Delete this line if you want the built site in git —
 # publishing to GitHub Pages from the repo is a legitimate reason to.

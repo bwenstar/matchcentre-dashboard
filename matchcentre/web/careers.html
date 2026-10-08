@@ -6,17 +6,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="generated" content="<!--GENERATED-->">
+<meta name="page" content="<!--NAME-->">
 <!--
-  The careers page: each player's seasons, added up. This file is a template.
-  site.py fills it in and writes the result as careers.html at the root of a
-  multi-season site, beside the front page; a single-season build never writes
-  it. Nothing here names a club, a grade or a season. Past site.py's
-  CAREERS_LIMIT it fills it in 29 times: careers.html as an index, and a page
-  for each initial beside it, careers-a.html to careers-other.html.
+  The careers page: each player's seasons, added up, or in single-season mode
+  each player's competitions this season. This file is a template. site.py
+  fills it in and writes the result as careers.html at the root of the site,
+  beside the front page, on every build that prints players' names. Nothing
+  here names a club, a grade or a season. Past site.py's CAREERS_LIMIT it fills
+  it in 29 times: careers.html as an index, and a page for each initial beside
+  it, careers-a.html to careers-other.html.
 
-  The mark on the second line and the stamp above are all the left-behind report
-  reads back, from the first kilobyte, so this comment goes after them and never
-  before.
+  The mark on the second line and the stamp and name above are all the
+  left-behind report reads back, from the first kilobyte, so this comment goes
+  after them and never before.
 
   HOW SITE.PY FILLS THIS IN. By sentinel comment, replaced literally. They are
   written below without their comment delimiters, because a real one here would
@@ -26,6 +28,9 @@
     TITLE          the site heading, as on the front page. Used twice.
     HEADING        this page's own heading: the page's name, and on a page
                    for one initial, which one.
+    NAME           the page's name alone, as the topbar gives it: "Careers
+                   across seasons", or "Players this season" in single-season
+                   mode. Used twice.
     GENERATED      the stamp of the newest season document, raw.
     THEME-KEY      the localStorage key the front page and dashboards keep the
                    light/dark choice under.
@@ -49,12 +54,12 @@
 </script>
 </head>
 <body class="careers">
-<a class="skip-link" href="#main">Skip to the careers</a>
+<a class="skip-link" href="#main">Skip to the players</a>
 <header class="topbar">
   <div class="brand">
     <a class="home-link" href="index.html">&larr; All competitions</a>
     <strong><!--TITLE--></strong>
-    <small>Careers across seasons</small>
+    <small><!--NAME--></small>
   </div>
 </header>
 <main id="main" tabindex="-1">

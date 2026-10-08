@@ -40,6 +40,7 @@ import dataclasses
 import importlib
 import io
 import itertools
+import json
 import re
 import subprocess
 import sys
@@ -209,7 +210,7 @@ class TestTheHeaderFieldsAreFoundOnEveryCardTheReaderPlaces(unittest.TestCase):
     Its header fields were found with patterns of its own, meant to be more
     forgiving than the reader's, and they knew `Division`, `Grade`, `Section` and
     `Round` followed by a space. Measured once the reader took a colon, `Rd`, `Rnd`
-    and `C Grade`: a card printing `Division: C / Yellow Ball / Round: 1 / #3665611`
+    and `C Grade`: a card printing `Division: C / Yellow Ball / Round: 1 / #1000100`
     was reported as `division not found` and `round not found`, above a verdict
     reading division `C` and round `1`; `C Grade / Yellow Ball / Round 4` as
     `division not found`; and `C Grade Round 4` as division `Round`, which is what
@@ -230,14 +231,14 @@ class TestTheHeaderFieldsAreFoundOnEveryCardTheReaderPlaces(unittest.TestCase):
     """
 
     CARDS = {
-        "colon": ("Division: C / Yellow Ball / Round: 1 / #3665611", {}),
-        "grade": ("C Grade / Yellow Ball / Round 4 / #3665611", {}),
-        "run-on": ("C Grade Round 4 / #3665611", {}),
-        "capitals": ("DIVISION C / YELLOW BALL / RD 1 / #3665611", {}),
-        "split": ("Division C / Yellow Ball / #3665611",
+        "colon": ("Division: C / Yellow Ball / Round: 1 / #1000100", {}),
+        "grade": ("C Grade / Yellow Ball / Round 4 / #1000100", {}),
+        "run-on": ("C Grade Round 4 / #1000100", {}),
+        "capitals": ("DIVISION C / YELLOW BALL / RD 1 / #1000100", {}),
+        "split": ("Division C / Yellow Ball / #1000100",
                   {"season_line": "Round 1", "venue": "",
                    "club_lines": ("EXAMPLE DISTRICT TENNIS", "14 Example Rd")}),
-        "refused": ("Division: C / Yellow Ball / Round: 1 / #3665611",
+        "refused": ("Division: C / Yellow Ball / Round: 1 / #1000100",
                     {"drop_column_rule": 3}),
     }
 
@@ -281,6 +282,465 @@ class TestTheHeaderFieldsAreFoundOnEveryCardTheReaderPlaces(unittest.TestCase):
         self.assertIn("This page was refused: the column between", report)
         self.assertNotIn("the header line is missing", report)
         self.assertEqual(self.field("refused", "division"), "found 'C'")
+
+
+class TestTheDoctorFindsTheCourtTheReaderReads(unittest.TestCase):
+    """The checker called the court missing on every card the reader read one off.
+
+    Row 4.466. Its header field was found with a pattern of its own, `Court`, a
+    colon and digits after it, written for a template printing the number after
+    the label. The cards Match Centre exports print the label over an empty
+    write-on line and the court as the last word of the venue's line, as the
+    card writer does (`Marrowfield Gardens 07`), and the reader reads it there.
+    Measured by /tmp/mcf/scratch/DOCTOR/probe on the tree before this: `court not
+    found` on every card writer card, with or without `--redact`, above a
+    reader's summary saying `court 1`, `court 7` or `court 12`; and, on a card
+    whose comments begin `Court 3 was under water`, `found '3'` beside the
+    reader's `court 12`, and on one printing no court beside the reader's `court
+    -`. On the owner's export it said `court not found` on 201 of 201 cards, every
+    one of which the reader reads a court off.
+
+    So the field is the court the reader reads,
+    :func:`~matchcentre.scorecard.court_in`, asked when the field is, and the
+    pattern is gone: no card in this project's fixtures or tests prints a number
+    after the label, and the reader reads one there too, on the label's line.
+    Rejected: the pattern kept as a fallback, which finds a comment's `Court 3`
+    on a card printing no court; and a second pattern for the venue's line, a
+    copy of the reader's rule to keep in step with it.
+    """
+
+    COMMENT = "Court 3 was under water, so we went on next door"
+    CARDS = {
+        "07": dict(court="07"),
+        "12": dict(court="12"),
+        "none": dict(court=""),
+        "commented": dict(court="", comments=COMMENT),
+        "commented, 12": dict(court="12", comments=COMMENT),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.paths, cls.reports = {}, {}
+        for name, fields in cls.CARDS.items():
+            path = Path(cls._tmp.name) / f"{name.replace(', ', '-')}.pdf"
+            cls.paths[name] = cw.write_card_file(
+                path, dataclasses.replace(_spec(), **fields))
+            done = subprocess.run((sys.executable, str(DOCTOR), str(path)),
+                                  capture_output=True, text=True, timeout=TIMEOUT)
+            cls.reports[name] = done.stdout + done.stderr
+        done = subprocess.run((sys.executable, str(DOCTOR), "--redact",
+                               str(cls.paths["07"])),
+                              capture_output=True, text=True, timeout=TIMEOUT)
+        cls.redacted = done.stdout + done.stderr
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def court(report: str) -> str:
+        """What *report* says of the court among its header fields."""
+        line = re.search(r"^ *court +(found +'.*'|not found)$", report, re.MULTILINE)
+        assert line is not None, report
+        return re.sub(" +", " ", line.group(1))
+
+    def test_the_court_the_venue_line_prints_is_found_as_the_reader_reads_it(self):
+        for card, court in (("07", "7"), ("12", "12"), ("commented, 12", "12")):
+            with self.subTest(card=card):
+                report = self.reports[card]
+                self.assertEqual(self.court(report), f"found '{court}'")
+                self.assertIn(f" court {court} venue 'Marrowfield Gardens'", report)
+
+    def test_a_card_printing_no_court_is_not_found(self):
+        for card in ("none", "commented"):
+            with self.subTest(card=card):
+                report = self.reports[card]
+                self.assertEqual(self.court(report), "not found")
+                self.assertIn(" court - venue ''", report)
+
+    def test_the_court_is_kept_in_the_report_redacted(self):
+        self.assertEqual(self.court(self.redacted), "found '7'")
+        self.assertNotIn(VENUE, self.redacted)
+
+    def test_the_court_found_is_the_one_the_reader_reads(self):
+        buffer = io.StringIO()
+        with mock.patch.object(scorecard, "court_in", return_value=42):
+            with contextlib.redirect_stdout(buffer):
+                doctor._report(self.paths["07"], page=None,
+                               label=str(self.paths["07"]), redactor=None)
+        self.assertEqual(self.court(buffer.getvalue()), "found '42'")
+
+
+class TestEachTickIsNamedByTheBoxTheReaderReadsItFrom(unittest.TestCase):
+    """The checker named a tick by the words to its right, and the reader does not.
+
+    Row 4.467. Its census named each solid fill by the first three words within
+    80pt to the fill's right on its line. Measured by
+    /tmp/mcf/scratch/DOCTOR/probe on the tree before this, on card writer cards:
+    the away Match Winner and Match Forfeited ticks were "(no label to its
+    right)", since their labels are printed to their left; a set's Forfeit tick,
+    home or away, was "Forfeit Retired Incomplete" and a Retired tick "Retired
+    Incomplete", the next boxes' labels taken in, and an Incomplete tick
+    "Incomplete" only because no label follows it; and no tick said its side or
+    its row, so a home Match Forfeited tick read as "Match Forfeited" whichever
+    side gave the match up. The reader's own census on the same pages named
+    every one of them rightly, `Match Winner away` and `Retired row 4 away`. On
+    the owner's export, 79 of 201 cards printed a tick line "(no label to its
+    right)", exactly the 79 whose Match Winner tick is the away side's, and 8 tick
+    lines on 5 cards printed a run of labels where one box was ticked.
+
+    So each tick is named by the box the reader reads it from,
+    :func:`~matchcentre.scorecard.tick_places`, which asks the pairing the reader
+    reads the boxes by and words the box as the reader's refusals do: `the away
+    Match Winner box`, `row 4's home Retired box`, a square no label names by its
+    row and side, and a fill no box reads as a tick as that. A tick is counted as
+    the reader counts it: a named box's own though a square is painted again a
+    point off it, and in one square however many outlines are painted round it.
+    On a page with no set table a box is said to have no row or side to be named
+    by. A box drawn again with its label over its own tick is named once, where
+    each of its two fills read "the home Match Winner and Match Winner boxes"
+    (/tmp/mcf/scratch/DOCTOR/fixup/before-again.txt); a fill two boxes in two
+    places read is named as the tick of both (fixup/after-two.txt); and each fill
+    is named by its own place whatever order the page paints the fills in, the
+    census listing them top to bottom. Rejected: widening
+    the search to look left as well, a second pairing to keep in step with the
+    reader's, which still takes in a neighbour's label; and the spec's own
+    example form `Match Winner (away)` or `d2 Retired (home)`, a second wording
+    of a box's place beside the reader's, with a row named by a slot a card
+    refused for its markers has not got.
+    """
+
+    LABELS = re.compile(r"\b(Forfeit|Retired|Incomplete|Match Winner|"
+                        r"Match Forfeited|Match Cancelled|Match Disputed)\b")
+    TICK = re.compile(r"^ {18}ticked at x +([\d.]+) y +([\d.]+)  (.*)$")
+    CENSUS = re.compile(r"^ +(Forfeit|Retired|Incomplete|Match Winner|"
+                        r"Match Forfeited|Match Cancelled|Match Disputed) +"
+                        r"(?:row (\d+) )?(home|away)? +at ([\d.]+),([\d.]+) TICKED$")
+
+    @staticmethod
+    def status(index: int, status, side: str, games=None) -> tuple:
+        """This file's rows with row ``index``'s ``side`` box of ``status`` ticked."""
+        rows = list(_spec().rows)
+        rows[index] = dataclasses.replace(rows[index], status=status, status_side=side,
+                                          **(games or {}))
+        return tuple(rows)
+
+    @classmethod
+    def cards(cls) -> dict[str, dict]:
+        blank = tuple(dataclasses.replace(row, home_games=0, away_games=0)
+                      for row in _spec().rows)
+        swapped = tuple(dataclasses.replace(row, home_games=row.away_games,
+                                            away_games=row.home_games)
+                        for row in _spec().rows)
+        return {
+            "home win": {},
+            "away win": dict(rows=swapped),
+            "home forfeit": dict(forfeited_by="home", rows=blank),
+            "away forfeit": dict(forfeited_by="away", rows=blank),
+            "both forfeit": dict(forfeited_by="both", rows=blank),
+            "set forfeit home": dict(rows=cls.status(3, cw.SetStatus.FORFEIT, "home")),
+            "set forfeit away": dict(rows=cls.status(3, cw.SetStatus.FORFEIT, "away")),
+            "retired home": dict(rows=cls.status(3, cw.SetStatus.RETIRED, "home",
+                                                 dict(home_games=1, away_games=5))),
+            "retired away": dict(rows=cls.status(3, cw.SetStatus.RETIRED, "away",
+                                                 dict(home_games=5, away_games=1))),
+            "row 1 retired away": dict(rows=cls.status(
+                0, cw.SetStatus.RETIRED, "away", dict(home_games=5, away_games=1))),
+            "incomplete home": dict(rows=cls.status(3, cw.SetStatus.INCOMPLETE, "home",
+                                                    dict(home_games=4, away_games=2))),
+            "incomplete both": dict(rows=cls.status(3, cw.SetStatus.INCOMPLETE, "both",
+                                                    dict(home_games=4, away_games=2))),
+            "cancelled": dict(cancelled=True, winner=cw.NO_TICK,
+                              rows=cls.status(0, cw.SetStatus.INCOMPLETE, "both",
+                                              dict(home_games=3, away_games=2))),
+            "disputed": dict(disputed=True),
+        }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.paths, cls.reports = {}, {}
+        for name, fields in cls.cards().items():
+            path = Path(cls._tmp.name) / f"{name.replace(' ', '-')}.pdf"
+            cls.paths[name] = cw.write_card_file(
+                path, dataclasses.replace(_spec(), **fields))
+            cls.reports[name] = cls.report_on(cls.paths[name])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def report_on(path: Path, page: pdf.Page | None = None) -> str:
+        """The doctor's report on the card at ``path``, or on ``page`` read off it."""
+        buffer = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            if page is not None:
+                stack.enter_context(mock.patch.object(doctor.pdf, "extract",
+                                                      return_value=page))
+            stack.enter_context(contextlib.redirect_stdout(buffer))
+            doctor._report(path, page=None, label=str(path), redactor=None)
+        return buffer.getvalue()
+
+    @classmethod
+    def ticks(cls, report: str) -> list[tuple[float, float, str]]:
+        """Each tick line of ``report``: where, and what it is named, with the
+        lines it goes on to under the census joined to it (4.186)."""
+        found: list[tuple[float, float, str]] = []
+        lines = report.splitlines()
+        for at, line in enumerate(lines):
+            tick = cls.TICK.match(line)
+            if not tick:
+                continue
+            going_on = itertools.takewhile(
+                lambda line: line.startswith(" " * 18) and not cls.TICK.match(line)
+                and line[18] != " ", lines[at + 1:])
+            found.append((float(tick.group(1)), float(tick.group(2)),
+                          " ".join([tick.group(3), *(on.strip() for on in going_on)])))
+        return found
+
+    def names(self, card: str) -> list[str]:
+        return [name for _, _, name in self.ticks(self.reports[card])]
+
+    def census(self, report: str) -> list[tuple[float, float, str]]:
+        """Each box the reader's own summary says is ticked: its square's top
+        left corner, and the box named in the words of a refusal, mapped here."""
+        boxes = []
+        for line in report.splitlines():
+            box = self.CENSUS.match(line)
+            if not box:
+                continue
+            label, row, side, x0, y0 = box.groups()
+            name = (f"the {label} box" if side is None
+                    else f"row {row}'s {side} {label} box" if row
+                    else f"the {side} {label} box")
+            boxes.append((float(x0), float(y0), name))
+        return boxes
+
+    def test_the_away_side_s_boxes_are_named_by_their_label_and_side(self):
+        for card, names in (
+                ("away win", ["the away Match Winner box"]),
+                ("home forfeit", ["the away Match Winner box",
+                                  "the home Match Forfeited box"]),
+                ("away forfeit", ["the home Match Winner box",
+                                  "the away Match Forfeited box"])):
+            with self.subTest(card=card):
+                self.assertEqual(self.names(card), names)
+
+    def test_a_set_s_box_is_named_alone_with_its_row_and_side(self):
+        for card, names in (
+                ("retired away", ["row 4's away Retired box",
+                                  "the home Match Winner box"]),
+                ("row 1 retired away", ["row 1's away Retired box",
+                                        "the home Match Winner box"]),
+                ("incomplete both", ["row 4's home Incomplete box",
+                                     "row 4's away Incomplete box",
+                                     "the home Match Winner box"]),
+                ("cancelled", ["row 1's home Incomplete box",
+                               "row 1's away Incomplete box",
+                               "the Match Cancelled box"]),
+                ("disputed", ["the home Match Winner box",
+                              "the Match Disputed box"])):
+            with self.subTest(card=card):
+                self.assertEqual(self.names(card), names)
+
+    def test_every_tick_line_names_one_box(self):
+        for card in self.reports:
+            for name in self.names(card):
+                with self.subTest(card=card, name=name):
+                    self.assertEqual(len(self.LABELS.findall(name)), 1)
+                    self.assertNotIn("no label to its right", name)
+
+    def test_every_tick_is_named_as_the_reader_s_own_census_names_its_box(self):
+        for card, report in self.reports.items():
+            with self.subTest(card=card):
+                census = self.census(report)
+                ticks = self.ticks(report)
+                self.assertTrue(ticks)
+                self.assertEqual(
+                    [name for _, _, name in ticks],
+                    [next(name for x0, y0, name in census
+                          if 0 < x - x0 < cw.BOX_SIDE and 0 < y - y0 < cw.BOX_SIDE)
+                     for x, y, _ in ticks])
+
+    def test_the_report_redacted_keeps_every_tick_line(self):
+        for card in ("away win", "retired home", "set forfeit away"):
+            with self.subTest(card=card):
+                done = subprocess.run(
+                    (sys.executable, str(DOCTOR), "--redact", str(self.paths[card])),
+                    capture_output=True, text=True, timeout=TIMEOUT)
+                self.assertEqual(self.ticks(done.stdout),
+                                 self.ticks(self.reports[card]))
+
+    def test_a_tick_in_a_square_no_label_names_is_said_to_be_one(self):
+        # Row 1's home Retired label gone, its square still drawn, and ticked.
+        path = cw.write_card_file(
+            Path(self._tmp.name) / "lost.pdf",
+            dataclasses.replace(_spec(), rows=self.status(
+                0, cw.SetStatus.RETIRED, "home", dict(home_games=1, away_games=5))))
+        report = self.report_on(path, word_lost(pdf.extract(path), "Retired"))
+        # Since 4.422 the 1-5 is away's set, so the night is level and the writer
+        # ticks no Match Winner box.
+        self.assertEqual([name for _, _, name in self.ticks(report)], [
+            "a square on row 1's home side, which no label names"])
+
+    def test_a_tick_in_a_set_s_box_off_the_table_is_said_to_be_read_by_no_row(self):
+        path = written_with_a_box_more(Path(self._tmp.name) / "astray.pdf",
+                                       _spec(), ticked=True)
+        self.assertEqual([name for _, _, name in self.ticks(self.report_on(path))], [
+            "the home Match Winner box",
+            "a home Forfeit box in no set row, which no row reads"])
+        # The away side's, "an away", by the one rule of the article (_article).
+        away = drawn_again(pdf.extract(self.paths["home win"]), "Forfeit", 600.0,
+                           side="away", ticked=True)
+        self.assertEqual([name for _, _, name in self.ticks(
+            self.report_on(self.paths["home win"], away))], [
+            "the home Match Winner box",
+            "an away Forfeit box in no set row, which no row reads"])
+
+    def test_a_fill_no_box_reads_as_its_tick_is_said_to_be_one(self):
+        # One a box short of the side inside the away Match Winner square, which
+        # the reader does not take for a tick, and one the size of a tick where
+        # no square is drawn.
+        away = pdf.extract(cw.write_card_file(Path(self._tmp.name) / "away.pdf",
+                                              dataclasses.replace(_spec(),
+                                                                  winner="away")))
+        tick = next(fill for fill in away.square_fills() if fill.cx > 300)
+        short = pdf.Rect(x0=tick.cx - 3.0, y0=tick.cy - 3.0, x1=tick.cx + 3.0,
+                         y1=tick.cy + 3.0, filled=True)
+        astray = dataclasses.replace(tick, y0=tick.y0 + 300.0, y1=tick.y1 + 300.0)
+        home = pdf.extract(self.paths["home win"])
+        report = self.report_on(self.paths["home win"], dataclasses.replace(
+            home, rects=home.rects + (short, astray)))
+        self.assertEqual([name for _, _, name in self.ticks(report)], [
+            "the home Match Winner box",
+            "no box the reader finds reads this as its tick",
+            "no box the reader finds reads this as its tick"])
+
+    def test_a_card_with_no_set_table_names_its_boxes_without_a_side(self):
+        path = cw.write_card_file(
+            Path(self._tmp.name) / "refused.pdf",
+            dataclasses.replace(_spec(), drop_column_rule=3, disputed=True,
+                                rows=self.status(3, cw.SetStatus.INCOMPLETE, "away",
+                                                 dict(home_games=4, away_games=2))))
+        report = self.report_on(path)
+        self.assertIn("This page was refused", report)
+        self.assertEqual([name for _, _, name in self.ticks(report)], [
+            "an Incomplete box, with no set table to give it a row or side",
+            "a Match Winner box, with no set table to give it a side",
+            "the Match Disputed box"])
+
+    def test_a_square_no_label_names_on_a_card_with_no_set_table_has_no_side(self):
+        path = cw.write_card_file(
+            Path(self._tmp.name) / "refused-lost.pdf",
+            dataclasses.replace(_spec(), drop_column_rule=3, rows=self.status(
+                0, cw.SetStatus.RETIRED, "home", dict(home_games=1, away_games=5))))
+        report = self.report_on(path, word_lost(pdf.extract(path), "Retired"))
+        # Level since 4.422, as above, so no Match Winner box is ticked.
+        self.assertEqual([name for _, _, name in self.ticks(report)], [
+            "a square no label names, with no set table to give it a row or side"])
+
+    def test_a_tick_on_a_page_whose_boxes_the_reader_cannot_measure_is_read_by_none(
+            self):
+        # Every box's edges stroked, which the reader measures no box side from,
+        # and the tick still filled, which the census lists.
+        genuine = pdf.extract(self.paths["home win"])
+        outlined = box_parts_outlined(genuine)
+        filled = tuple(fill for fill in genuine.square_fills()
+                       if fill.cx < 300 and fill.filled)
+        report = self.report_on(self.paths["home win"], dataclasses.replace(
+            outlined, rects=outlined.rects + filled))
+        self.assertEqual([name for _, _, name in self.ticks(report)],
+                         ["no box the reader finds reads this as its tick"])
+
+    def test_a_tick_in_a_box_painted_again_a_little_off_is_its_box_s_tick(self):
+        # The home Match Winner square painted again 0.3pt or 2pt lower with no
+        # label beside it, over the one tick: a square no label names, as the
+        # reader warns, over a tick the box it names reads (_ticked_squares).
+        genuine = pdf.extract(self.paths["home win"])
+        for down in (0.3, 2.0):
+            again = drawn_again(genuine, "Match Winner", down, labelled=False)
+            edges = tuple(r for r in again.rects[len(genuine.rects):]
+                          if min(r.w, r.h) < cw.BOX_SIDE - 0.05)
+            with self.subTest(down=down):
+                report = self.report_on(self.paths["home win"], dataclasses.replace(
+                    genuine, rects=genuine.rects + edges))
+                self.assertEqual([name for _, _, name in self.ticks(report)],
+                                 ["the home Match Winner box"])
+
+    def test_a_box_drawn_again_with_its_label_over_its_tick_is_named_once(self):
+        # The home Match Winner box, label and tick painted again 2pt lower: two
+        # fills, each in both squares, which the reader reads as two boxes in one
+        # place and warns of as that box again. Each tick is the one box's, and
+        # was "the home Match Winner and Match Winner boxes".
+        refused = cw.write_card_file(
+            Path(self._tmp.name) / "refused-again.pdf",
+            dataclasses.replace(_spec(), drop_column_rule=3))
+        for path, name in (
+                (self.paths["home win"], "the home Match Winner box"),
+                (refused, "a Match Winner box, with no set table to give it a side")):
+            with self.subTest(name=name):
+                again = drawn_again(pdf.extract(path), "Match Winner", 2.0)
+                self.assertEqual([name for _, _, name in self.ticks(
+                    self.report_on(path, again))], [name, name])
+
+    def test_a_fill_two_boxes_read_is_named_as_the_tick_of_both(self):
+        # Row 1's home Forfeit label and box painted again with the box 2pt under
+        # the home Match Winner box, over its tick: one fill the reader reads as
+        # the tick of both, and refuses for the one no row reads.
+        genuine = pdf.extract(self.paths["home win"])
+        tick = next(fill for fill in genuine.square_fills() if fill.cx < 300)
+        report = self.report_on(self.paths["home win"],
+                                self.painted_over(genuine, "Forfeit", tick, 2.0))
+        self.assertIn("This page was refused", report)
+        self.assertEqual([name for _, _, name in self.ticks(report)], [
+            "the home Match Winner box and a home Forfeit box in no set row, which "
+            "no row reads"])
+
+    @staticmethod
+    def painted_over(page: pdf.Page, label: str, fill: pdf.Rect,
+                     down: float) -> pdf.Page:
+        """``page`` with its first ``label`` and the box beside it painted again,
+        moved so that the box lies ``down`` points under ``fill``."""
+        again = drawn_again(page, label, 0.0)
+        words, rects = again.words[len(page.words):], again.rects[len(page.rects):]
+        dx = fill.x0 - min(rect.x0 for rect in rects)
+        dy = fill.y0 + down - min(rect.y0 for rect in rects)
+        return dataclasses.replace(page, words=page.words + tuple(
+            dataclasses.replace(word, x0=word.x0 + dx, x1=word.x1 + dx,
+                                y0=word.y0 + dy, y1=word.y1 + dy,
+                                baseline=word.baseline + dy) for word in words),
+            rects=page.rects + tuple(
+                dataclasses.replace(rect, x0=rect.x0 + dx, x1=rect.x1 + dx,
+                                    y0=rect.y0 + dy, y1=rect.y1 + dy)
+                for rect in rects))
+
+    def test_each_tick_is_named_by_its_own_fill_in_whatever_order_it_is_painted(
+            self):
+        # Every card's page with its rects in reverse, so that its fills come
+        # bottom to top: the census still lists them top to bottom, each named
+        # by the box its own fill is in.
+        for card, path in self.paths.items():
+            with self.subTest(card=card):
+                page = pdf.extract(path)
+                report = self.report_on(path, dataclasses.replace(
+                    page, rects=tuple(reversed(page.rects))))
+                self.assertEqual(self.ticks(report), self.ticks(self.reports[card]))
+
+    def test_a_tick_in_a_square_painted_twice_is_in_one_square(self):
+        # A bare square 600pt lower, off the table, ticked, and its outline
+        # painted twice at one point: one tick in one square, as the reader
+        # counts it, and not "2 squares".
+        genuine = pdf.extract(self.paths["home win"])
+        once = drawn_again(genuine, "Forfeit", 600.0, labelled=False, ticked=True)
+        edges = tuple(r for r in once.rects[len(genuine.rects):]
+                      if min(r.w, r.h) < cw.BOX_SIDE - 0.05)
+        report = self.report_on(self.paths["home win"], dataclasses.replace(
+            once, rects=once.rects + edges))
+        self.assertEqual([name for _, _, name in self.ticks(report)], [
+            "the home Match Winner box",
+            "a square on the home side in no set row, which no label names"])
 
 
 class TestTheDoctorFindsEveryResultVerbTheReaderReads(unittest.TestCase):
@@ -2899,6 +3359,103 @@ class TestADateIsFoundAndWithheldInEveryFormACardPrintsIt(unittest.TestCase):
                                  "filed by the Wednesday it prints)\n").split(" "))))
 
 
+class TestTheVerdictNamesTheNightThatFilesTheCard(unittest.TestCase):
+    """The verdict knew two sources of a card's night, and a card now has three.
+
+    Measured on this file's card under ``Brindle Tuesday Night Fixtures 2026``
+    (``/tmp/mcf/scratch/FILE/make_cards.py``): ``Thu 24/09/2026`` read
+    ``2026-09-24 Thursday`` with nothing after it, and the range ``Tue 29/09 - Sun
+    04/10`` read "(none read; filed by the Sunday it prints)", each a night the
+    build no longer files the card under once its competition line names one. So
+    the verdict says which of the three files the card, the line's night, the
+    date's weekday or the printed one, still asked of :mod:`matchcentre.discover`;
+    and it says so for a date that disagrees with the night even where the card
+    prints no other weekday, since that is the card the club will ask about.
+    Where the date's weekday is the night, it is the date that files the card, as
+    the build's note on a card printing another weekday says. Rejected: a fourth
+    phrase for a date the night overrules beside the printed weekday's, which is
+    two sentences for one fact; the night named wherever it files the card, which
+    told a card dated on its night one thing and the build's note another. A
+    range's days are never quoted by a warning, and the ``date`` header field
+    finds them as a date, the shape ``--redact`` withholds.
+    """
+
+    LINE = "Brindle Tuesday Night Fixtures 2026"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def report(self, when: str, *, line: str = LINE, redact: bool = False) -> str:
+        spec = dataclasses.replace(_spec(), when=when, competition_line=line)
+        card = cw.write_card_file(Path(self._tmp.name) / FILENAME, spec)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            if redact:
+                doctor._one_file(card, page=None, redact=True)
+            else:
+                doctor._report(card, page=None, label=str(card), redactor=None)
+        return buffer.getvalue()
+
+    def verdict(self, said: str) -> str:
+        return r"\n +date {10}" + r"\s+".join(map(re.escape, said.split(" ")))
+
+    def test_the_verdict_names_the_night_where_it_overrules_the_date(self):
+        for when, said in (
+                ("Thu 24/09/2026 7:30 PM",
+                 "2026-09-24 Thursday (filed by the Tuesday its competition line "
+                 "names)\n"),
+                ("Wed 24/09/2026 7:30 PM",
+                 "2026-09-24 Thursday (the card prints Wednesday; filed by the "
+                 "Tuesday its competition line names)\n"),
+                ("Tue 22/09/2026 7:30 PM", "2026-09-22 Tuesday\n"),
+                ("Wed 22/09/2026 7:30 PM",
+                 "2026-09-22 Tuesday (the card prints Wednesday; the date is what "
+                 "files it)\n"),
+                ("Tue 29/09 - Sun 04/10 7:30 PM", "2026-09-29 Tuesday\n"),
+                ("Thu 7:30 PM",
+                 "(none read; filed by the Tuesday its competition line names)\n"),
+                ("7:30 PM",
+                 "(none read; filed by the Tuesday its competition line names)\n")):
+            with self.subTest(when=when):
+                self.assertRegex(self.report(when), self.verdict(said))
+
+    def test_the_verdict_files_a_card_by_the_rule_the_build_files_it_by(self):
+        # Asked of the filing rather than restated: swapped for the rule the night
+        # was put in front of, the date first, the verdict says the date files it.
+        def date_first(card):
+            return weekday_of(card.date) or card.night or card.weekday
+        with mock.patch.object(discover, "filing_day", date_first):
+            self.assertRegex(self.report("Wed 24/09/2026 7:30 PM"), self.verdict(
+                "2026-09-24 Thursday (the card prints Wednesday; the date is what "
+                "files it)\n"))
+
+    def test_the_header_field_finds_the_range_the_verdict_dates(self):
+        # The field said "not found" of `Tue 29/09 - Sun 04/10` above a verdict
+        # dating the card from it, since none of its shapes was a range with no
+        # year (/tmp/mcf/scratch/FILE/fix/doc_forms.py). Found, it is withheld as
+        # a date is. The field is looser than the reader, as it is of a date: a
+        # range with no spaces round its dash, which the reader does not take, is
+        # found here so that the reader's not taking it shows. A range with a
+        # year at its close is found as its dated end, as it was.
+        for when, found in (("Tue 29/09 - Sun 04/10", "29/09 - Sun 04/10"),
+                            ("Tue 29/09-Sun 04/10", "29/09-Sun 04/10"),
+                            ("Tue 29/09 - Sun 04/10/2026", "04/10/2026")):
+            with self.subTest(when=when):
+                for redact, value in ((False, found), (True, "<date>")):
+                    report = self.report(f"{when} 7:30 PM", redact=redact)
+                    self.assertRegex(report, r"\n +date {13}found {5}"
+                                     + re.escape(repr(value)) + r"\n")
+
+    def test_a_range_of_days_is_withheld_with_or_without_its_year(self):
+        for line in (self.LINE, "Brindle Tuesday Night Fixtures"):
+            with self.subTest(line=line):
+                report = self.report("Tue 29/09 - Sun 04/10 7:30 PM", line=line,
+                                     redact=True)
+                for printed in ("29/09", "04/10", "2026"):
+                    self.assertNotIn(printed, report)
+
+
 class TestDoctorAndTheBuildWithholdByTheSameRule(unittest.TestCase):
     """``--redact`` and ``[build] players`` find a name by one function, not two copies.
 
@@ -3124,9 +3681,13 @@ class TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo(_VerdictLinesCase):
     card's verdict.
     """
 
+    # 4.426 moved it: the build fails the run and records what the rows give.
     ROWS = ["      A cross-check disagrees with the set rows. The card states its result",
-            "      more than once and the readings differ, so something was misread;",
-            "      build.py reports this as an error rather than scoring it."]
+            "      more than once and the readings differ: something was misread or",
+            "      misprinted, or the card counts its rows by a rule the cross-check does",
+            "      not. build.py reports this as an error, which fails the run, and still",
+            "      records the match as its set rows give it under the club's rules, or as",
+            "      its Match Forfeited box gives it if one is ticked."]
 
     @staticmethod
     def blank(**fields) -> dict:
@@ -3136,27 +3697,169 @@ class TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo(_VerdictLinesCase):
                     omit_verb=True, **fields)
 
     def box(self, side: str) -> list[str]:
+        # 4.426 moved it: the build fails the run and records what the rows give.
         return [f"      A cross-check disagrees with the {side} Match Forfeited box. "
                 "The card",
-                "      states its result more than once and the readings differ, so "
-                "something",
-                "      was misread; build.py reports this as an error rather than "
-                "scoring it."]
+                "      states its result more than once and the readings differ: "
+                "something was",
+                "      misread or misprinted, or the card counts its rows by a rule "
+                "the",
+                "      cross-check does not. build.py reports this as an error, which "
+                "fails the",
+                "      run, and still records the match as its set rows give it under "
+                "the",
+                "      club's rules, or as its Match Forfeited box gives it if one is "
+                "ticked."]
 
     def test_a_tick_held_to_the_box_is_said_to_disagree_with_the_box(self):
         for side in ("away", "home"):
             with self.subTest(forfeited_by=side):
                 lines = self.verdict(**self.blank(forfeited_by=side, winner=side))
-                self.assertEqual(lines[-3:], self.box(side))
+                self.assertEqual(lines[-6:], self.box(side))    # 4.426 moved it
 
     def test_two_checks_held_to_one_box_name_it_once(self):
         lines = self.verdict(**self.blank(forfeited_by="away", winner="away",
                                           totals=(0, 0, 24, 4)))
         self.assertEqual(self.check(lines, "totals")[:9], "DISAGREES")
-        self.assertEqual(lines[-3:], self.box("away"))
+        self.assertEqual(lines[-6:], self.box("away"))    # 4.426 moved it
 
     def test_a_played_card_is_told_what_it_always_was(self):
-        self.assertEqual(self.verdict(winner="away")[-3:], self.ROWS)
+        self.assertEqual(self.verdict(winner="away")[-6:], self.ROWS)  # 4.426
+
+
+class TestTheVerdictOnADisagreeingCheckSaysTheRunFailsAndWhatIsRecorded(
+        unittest.TestCase):
+    """The verdict on a card a cross-check disagrees with said the build does not
+    score it, and that something was misread, where neither need be true.
+
+    Row 4.426. The paragraph ended "so something was misread; build.py reports
+    this as an error rather than scoring it." No check withholds a card: F6,
+    ``verb-mismatch`` and the TOTAL checks each add a finding, and the match is
+    made from the set rows under the club's rules, or from its Match Forfeited
+    box, as before. Measured by /tmp/mcf/scratch/DOCTOR/mis on the tree before
+    this, this file's card in a season of its own each time: with `LOSES TO` and
+    the away tick, 4.280's misprint read exactly as printed, exit 1 on one
+    verb-mismatch error and published played, home; with the away tick alone,
+    exit 1 on one F6 error and played, home; and as a whole-match forfeit by away
+    with the away tick, exit 1 on one F6 error and a forfeit to home. All three
+    were told the sentence, and none was misread. Measured by
+    /tmp/mcf/scratch/DOCTOR/f6, rows 4-6, 2-6, 6-2, 4-2 with `DEF. BY`, the away
+    tick and TOTAL 1, 16, 16, 2, the shape Match Centre prints for a match level
+    on games and won on sets, exit 1 on two F6 errors and played, away: told it
+    too, of a card read as printed and counted as Match Centre counts it. On an
+    earlier export of the owner's, 35 cards, two read exactly as printed were
+    told it beside the ladders that counted them.
+
+    So the paragraph says what the build does: the readings differ, so something
+    was misread or misprinted, or the card counts its rows by a rule the
+    cross-check does not; build.py reports it as an error, which fails the run,
+    in the words the forfeit-contradicted paragraph uses; and still records the
+    match as its set rows give it under the club's rules, or as its Match
+    Forfeited box gives it. Rejected: build.py withholding the card, which would
+    take rightly read matches off their ladders and undo 4.134's choice to report
+    a contradicted forfeit and still pay it; dropping the clause, which leaves
+    the club to guess whether its ladder holds the match; "misread" alone, false
+    of a misprint read exactly and of a card counted by Match Centre's own rule;
+    and "still scores the match from its set rows", the clause's first form.
+    Measured by /tmp/mcf/scratch/DOCTOR/fixup/norule.py, `DEFEATS` and the home
+    tick over rows 0-0 four times, or 6-4 and then 0-5 three times, were told it
+    beside a build recording the one unplayed and the other played with no
+    result, each "so it is not counted in the ladder": a club reads "scores" as
+    points, and they score none.
+    """
+
+    SAID = ("The card states its result more than once and the readings differ: "
+            "something was misread or misprinted, or the card counts its rows by "
+            "a rule the cross-check does not. build.py reports this as an error, "
+            "which fails the run, and still records the match as its set rows "
+            "give it under the club's rules, or as its Match Forfeited box gives "
+            "it if one is ticked.")
+
+    @staticmethod
+    def rows(*games: tuple[int, int]) -> tuple:
+        """This file's rows, with *games* in them."""
+        return tuple(dataclasses.replace(row, home_games=home, away_games=away)
+                     for row, (home, away) in zip(_spec().rows, games))
+
+    CARDS = {
+        "misprint": dict(verb="LOSES TO", winner="away"),
+        "tick": dict(winner="away"),
+        "forfeit": dict(rows=rows((0, 0), (0, 0), (0, 0), (0, 0)), omit_verb=True,
+                        forfeited_by="away", winner="away"),
+        "zeros": dict(rows=rows((0, 0), (0, 0), (0, 0), (0, 0)), verb="DEFEATS",
+                      winner="home"),
+        # The finished set the away side's since 4.425, which backs a home claim
+        # by the set a rule finishes (6-4 here was home's, and agreed): the card
+        # is still one whose rows give no result, and now one a check disagrees
+        # with.
+        "unfinished": dict(rows=rows((4, 6), (0, 5), (0, 5), (0, 5)),
+                           verb="DEFEATS", winner="home"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.built, cls.verdicts, cls.matches = {}, {}, {}
+        for name, fields in cls.CARDS.items():
+            season = Path(cls._tmp.name) / name
+            card = cw.write_card_file(season / "data" / "round-1" / FILENAME,
+                                      dataclasses.replace(_spec(), **fields))
+            cls.built[name] = subprocess.run(
+                (sys.executable, str(ROOT / "build.py")), cwd=season,
+                capture_output=True, text=True, timeout=TIMEOUT)
+            done = subprocess.run((sys.executable, str(DOCTOR), str(card)),
+                                  capture_output=True, text=True, timeout=TIMEOUT)
+            cls.verdicts[name] = " ".join(
+                done.stdout.partition("\n    verdict\n")[2].split())
+            published = next((season / "site").glob("*/season.json"))
+            cls.matches[name] = json.loads(
+                published.read_text(encoding="utf-8"))["matches"][0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def failed(self, name: str, errors: int = 1) -> None:
+        """The build on card *name* failed the run on its *errors* errors."""
+        self.assertEqual(self.built[name].returncode, 1)
+        self.assertIn(f"exit 1: {errors} validation error(s)", self.built[name].stdout)
+
+    def test_a_card_whose_rows_a_check_disagrees_with_is_told_they_are_recorded(self):
+        for name in ("misprint", "tick"):
+            with self.subTest(card=name):
+                self.assertIn("A cross-check disagrees with the set rows. "
+                              + self.SAID, self.verdicts[name])
+                self.failed(name)
+                self.assertEqual((self.matches[name]["status"],
+                                  self.matches[name]["result"]), ("played", "home"))
+
+    def test_a_forfeit_a_check_disagrees_with_is_told_its_box_is_recorded(self):
+        self.assertIn("A cross-check disagrees with the away Match Forfeited box. "
+                      + self.SAID, self.verdicts["forfeit"])
+        self.failed("forfeit")
+        self.assertEqual((self.matches["forfeit"]["status"],
+                          self.matches["forfeit"]["result"]), ("forfeit", "home"))
+
+    def test_a_card_whose_rows_give_no_result_is_not_told_it_is_scored(self):
+        for name, errors, status, why in (
+                ("zeros", 2, "unplayed", "recorded as unplayed"),
+                ("unfinished", 3, "played",
+                 "only 1 of the 3 sets needed for a result are complete")):
+            with self.subTest(card=name):
+                self.assertIn("A cross-check disagrees with the set rows. "
+                              + self.SAID, self.verdicts[name])
+                self.failed(name, errors)
+                self.assertEqual((self.matches[name]["status"],
+                                  self.matches[name]["result"]), (status, "none"))
+                self.assertIn(f"{why}, so it is not counted in the ladder",
+                              " ".join(self.built[name].stdout.split()))
+
+    def test_none_is_told_the_build_does_not_score_it(self):
+        for name, said in self.verdicts.items():
+            with self.subTest(card=name):
+                self.assertNotIn("rather than scoring it", said)
+                self.assertNotIn("so something was misread;", said)
+                self.assertNotIn("scores the match", said)
 
 
 class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
@@ -3218,11 +3921,15 @@ class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
         "      Forfeited box gives it to away, as the verb 'LOSES TO' and the away",
         "      Match Winner tick do: build.py reports that once, as",
         "      forfeit-contradicted, an error, which fails the run."]
+    # 4.426 moved it, and FAST4's and the TOTAL row's paragraph below.
     SCOPED = [
         "      A cross-check disagrees with the set rows. The card states its result",
-        "      more than once and the readings differ, so something was misread; where",
-        "      the club's set rule is fast4, pro-8, pro-8-tiebreak or pro-10, build.py",
-        "      reports this as an error rather than scoring it."]
+        "      more than once and the readings differ: something was misread or",
+        "      misprinted, or the card counts its rows by a rule the cross-check does",
+        "      not. Where the club's set rule is fast4, pro-8, pro-8-tiebreak or",
+        "      pro-10, build.py reports this as an error, which fails the run, and",
+        "      still records the match as its set rows give it under the club's rules,",
+        "      or as its Match Forfeited box gives it if one is ticked."]
     # The tick alone restating it.
     TICKED = [
         "      Where the club's set rule is first-to-6, advantage-6, six-game-tiebreak",
@@ -3244,10 +3951,13 @@ class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
     # Rows only fast4 finishes, and both.
     FAST4 = [
         "      A cross-check disagrees with the set rows. The card states its result",
-        "      more than once and the readings differ, so something was misread; where",
-        "      the club's set rule is first-to-6, advantage-6, six-game-tiebreak,",
-        "      short-sets-4, pro-8, pro-8-tiebreak or pro-10, build.py reports this as",
-        "      an error rather than scoring it.",
+        "      more than once and the readings differ: something was misread or",
+        "      misprinted, or the card counts its rows by a rule the cross-check does",
+        "      not. Where the club's set rule is first-to-6, advantage-6,",
+        "      six-game-tiebreak, short-sets-4, pro-8, pro-8-tiebreak or pro-10,",
+        "      build.py reports this as an error, which fails the run, and still",
+        "      records the match as its set rows give it under the club's rules, or as",
+        "      its Match Forfeited box gives it if one is ticked.",
         "      Where the club's set rule is fast4, the set rows give the match to home,",
         "      and the home Match Forfeited box gives it to away, as the verb 'LOSES",
         "      TO' and the away Match Winner tick do: build.py reports that once, as",
@@ -3280,32 +3990,35 @@ class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
             "pro-8-tiebreak or pro-10, and by forfeit-contradicted where the club's "
             "set rule is first-to-6, advantage-6, six-game-tiebreak or "
             "short-sets-4"))
-        self.assertEqual(lines[-9:], self.SCOPED + self.RESTATED)
+        self.assertEqual(lines[-12:], self.SCOPED + self.RESTATED)    # 4.426
 
     def test_a_total_row_is_named_where_it_totals_the_box_s_award(self):
         # 4-24-0-0 to away totals the six-game rules' award, not short-sets-4's
         # of 4-16-0-0, which totals-mismatch holds to the rows there.
         lines = self.verdict(forfeited_by="home", totals=(0, 0, 24, 4))
-        self.assertTrue(self.check(lines, "totals").startswith("DISAGREES  "))
-        self.assertEqual(lines[-13:], [
-            "      A cross-check disagrees with the set rows. The card states its result",
-            "      more than once and the readings differ, so something was misread; where",
-            "      the club's set rule is fast4, short-sets-4, pro-8, pro-8-tiebreak or",
-            "      pro-10, build.py reports this as an error rather than scoring it."]
-            + self.TOTALLED)
+        # 4.421 moved this: the reader holds a TOTAL row to the rows as Match
+        # Centre counts them too, every rubber a love set to the side that came,
+        # and this one totals that under the six-game rules, which it names. So
+        # the check agrees, and only the verb is left disagreeing under the rules
+        # forfeit-contradicted does not name it under, as SCOPED says (4.426).
+        self.assertEqual(self.check(lines, "totals"), (
+            "agrees  printed games 0-24 and sets 0-4 total the 4 set rows as Match "
+            "Centre counts them under first-to-6, advantage-6 or six-game-tiebreak: "
+            "every rubber to away as a love set, for the home Match Forfeited box"))
+        self.assertEqual(lines[-16:], self.SCOPED + self.TOTALLED)
 
     def test_a_tick_alone_restating_the_box_is_named_and_the_paragraph_scoped(self):
         lines = self.verdict(forfeited_by="home", omit_verb=True, winner="away")
         self.assertTrue(self.check(lines, "winner-tick").startswith("DISAGREES  "))
-        self.assertEqual(lines[-9:], self.SCOPED + self.TICKED)
+        self.assertEqual(lines[-12:], self.SCOPED + self.TICKED)    # 4.426
 
     def test_a_draw_verb_the_build_reports_everywhere_is_said_as_it_was(self):
         # forfeit-contradicted never names a draw: verb-mismatch reports the verb
         # under every rule, so the paragraph holds unqualified.
         lines = self.verdict(forfeited_by="home", verb="DRAWS WITH", winner="away")
         self.assertTrue(self.check(lines, "winner-tick").startswith("DISAGREES  "))
-        self.assertEqual(lines[-8:], TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo
-                         .ROWS + self.TICKED)
+        self.assertEqual(lines[-11:], TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo
+                         .ROWS + self.TICKED)    # 4.426 moved it
 
     def test_rows_only_fast4_finishes_are_said_to_fail_under_fast4_alone(self):
         lines = self.verdict(forfeited_by="home",
@@ -3314,7 +4027,7 @@ class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
             ", by the verb, where the club's set rule is first-to-6, advantage-6, "
             "six-game-tiebreak, short-sets-4, pro-8, pro-8-tiebreak or pro-10, and "
             "by forfeit-contradicted where the club's set rule is fast4"))
-        self.assertEqual(lines[-9:], self.FAST4)
+        self.assertEqual(lines[-12:], self.FAST4)    # 4.426 moved it
 
     def test_rows_a_scoring_decides_for_the_side_that_came_name_the_others(self):
         # Sets 3-1 home and games 18-19 away: games-bonus gives away the match.
@@ -3332,8 +4045,8 @@ class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
                              rows=self.rows((6, 2), (3, 3), (0, 0), (0, 0)))
         self.assertNotIn("forfeit-contradicted", "\n".join(lines))
         self.assertEqual(self.check(lines, "winner-tick"), self.TICK)
-        self.assertEqual(lines[-3:], TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo
-                         .ROWS)
+        self.assertEqual(lines[-6:], TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo
+                         .ROWS)    # 4.426 moved it
 
     def test_where_forfeit_contradicted_names_every_disagreement_nothing_else_is(
             self):
@@ -3366,8 +4079,8 @@ class TestTheDoctorSaysUnderWhichRulesTheBuildFailsRowsAgainstTheBox(
         with mock.patch.object(validate, "restating_box", return_value=()):
             lines = self.verdict(forfeited_by="home")
         self.assertEqual(self.check(lines, "winner-tick"), self.TICK)
-        self.assertEqual(lines[-7:], TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo
-                         .ROWS + self.FILED)
+        self.assertEqual(lines[-10:], TestTheDoctorSaysWhatADisagreeingCheckWasHeldTo
+                         .ROWS + self.FILED)    # 4.426 moved it
 
     def test_the_verdict_asks_the_builds_rule_of_every_set_rule_and_scoring(self):
         # A spy rather than a card: a copy of the rule agreeing today cannot be
@@ -3415,16 +4128,20 @@ class TestTheVerdictOnAWashoutSaysWhatTheBuildDoesWithIt(unittest.TestCase):
     says the one report is an error that fails the run. Rejected: the doctor
     reading the tick and the verb itself, a copy of the rule; and exiting 1, which
     the doctor keeps for a page that does not read as a scorecard.
+
+    4.419 moved this: the build reports such a card once, as cancelled, in a
+    warning saying the Match Cancelled tick decides, and the verdict says that in
+    the words the warning uses (:func:`~matchcentre.validate.overruled`).
     """
 
     WASHOUT = ("Match Cancelled is ticked, so build.py counts nothing on this card "
                "and holds nothing it prints to the set rows: it reports the match "
                "once, as cancelled.")
+    # 4.419 moved this: the claims are overruled, in a warning, not an error.
     CLAIMS = ("Match Cancelled is ticked, so build.py counts nothing on this card "
-              "and holds nothing it prints to the set rows. But {}, and a match "
-              "called off has no winner, so the card contradicts itself: build.py "
-              "reports the match once, as cancelled, and as an error, which fails "
-              "the run.")
+              "and holds nothing it prints to the set rows. {}; the Match "
+              "Cancelled tick decides, so build.py reports the match once, as "
+              "cancelled, in a warning that says so.")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -3466,18 +4183,20 @@ class TestTheVerdictOnAWashoutSaysWhatTheBuildDoesWithIt(unittest.TestCase):
         with mock.patch.object(discover, "called_off", return_value=False):
             said = self.verdict(cancelled=True)
         self.assertNotIn("Match Cancelled is ticked", said)
-        self.assertIn("build.py reports this as an error rather than scoring it.",
-                      said)
+        # 4.426 moved it: the build fails the run and records what the rows give.
+        self.assertIn("build.py reports this as an error, which fails the run, and "
+                      "still records the match as its set rows give it", said)
 
-    def test_a_washout_naming_a_winner_is_told_the_build_fails_it(self):
+    # 4.419 moved this: told the tick decides, where it was told the build fails it.
+    def test_a_washout_naming_a_winner_is_told_the_cancelled_tick_decides(self):
         for label, fields, claims in (
                 ("by tick and verb", dict(cancelled=True, verb="DEFEATS",
                                           winner="home"),
-                 "the card ticks home as Match Winner and the verb 'DEFEATS' "
+                 "The card also ticks home as Match Winner and the verb 'DEFEATS' "
                  "means home won"),
                 ("by a tick beside a drawn verb", dict(cancelled=True,
                                                        winner="away"),
-                 "the card ticks away as Match Winner")):
+                 "The card also ticks away as Match Winner")):
             with self.subTest(card=label):
                 said = self.verdict(**fields)
                 self.assertIn(self.CLAIMS.format(claims), said)
@@ -3492,8 +4211,9 @@ class TestTheVerdictOnAWashoutSaysWhatTheBuildDoesWithIt(unittest.TestCase):
         lines = self.block(cancelled=True, verb="LOSES TO", winner="away").splitlines()
         told = lines[next(n for n, line in enumerate(lines)
                           if "Match Cancelled" in line):]
-        self.assertIn("the card ticks away as Match Winner and the verb 'LOSES TO' "
-                      "means away won", " ".join(" ".join(told).split()))
+        # 4.419 moved this: "also", and capitalised, as the warning says it.
+        self.assertIn("The card also ticks away as Match Winner and the verb "
+                      "'LOSES TO' means away won", " ".join(" ".join(told).split()))
         self.assertLessEqual(max(len(line) for line in told), 78, told)
 
     def test_the_claims_are_asked_of_the_function_the_build_asks(self):
@@ -3502,6 +4222,115 @@ class TestTheVerdictOnAWashoutSaysWhatTheBuildDoesWithIt(unittest.TestCase):
         with mock.patch.object(validate, "winner_claims", return_value=[]):
             said = self.verdict(cancelled=True, verb="DEFEATS", winner="home")
         self.assertIn(self.WASHOUT, said)
+
+
+class TestTheVerdictOnAWalkoverSaysItIsScoredAsTheForfeitItIs(unittest.TestCase):
+    """The doctor told the owner of a walkover's card that its card contradicts itself.
+
+    Match Centre writes a match one side gave up whole as Match Cancelled ticked,
+    the side that came ticked Match Winner, and a TOTAL row of every rubber to it
+    as a love set (4.418). Measured on the tree before this
+    (/tmp/mcf/scratch/CANCEL/probe/doc_walkover.py, this file's card so ticked
+    beside DEFEATS and 4-0 24-0, over its own rows and over 0-0 rows): the totals
+    cross-check DISAGREES with the rows over play, and the verdict said "a match
+    called off has no winner, so the card contradicts itself: build.py reports
+    the match once, as cancelled, and as an error, which fails the run", where
+    the build now scores it as the forfeit it is. Now the verdict names what
+    makes the card a walkover, in the words its cross-checks are held to it by
+    (:func:`~matchcentre.scorecard._walkover_text`), says the build scores it as
+    the Match Forfeited box would be, and says the one warning the build gives
+    a walkover whose rows hold play, under the rules it gives it, where the
+    rows are not against the walkover as ``forfeit-contradicted`` holds them.
+    Rejected: the washout's sentence with the claims left out, which says the
+    build counts nothing on a card it pays a win and a loss.
+    """
+
+    WALKOVER = ("Match Cancelled is ticked beside a winner and a TOTAL row of every "
+                "rubber to home as a love set, which is how Match Centre writes a "
+                "walkover conceded by away. So build.py scores the match as a "
+                "forfeit by away, as it would a card ticking the away Match "
+                "Forfeited box, and holds what the card prints to the walkover "
+                "rather than to the set rows.")
+    PLAYED = ("set rows hold games {} that the TOTAL row does not count: build.py "
+              "says so once, as walkover-rows-played, a warning.")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def block(self, **fields) -> str:
+        """The verdict block on this file's card with *fields* changed, as printed."""
+        card = cw.write_card_file(Path(self._tmp.name) / FILENAME,
+                                  dataclasses.replace(_spec(), **fields))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            doctor._report(card, page=None, label=str(card), redactor=None)
+        return buffer.getvalue().split("\n    verdict\n")[-1]
+
+    def verdict(self, **fields) -> str:
+        return " ".join(self.block(**fields).split())
+
+    @staticmethod
+    def blank():
+        return tuple(dataclasses.replace(row, home_games=0, away_games=0)
+                     for row in _spec().rows)
+
+    def walkover(self, **fields):
+        return dict(dict(cancelled=True, winner="home", verb="DEFEATS",
+                         totals=(4, 24, 0, 0)), **fields)
+
+    def test_a_walkover_over_rows_nobody_played_is_told_it_is_a_forfeit(self):
+        said = self.verdict(**self.walkover(rows=self.blank()))
+        self.assertIn(self.WALKOVER, said)
+        self.assertIn("3 available, 0 disagreeing", said)
+        for needle in ("contradicts itself", "counts nothing on this card",
+                       "walkover-rows-played", "forfeit-contradicted"):
+            self.assertNotIn(needle, said)
+
+    def test_a_walkover_over_play_is_told_the_one_warning_its_rows_get(self):
+        said = self.verdict(**self.walkover())
+        self.assertIn(self.WALKOVER + " Its " + self.PLAYED.format("22-12"), said)
+        self.assertIn("3 available, 0 disagreeing", said)
+        self.assertNotIn("forfeit-contradicted", said)
+
+    def test_a_walkover_over_love_sets_to_the_side_that_came_is_told_nothing_of_them(
+            self):
+        # Four love sets to home are what its TOTAL row of 4-0 and 24-0 counts,
+        # so no play is left out, as validate.uncounted_play says (4.418).
+        love = tuple(dataclasses.replace(row, home_games=6, away_games=0)
+                     for row in _spec().rows)
+        said = self.verdict(**self.walkover(rows=love))
+        self.assertIn(self.WALKOVER, said)
+        self.assertNotIn("set rows hold games", said)
+
+    def test_rows_against_the_walkover_are_told_by_rule_as_a_box_s_are(self):
+        # Every set finished and three to home, the side the walkover conceded
+        # by home says gave the match up: forfeit-contradicted where the club's
+        # rule finishes them, the rows-played warning where it does not.
+        said = self.verdict(cancelled=True, winner="away", verb="DEF. BY",
+                            totals=(0, 0, 24, 4))
+        self.assertIn("Where the club's set rule is fast4, pro-8, pro-8-tiebreak or "
+                      "pro-10, its " + self.PLAYED.format("22-12"), said)
+        self.assertIn("Where the club's set rule is first-to-6, advantage-6 or "
+                      "six-game-tiebreak, the set rows give the match to home, and "
+                      "the walkover conceded by home gives it to away, as the verb "
+                      "'DEF. BY', the away Match Winner tick and the printed TOTAL "
+                      "row do: build.py reports that once, as forfeit-contradicted, "
+                      "an error, which fails the run.", said)
+
+    def test_the_verdict_keeps_to_78_columns(self):
+        for fields in (self.walkover(), dict(cancelled=True, winner="away",
+                                             verb="DEF. BY", totals=(0, 0, 24, 4))):
+            lines = self.block(**fields).splitlines()
+            self.assertLessEqual(max(len(line) for line in lines), 78, lines)
+
+    def test_the_walkover_is_the_one_the_reader_reads(self):
+        # Told the card is no walkover, the doctor says what it says of a washout
+        # naming a winner, so it asks the reader's reading and not a copy of it.
+        with mock.patch.object(scorecard, "walkover_side", return_value=None):
+            said = self.verdict(**self.walkover(rows=self.blank()))
+        self.assertNotIn(self.WALKOVER, said)
+        self.assertIn("the Match Cancelled tick decides", said)
 
 
 # An "R" and a box round it, as a filled and a stroked path: a letter and a line
@@ -3980,6 +4809,77 @@ class TestTheReadersSummarySaysAHandOffAsTheVerdictDoes(_VerdictLinesCase):
         self.assertEqual(lines[0], f"{doctor.INDENT}  This page reads as a scorecard.")
         self.assertTrue(lines[-1].startswith(f"{doctor.INDENT}    cross-checks  "),
                         lines[-1])
+
+
+class TestTheDoctorSaysACardWithNothingOnItIsToldItsNoResultAlone(_VerdictLinesCase):
+    """The verdict on a card that records nothing says what build.py makes of it.
+
+    Row 4.424. Measured by /tmp/mcf/scratch/NORESULT/probe/probe.py on the tree
+    before this (cases blank-vs and blank-noverb, before.txt): a card ticking no
+    box, printing ``VS`` or no verb over 0-0 rows with no TOTAL row, was told that
+    its numbers "rest on the set rows alone (F6 warns rather than refuses)".
+    build.py now gives such a card no F6 warning, and its page no note that a
+    check is missing, its ``no-result`` saying all there is to say. So the
+    verdict says that, asked of the function the build asks,
+    :func:`~matchcentre.validate.records_nothing`, of the match the build makes
+    of the card. The reader's warnings above it are listed as the reader gave
+    them, which is what the doctor shows. A card with play on it is told what it
+    always was.
+
+    Rejected: leaving the verdict as it was, which names a warning the build no
+    longer gives; and wording it from the card's rows here, a second answer to
+    the build's question that would part from it the day either changed.
+    """
+
+    BARE = dict(omit_totals=True, winner=cw.NO_TICK)
+    # From the review: the verdict said the build gives no F6 warning, beneath the
+    # reader's warning the page still gave. Neither the report nor the page now
+    # says a check is missing, and the verdict says so of both.
+    SAID = (", and every set row reads 0-0: there is nothing for one to confirm, "
+            "so build.py reports the match as no-result, a warning, and nowhere "
+            "says a cross-check is missing, in its report or on its page.")
+
+    @staticmethod
+    def blank() -> tuple[cw.SetRow, ...]:
+        return tuple(dataclasses.replace(row, home_games=0, away_games=0)
+                     for row in _spec().rows)
+
+    @staticmethod
+    def closing(lines: list[str], first: str) -> str:
+        """The closing paragraph, from its first words on, joined."""
+        at = next(at for at, line in enumerate(lines)
+                  if line.startswith(f"      {first}"))
+        return " ".join(line.strip() for line in lines[at:])
+
+    def test_a_vs_card_with_nothing_on_it_is_told_its_no_result_alone(self):
+        lines = self.verdict(rows=self.blank(), verb="VS", **self.BARE)
+        self.assertEqual(self.closing(lines, "Nothing"), "Nothing this card prints "
+                         "can serve as a cross-check" + self.SAID)
+        self.assertEqual(past_the_width(lines), [])
+
+    def test_a_card_printing_no_verb_either_is_told_the_same(self):
+        lines = self.verdict(rows=self.blank(), omit_verb=True, **self.BARE)
+        self.assertEqual(self.closing(lines, "No independent"), "No independent "
+                         "cross-check is printed on this card" + self.SAID)
+
+    def test_the_reader_s_warning_is_still_listed_above_it(self):
+        # The doctor shows the card as the reader read it, and the verdict says
+        # what the build makes of that.
+        lines = self.verdict(rows=self.blank(), verb="VS", **self.BARE)
+        self.assertIn("so nothing on it confirms the set rows were read correctly "
+                      "Nothing this card prints",
+                      " ".join(line.strip() for line in lines))
+
+    def test_the_verdict_asks_the_function_the_build_asks(self):
+        # Told the card records something, the doctor says what it says of a
+        # card with play on it, word for word.
+        with mock.patch.object(validate, "records_nothing", return_value=False):
+            lines = self.verdict(rows=self.blank(), verb="VS", **self.BARE)
+        self.assertEqual(lines[-2:], TestTheDoctorSaysAVerbNobodyCanUseIsPrinted.NEW)
+
+    def test_a_card_with_play_on_it_is_told_what_it_always_was(self):
+        lines = self.verdict(verb="VS", **self.BARE)
+        self.assertEqual(lines[-2:], TestTheDoctorSaysAVerbNobodyCanUseIsPrinted.NEW)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ distinguish "six teams" from "six teams that happened to have cards", or "a
 ten-round season three rounds in" from "a three-round season". So this document
 carries its own epistemics: ``meta.provenance`` says where each kind of identity
 came from, ``meta.rounds_total`` is null unless a human declared it (F3),
-``meta.ladder_complete`` says whether the positions mean anything yet (F10), and
+``meta.ladder_state`` says whether the positions mean anything yet (F10), and
 ``meta.cards_seen``/``cards_scored``/``cards_rejected`` plus
 ``validation.rejected`` account for every PDF found (F4).
 
@@ -33,7 +33,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -44,6 +44,7 @@ from .config import DEFAULT_PATH
 from .competition import (DRAW_DECLARED, Club, Competition, Provenance,
                           fixture_sort_key, merge_provenance, round_number)
 from .model import Match
+from .scorecard import NO_VERB, thin_card_note
 from .slugs import unslug
 
 __all__ = ["build_season", "published", "season_json", "write_season",
@@ -56,7 +57,11 @@ __all__ = ["build_season", "published", "season_json", "write_season",
 # 4 the first whose rounds say whether the build read their label as a number, and
 # whose rounds and fixtures no longer list a card by the id it printed. A key a page
 # of format 4 reads and an older build of it did not write, `meta.regular_fixtures`,
-# the page prints as unknown rather than bumping the format a second time.
+# and since 4.428 `meta.ladder_state` and `meta.leader`, and 4.458's
+# `meta.ladder_detail`, the page prints as unknown rather than bumping the format a
+# second time, and so `players[].team_matches`, by printing no line under a player's
+# Matches figure; and `rounds[].cards_played` it reads as that build's rounds were
+# read, a round with a card played.
 SEASON_FORMAT = 4
 
 # The aspects of a competition whose provenance travels to the dashboard (F7).
@@ -65,6 +70,12 @@ SEASON_FORMAT = 4
 # absent key nobody notices.
 PROVENANCE_ASPECTS = ("captains", "draw", "format", "players", "rounds_total",
                       "season", "teams")
+# `meta.provenance` of an aspect that names nothing: players where the competition
+# names nobody, fill-ins included, captains where no team has one, and the season
+# where the pages show no name. Not a `Provenance` member, as anonymise.WITHHELD is
+# not: an absence is not a value anybody worked out, and it has no trusted answer.
+# The page flags only "derived" and "mixed", so it lists none of them as a guess.
+EMPTY = "empty"
 
 
 def build_season(matches: Sequence[Match], *, competition: Competition,
@@ -73,7 +84,8 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
                  cards: Sequence[Card] = (),
                  rejected: Sequence[Rejection] = (),
                  seasons_mode: str = "single",
-                 sheet=None, config_name: str = DEFAULT_PATH) -> dict:
+                 sheet=None, config_name: str = DEFAULT_PATH,
+                 strays: Sequence[discover.FiledElsewhere] = ()) -> dict:
     """The full ``season.json`` document as a plain, JSON-ready dict.
 
     ``matches`` are the matches read from cards, without byes: byes are
@@ -93,12 +105,25 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
 
     ``config_name`` is the config file the build read, by its name, which a finding
     that sends the club to a line of it names (:func:`validate.validate`).
+
+    ``strays`` are the cards of the competition's teams filed under another
+    competition (:attr:`~matchcentre.discover.Discovery.strays`), for validation to
+    say where a card went; like ``sheet`` they reach no figure.
     """
     ordered = stats.chronological(matches, competition.rounds)
     report = validate.validate(ordered, competition, club=club, cards=cards,
                               rejected=rejected, seasons_mode=seasons_mode,
-                              sheet=sheet, config_name=config_name)
+                              sheet=sheet, config_name=config_name,
+                              strays=strays)
     team_rows = stats.team_stats(ordered, competition)
+    # The ladder's state and its leader, each asked once, for the report, the front
+    # page and the overview alike (4.428, 4.438).
+    state = stats.ladder_state(ordered, competition)
+    top = stats.ladder_leader(team_rows, state)
+    # And the words the state is said in, played or counted, by what F10 compared,
+    # for the same three and F10 (4.458).
+    detail = stats.ladder_detail(stats.ladder_counts(ordered, competition),
+                                 stats.ladder_played(ordered, competition))
     player_rows = stats.player_stats(ordered, competition)
     # A name for each card that no other card has, for the page to find it by: the
     # printed id is missing from some cards and shared by others.
@@ -133,12 +158,16 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
                       length_refused=any(issue.rule == "F3"
                                          for issue in report.errors),
                       regular_fixtures=_regular_fixtures(ordered, fixtures, totals,
-                                                         competition)),
+                                                         competition),
+                      ladder_state=state, ladder_detail=detail,
+                      leader=({"slug": top.slug, "value": top.points_average}
+                              if top else None),
+                      matches_played=_matches_played(ordered, totals)),
         "teams": [_plain(team_rows[slug]) for slug in sorted(team_rows)],
-        "players": _players(player_rows, competition),
+        "players": _players(player_rows, competition, club),
         "matches": [_match(m, competition, key=key, not_counted=reason,
                            not_credited=credit, not_totalled=total,
-                           other_cards=list(other))
+                           other_cards=list(other), notes=_notes(m, cards))
                     for m, key, reason, credit, total, other
                     in zip(ordered, keys, reasons, credits, totals, others)],
         "fixtures": fixtures,
@@ -239,7 +268,8 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
           source_dir: str | Path, generated: str | None, club: Club | None,
           cards: Sequence[Card], rejected: Sequence[Rejection],
           seasons_mode: str, length_refused: bool = False,
-          regular_fixtures: dict) -> dict:
+          regular_fixtures: dict, ladder_state: str, ladder_detail: str,
+          leader: dict | None, matches_played: int) -> dict:
     played = stats.rounds_present(matches, competition.rounds)
     unlisted = sum(1 for r in rejected if r.folder)
     return {
@@ -251,6 +281,7 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         "season": competition.season,
         "season_key": competition.season_key,
         "season_label": season_label(competition.season, competition.season_key),
+        "season_label_from": season_label_from(competition),
         "seasons_mode": seasons_mode,
         # Which build wrote this document. `format` above says what the *shape*
         # means and is bumped only when a key changes meaning; this says which
@@ -286,15 +317,28 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         "cards_rejected": len(rejected) - unlisted,
         "folders_unlisted": unlisted,
         "matches_total": len(matches),
+        # The nights of those played, each once, finals in: the Matches played tile's
+        # count, and what makes a competition one "with results" on the front page,
+        # where a document alone is also written for a folder of washouts (4.440).
+        "matches_played": matches_played,
         "teams_total": len(competition.teams),
         # Whether the club declared this division's draw or it was reconstructed
         # from the cards. A derived draw can only describe rounds already played,
         # so the dashboard must not present its fixture list as a schedule (F2).
         "draw_source": competition.draw_source,
         "teams_declared": competition.teams_declared,
-        # False when teams have played unequal numbers of counted matches, in
-        # which case the order is a snapshot and not a standing (F10).
-        "ladder_complete": stats.ladder_complete(matches, competition),
+        # "empty" while no regular-season match has been counted, and nobody is
+        # placed; "in-progress" while teams have counted unequal numbers, a
+        # snapshot and not a standing; "complete" otherwise (F10, 4.428).
+        # `ladder_complete` is the last of the three, kept for the pages that read
+        # it, and `leader` the top of a complete ladder and null on the others.
+        "ladder_state": ladder_state,
+        # The state as a clause, "teams have played unequal numbers of matches"
+        # where every team's counted is its P and counted matches where a round was
+        # credited, so that no page says played of counts that are not (4.458).
+        "ladder_detail": ladder_detail,
+        "ladder_complete": ladder_state == "complete",
+        "leader": leader,
         "rules": _rules(competition),
         "provenance": _provenance(competition),
         # Coerced because callers naturally hold this as a Path, and a Path in the
@@ -318,6 +362,45 @@ def season_label(season: str, season_key: str) -> str:
     if season_key:
         return unslug(season_key)
     return ""
+
+
+def season_offer(competition: Competition, dates: Iterable[str] = ()) -> str:
+    """The one season name a run offers a club to declare, wherever it is offered.
+
+    Only what something supports: the name the pages show, printed on a card,
+    declared, or the season's folder's name made readable, else the year or years
+    the matches' own *dates* were played in, else "". A plausible invented name
+    would be pasted into config.toml unread and become a declared fact: the file
+    offered "2026 Season 2" where no card printed a season, beside a review that
+    offered the year, and deleting its # declared the invention.
+    """
+    shown = season_label(competition.season, competition.season_key)
+    if shown:
+        return shown
+    return " to ".join(sorted({date[:4] for date in dates if len(date or "") >= 4}))
+
+
+# What the season's name the pages show was made from, where nobody gave one:
+# `meta.season_label_from`, and the word each message about the name is chosen by.
+SEASON_FROM_FOLDER = "folder"
+SEASON_FROM_DATE = "date"
+
+
+def season_label_from(competition: Competition) -> str:
+    """What the season's name the pages show was made from, or "".
+
+    :data:`SEASON_FROM_FOLDER` where it is its folder's name made readable, and
+    :data:`SEASON_FROM_DATE` where it is the year on cards that sit in no season
+    folder, which multi-season mode keys them by; so only where no card printed a
+    name and nobody declared one. "" where a name was given, and where there is no
+    key, which shows no name at all. A message about the name says which, rather
+    than that the dashboard leaves it out: said of both that the name was the
+    folder's, a year beside the run's own note that its cards sit in no season
+    folder sent the club to look for one.
+    """
+    if competition.season:
+        return ""
+    return competition.season_key_from
 
 
 def _rules(competition: Competition) -> dict:
@@ -368,11 +451,14 @@ def _provenance(competition: Competition) -> dict:
     Discovery's own record wins where it has one. The fallbacks below exist so
     that an aspect discovery forgot still reports something true rather than
     defaulting to ``derived`` and understating what we know -- a format read off
-    a card is ``card``, not a guess.
+    a card is ``card``, not a guess. Ahead of both, an aspect that names nothing
+    is :data:`EMPTY`, which no provenance describes.
     """
     out: dict[str, str] = {}
     for aspect in PROVENANCE_ASPECTS:
-        if aspect in competition.provenance:
+        if _names_nothing(aspect, competition):
+            out[aspect] = EMPTY
+        elif aspect in competition.provenance:
             out[aspect] = competition.provenance[aspect].value
         else:
             out[aspect] = _inferred_provenance(aspect, competition).value
@@ -385,6 +471,24 @@ def _provenance(competition: Competition) -> dict:
             and not competition.teams_declared):
         out["teams"] = Provenance.MIXED.value
     return out
+
+
+def _names_nothing(aspect: str, competition: Competition) -> bool:
+    """Whether *aspect* of *competition* names nothing at all, which is not a value
+    discovery or anybody else worked out.
+
+    Asked ahead of discovery's record and the fallback below, so the two agree:
+    the provenance of an empty collection is ``derived``, and a washout that named
+    nobody was told its players and captains were both guesses. Players are judged
+    over the fill-ins too, so that it is never said where a name is shown.
+    """
+    if aspect == "players":
+        return not competition.player_index() and not competition.fill_in_names
+    if aspect == "captains":
+        return not any(team.captain for team in competition.teams.values())
+    if aspect == "season":
+        return not season_label(competition.season, competition.season_key)
+    return False
 
 
 def _inferred_provenance(aspect: str, competition: Competition) -> Provenance:
@@ -417,9 +521,12 @@ def _inferred_provenance(aspect: str, competition: Competition) -> Provenance:
         return merge_provenance(player.name_source for player
                                 in competition.player_index().values())
     if aspect == "captains":
-        return merge_provenance(player.captain_source for player
-                                in competition.player_index().values()
-                                if player.is_captain)
+        # The team's captain, as discovery reads it: every player with a (C) mark,
+        # the captain or not, counted a mark beside a declared captain, and a
+        # declared captain on no card was in no player's record.
+        return merge_provenance(team.captain_source
+                                for team in competition.teams.values()
+                                if team.captain)
     return Provenance.DERIVED
 
 
@@ -427,14 +534,24 @@ def _inferred_provenance(aspect: str, competition: Competition) -> Provenance:
 
 
 def _players(players: dict[str, stats.PlayerStats],
-             competition: Competition) -> list[dict]:
+             competition: Competition,
+             club: Club | None = None) -> list[dict]:
     """Players by team then squad order, with anyone unregistered last.
 
     Squad order comes from the roster block on the cards rather than the
     alphabet, because the roster prints a team's players in an order the club
     chose. Teams sort by slug: their draw codes are optional display metadata now
     and may be absent, so they cannot carry the sort.
+
+    ``registered_elsewhere`` is the other competition of the club whose squads
+    register a player no squad of this one does, found as fill-in-other-competition
+    finds it, and null for everybody else (4.443). A player with no team here is
+    either somebody another night registers or somebody no squad of the club holds,
+    and the page's Fill-in notes say different things of the two: nothing else in
+    a player's record tells them apart, and the page does not read it out of the
+    report's findings.
     """
+    index = competition.player_index()
     squad_order = {
         player.slug: (team.slug, position)
         for team in competition.teams.values()
@@ -450,12 +567,46 @@ def _players(players: dict[str, stats.PlayerStats],
             return (1, "", 0, slug)
         return (0, placed[0], placed[1], slug)
 
-    return [_plain(players[slug]) for slug in sorted(players, key=key)]
+    def record(slug: str) -> dict:
+        plain = _plain(players[slug])
+        elsewhere = (club.registered_elsewhere(slug, competition.id)
+                     if club is not None and slug not in index else None)
+        plain["registered_elsewhere"] = elsewhere.id if elsewhere else None
+        return plain
+
+    return [record(slug) for slug in sorted(players, key=key)]
+
+
+def _notes(match: Match, cards: Sequence[Card]) -> list[str]:
+    """The reader's warnings on *match*'s card, as its notes on the page.
+
+    All of them, except on a card that records nothing
+    (:func:`~matchcentre.validate.records_nothing`). That card is spared the
+    two that say a cross-check is missing: :data:`~matchcentre.scorecard.NO_VERB`
+    and :func:`~matchcentre.scorecard.thin_card_note`. With every row 0-0 and no
+    result counted, there is nothing for a check to confirm. That is why F6's
+    warning and ``totals-missing`` stand down on such a card in the report, and
+    its ``no-result`` is the one finding about it (4.424). The page showed the
+    two as parse notes and counted the match among those with parse notes, so a
+    club was told on the page what the report no longer told it.
+
+    Rejected: dropping them in the reader, which cannot know whether the match
+    has a result, and whose words the doctor shows; dropping them in discover,
+    which cannot ask validate, since validate imports it; and dropping every
+    warning on such a card, which would take what its roster block or its Match
+    Forfeited boxes say too.
+    """
+    spared = {note for card in cards
+              if discover.where(card) == match.source
+              and validate.records_nothing(match, card)
+              for note in (NO_VERB, thin_card_note(card.checks))}
+    return [warning for warning in match.warnings if warning not in spared]
 
 
 def _match(match: Match, competition: Competition, *, key: str,
            not_counted: str = "", not_credited: str = "",
-           not_totalled: str = "", other_cards: Sequence[int] = ()) -> dict:
+           not_totalled: str = "", other_cards: Sequence[int] = (),
+           notes: Sequence[str]) -> dict:
     """One match.
 
     ``home``/``away`` are slugs and ``home_name``/``away_name`` the display
@@ -509,6 +660,14 @@ def _match(match: Match, competition: Competition, *, key: str,
         "away_games": match.away_games,
         "home_sets": match.home_sets,
         "away_sets": match.away_sets,
+        # The games scored above, a forfeited rubber a love set and a retired one
+        # raised to win it; and the games printed, which are the games played, the
+        # overview's Games played tile (4.421). A night nobody played a rubber of
+        # happened and counts, and has no games, sets or margin to set beside one
+        # that was played, so the tiles leave it out by this field, the model's.
+        "printed_home_games": match.printed_home_games,
+        "printed_away_games": match.printed_away_games,
+        "no_rubber_played": match.no_rubber_played,
         "home_points": stats.round_stored(match.points_for(match.home)),
         "away_points": stats.round_stored(match.points_for(match.away)),
         "margin": abs(match.home_games - match.away_games),
@@ -550,7 +709,7 @@ def _match(match: Match, competition: Competition, *, key: str,
         # for nothing -- a second place a new status has to go, and the first one to
         # miss it makes the tiles disagree with the ladder beside them.
         "counts_as_played": match.counts_as_played,
-        "sets": [_set(s) for s in match.sets],
+        "sets": [_set(s, match) for s in match.sets],
         "home_roster": list(match.home_roster),
         "away_roster": list(match.away_roster),
         "fill_ins": _fill_ins(match, competition),
@@ -562,7 +721,8 @@ def _match(match: Match, competition: Competition, *, key: str,
         # there too rather than leaving a card with another beside it saying it has
         # none.
         "other_cards": list(other_cards),
-        "warnings": list(match.warnings),
+        # The reader's warnings on its card, less those _notes leaves off (4.424).
+        "warnings": list(notes),
     }
 
 
@@ -572,7 +732,7 @@ def _result(match: Match) -> str:
     return match.winner or "draw"
 
 
-def _set(result) -> dict:
+def _set(result, match: Match) -> dict:
     return {
         "slot": result.slot.key,
         "label": result.slot.label,
@@ -585,6 +745,13 @@ def _set(result) -> dict:
         "status": result.status.value,
         "completed": result.completed,
         "margin": result.margin,
+        # The games the row prints, where an award scores it otherwise (4.421,
+        # 4.422), for the pages to show beside it; and whether nobody played it,
+        # the model's one rule, which a player's list of sets asks so that it
+        # lists no rubber their figures leave out.
+        "printed_home_games": result.printed_home_games,
+        "printed_away_games": result.printed_away_games,
+        "nobody_played": match.nobody_played(result),
     }
 
 
@@ -620,6 +787,17 @@ def _regular_fixtures(matches: Sequence[Match], fixtures: Sequence[dict],
         "total": sum(1 for fixture in fixtures
                      if not competition.is_finals_round(fixture["round"])),
     }
+
+
+def _matches_played(matches: Sequence[Match], totals: Sequence[str]) -> int:
+    """The nights played, by the one card every total is built from, finals in.
+
+    The overview's Matches played tile counts these rows the same way, and the
+    front page asks it of a competition's document for whether it has results
+    (4.440): a washout is a card and a match, and no night played.
+    """
+    return sum(1 for match, total in zip(matches, totals)
+               if match.counts_as_played and not total)
 
 
 def _fixtures(matches: Sequence[Match], competition: Competition,
@@ -728,6 +906,12 @@ def _rounds(matches: Sequence[Match], competition: Competition,
             # Every card of the round by its key, a card that printed no id too.
             "keys": [key for m, key in zip(matches, keys) if m.round == number],
             "cards": len(played),
+            # How many of them count as played, by Match.counts_as_played, so the page
+            # heads a round whose every card was called off or left blank "not played"
+            # and not "played" over cards that each say they count for nothing, and
+            # keeps no copy of the rule (4.452). `played` keeps its meaning, a round
+            # with a card, which Latest round and rounds_played go by.
+            "cards_played": sum(1 for m in played if m.counts_as_played),
             "is_finals": rnd.is_finals,
             # Only ever filled in when the team list was declared or the club
             # stated the bye itself (F1). Empty here means "nobody said", not

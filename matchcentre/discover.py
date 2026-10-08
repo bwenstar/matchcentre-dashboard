@@ -8,13 +8,13 @@ builder. So the rules that stop them are all here, in one
 readable pass, and each is written down next to the code that keeps it:
 
 * **Routing** is by ``(season key, weekday, division printed in the card's own
-  header)``, the weekday being that of the card's date, or the one printed beside
-  it when the date does not read. Not by filename, not by directory. The one
-  exception the contract allows is the season key in multi-season mode, which *is*
-  the first path segment under ``data/``; that is recorded as path-derived and
-  said out loud in :attr:`Discovery.notes`. Competition ids carry the season key,
-  which is what stops two seasons of one day-and-division merging into a single
-  ladder.
+  header)``, the weekday being the night its competition line names, else that
+  of the card's date, or the one printed beside it when the date does not read.
+  Not by filename, not by directory. The one exception the contract allows is
+  the season key in multi-season mode, which *is* the first path segment under
+  ``data/``; that is recorded as path-derived and said out loud in
+  :attr:`Discovery.notes`. Competition ids carry the season key, which is what
+  stops two seasons of one day-and-division merging into a single ladder.
 * **Nothing absent is treated as evidence.** A round short of cards becomes a
   note for :mod:`~matchcentre.validate`, never a bye: byes need a closed team
   list, and only a human can close one (F1). A draw read off cards describes only
@@ -40,9 +40,9 @@ how many sets a match has cannot be scored either way round.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Collection, Iterable, Sequence
 
 from . import careers
 from . import format as fmt_mod
@@ -56,7 +56,7 @@ from .competition import (DRAW_DECLARED, DRAW_FROM_CARDS, Club, Competition,
                           years_played)
 from .config import (CompetitionConfig, Config, mode_among_labels,
                      teams_instruction, toml_key, toml_value)
-from .model import Match, MatchStatus, Rating, SetResult
+from .model import Match, MatchStatus, Rating, SetResult, all_blank, rubber_award
 from .scope import echoed, in_words
 from .scoring import Ruleset
 from .sheet import by_weeks, rounds_listed
@@ -66,8 +66,8 @@ from .stats import (duplicates, later_round_with_cards, player_names,
                     round_cards, unlisted_words)
 from .stats import other_cards
 
-__all__ = ["Discovery", "DiscoveryError", "discover", "disputed_weekday",
-           "filing_day", "season_key_for", "route"]
+__all__ = ["Discovery", "DiscoveryError", "FiledElsewhere", "discover",
+           "disputed_weekday", "filing_day", "season_key_for", "route"]
 
 
 class DiscoveryError(ValueError):
@@ -93,6 +93,66 @@ _NO_SEASON = "none"
 
 
 @dataclass(frozen=True, slots=True)
+class FiledElsewhere:
+    """A card of two of a competition's teams, filed under another of its season.
+
+    Found for a round's gap once every competition is built (:func:`discover`): a
+    card of round ``round`` between ``home`` and ``away``, both teams of the
+    competition it is handed to, that routing filed under ``filed_under`` for the
+    reason ``why`` (:func:`_why_filed_there`). ``source`` is its path, as every
+    message names a card (:func:`where`), and ``beside`` says it sits in a folder
+    holding that competition's own cards of the round.
+
+    A candidate and no more: whether it is the card a gap is short of is asked gap
+    by gap (:meth:`fits`), and what is said of it is what was read, never that it
+    is the missing card, since two nights can field teams of one name.
+    """
+
+    round: str
+    home: str
+    away: str
+    source: str
+    filed_under: str
+    why: str = ""
+    beside: bool = False
+
+    def fits(self, number: str, unaccounted: Collection[str]) -> bool:
+        """Round *number*'s gap, of the teams *unaccounted*, is one this card fills.
+
+        Both its teams are among them, sides either way round, as
+        :func:`~matchcentre.stats.round_cards` pairs a card with a fixture.
+        """
+        return (self.round == number and self.home in unaccounted
+                and self.away in unaccounted)
+
+    def told(self, name: Callable[[str], str], *, path: bool = True) -> str:
+        """What was read and where it went, in one sentence; *name* names a slug.
+
+        Without *path* for a message that reaches ``season.json``, which names only
+        its own competition's cards by path.
+        """
+        read = "read"
+        if path:
+            read += f" from {self.source}" + (
+                ", in the folder of this round's other cards," if self.beside else "")
+        return (f"A card of {name(self.home)} v {name(self.away)} for round "
+                f"{echoed(self.round)} was {read} and filed under "
+                f"{self.filed_under}" + (f", as {self.why}" if self.why else "")
+                + ".")
+
+    @staticmethod
+    def uncounted(filed: Sequence[FiledElsewhere]) -> str:
+        """What is said of *filed*, the cards told of one gap, once they are told.
+
+        Without its full stop, which a note can carry on past. One sentence for every
+        message that tells a card filed elsewhere, so that none says it otherwise.
+        """
+        return ("A card counts only where it is filed, so "
+                + ("that one is" if len(filed) == 1 else "those are")
+                + " not counted here")
+
+
+@dataclass(frozen=True, slots=True)
 class Discovery:
     """Everything one pass over ``data/`` produced.
 
@@ -113,6 +173,11 @@ class Discovery:
     a season key, or ``None`` for a note about the whole run. Both come out of one
     list of pairs, so they cannot drift. Empty when a caller built this by hand, and
     ``build.py --only`` then shows every note rather than guess.
+
+    ``strays`` are, by competition id, the cards filed under another competition of
+    its season that are of two of its teams in one of its rounds
+    (:class:`FiledElsewhere`), for ``card-missing`` to say where a card went. Only
+    competitions that have one are keys.
     """
 
     club: Club
@@ -123,6 +188,7 @@ class Discovery:
     club_name: str
     config_warnings: tuple[str, ...] = ()
     note_seasons: tuple[str | None, ...] = ()
+    strays: dict[str, tuple[FiledElsewhere, ...]] = field(default_factory=dict)
 
 
 # --- routing ----------------------------------------------------------------
@@ -308,24 +374,33 @@ def _same(a: str, b: str) -> bool:
 
 
 def filing_day(card: Card) -> str:
-    """The weekday a card is filed under: its date's, or else the one it prints.
+    """The weekday a card is filed under: its night, its date's, or the one it prints.
 
-    The date decides whenever it reads, because the date is also the match's date
-    and the year its season is taken from, and a card filed under one night and
-    dated on another is on a ladder its own date contradicts. ``card.weekday`` --
-    the word the card prints beside its date -- files a card whose date did not
-    read, and :func:`discover` notes a card on which the two disagree. Public, as
-    :func:`disputed_weekday` is, because ``tools/doctor.py`` says which of the two
-    files a card, and a second statement of the rule is one that can drift.
+    The night its competition line names decides whenever it names one
+    (``Tuesday Night Fixtures``), because every card of a competition prints it
+    whatever its date says. On a club's 201 cards, filing by the date and the
+    printed weekday made 17 competitions where there are 10: two for the 2 cards
+    dated two days after their night, and five for the 6 printing a range of days,
+    each filed by the Sunday it closes on. Then the date, which is also the
+    match's date and the year its season is taken from; then ``card.weekday`` --
+    the word the card prints beside its date -- for a card whose date did not
+    read. :func:`discover` notes a card on which the date disagrees with either.
+    Public, as :func:`disputed_weekday` is, because ``tools/doctor.py`` says which
+    of the three files a card, and a second statement of the rule is one that can
+    drift. Rejected: the folder a card sits in, which is a label a human typed;
+    and the config's ``day`` on its own, since a division letter does not pick the
+    night when two nights run a ``B1``.
     """
-    return weekday_of(card.date) or card.weekday.strip()
+    return card.night or weekday_of(card.date) or card.weekday.strip()
 
 
 def disputed_weekday(card: Card) -> str:
     """The weekday a card prints that its own date contradicts, or ``""``.
 
-    An undated card disputes nothing: the printed weekday is all there is, and the
-    reader's warning already says it is what files the card.
+    The printed weekday against the date, and never against the night: a card
+    dated off its night is :func:`_off_night_dates`'s to note, in the same note.
+    An undated card disputes nothing: the printed weekday and the night are all
+    there is, and the reader's warning already says which files the card.
     """
     dated, printed = weekday_of(card.date), card.weekday.strip()
     return printed if dated and printed and not _same(printed, dated) else ""
@@ -407,8 +482,9 @@ def discover(cards: Iterable[Card], rejected: Iterable[Rejection], *,
                 reason="cannot be filed: the card prints neither a division nor "
                        "a date or a weekday to take the day from",
                 detail="routing needs the division from the header and the "
-                       "weekday of the card's date, or the one printed beside "
-                       "it when the date does not read"))
+                       "night its competition line names, else the weekday of "
+                       "the card's date, or the one printed beside it when the "
+                       "date does not read"))
             continue
         if not filing_day(card):
             # A card with neither a readable date nor a printed weekday cannot be
@@ -424,7 +500,9 @@ def discover(cards: Iterable[Card], rejected: Iterable[Rejection], *,
                 detail=f"a date is read when it is printed as {date_forms()}"))
             continue
         disputed = disputed_weekday(card)
-        if disputed:
+        # A card its night files off its date is noted, with the weekday it
+        # prints, by _off_night_dates; one dated on its night is noted here.
+        if disputed and filing_day(card) == weekday_of(card.date):
             day_disputes.append((key,
                 f"{where(card)} is dated {card.date}, a {weekday_of(card.date)}, "
                 f"but the card prints {disputed}; the date is what it was filed "
@@ -437,6 +515,7 @@ def discover(cards: Iterable[Card], rejected: Iterable[Rejection], *,
     matches: dict[str, list[Match]] = {}
     kept: dict[str, list[Card]] = {}
 
+    built_all = []
     for comp_id in sorted(grouped):
         built = _build_competition(
             comp_id, grouped[comp_id], config=config, root=root,
@@ -444,10 +523,19 @@ def discover(cards: Iterable[Card], rejected: Iterable[Rejection], *,
             refused=refused, config_text=config_text)
         if built is None:
             continue        # every card in it was rejected; nothing to report on
-        competition, comp_matches, comp_cards, comp_notes = built
+        built_all.append(built)
+        competition, comp_matches, comp_cards, _, _ = built
         competitions.append(competition)
         matches[comp_id] = comp_matches
         kept[comp_id] = comp_cards
+    # The rounds' gaps wait for every competition, because a card a gap is short of
+    # can have been read and filed under another of the season (4.444), and is
+    # told in the gap's own note, where the competition's notes had it.
+    strays = _filed_elsewhere(competitions, matches, kept)
+    for competition, comp_matches, _, comp_notes, gaps_at in built_all:
+        comp_notes[gaps_at:gaps_at] = _shortfall_notes(
+            competition.id, competition.rounds, comp_matches, competition.teams,
+            competition.teams_declared, strays.get(competition.id, ()))
         notes.extend((competition.season_key, note) for note in comp_notes)
     notes.extend((None, note) for note in _season_folder_notes(
         competitions, matches, config=config, root=root))
@@ -474,7 +562,8 @@ def discover(cards: Iterable[Card], rejected: Iterable[Rejection], *,
                          + unreached + _names_shared(config, club, matches)
                          + _names_folded(config, club, matches, handed | split_handed)
                          + split_nobody),
-                     note_seasons=tuple(key for key, _ in notes))
+                     note_seasons=tuple(key for key, _ in notes),
+                     strays=strays)
 
 
 def _club_name(cards: dict[str, list[Card]]) -> str:
@@ -500,8 +589,12 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
                        root: Path, season_key: str, key_origin: str,
                        refused: list[Rejection], config_text: str | None = None
                        ) -> tuple[Competition, list[Match], list[Card],
-                                  list[str]] | None:
-    """One competition, its matches, the cards it kept, and its notes."""
+                                  list[str], int] | None:
+    """One competition, its matches, the cards it kept, its notes, and a place.
+
+    The place is where in the notes its rounds' gaps go, which :func:`discover`
+    words once every competition is built (:func:`_shortfall_notes`).
+    """
     declared = config.competition(comp_id)
     rules = config.ruleset_for(declared)
     set_rule = config.set_rule_for(declared)
@@ -533,13 +626,17 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
     rostered = [_registering(entry, kept, config) for entry, match, kept
                 in zip(sided, built, _registered_rosters(built))
                 if match.counts_as_played]
-    teams, teams_declared, unknown, team_notes = _build_teams(
+    teams, teams_declared, unknown, team_notes, strangers = _build_teams(
         comp_id, sided, config=config, declared=declared, rostered=rostered)
     notes.extend(team_notes)
 
     matches = [_build_match(entry, comp_id=comp_id, fmt=fmt, rules=rules,
                             config=config, unknown=unknown)
                for entry in sided]
+    shown, night_notes = _off_night_dates(comp_id, usable)
+    notes.extend(night_notes)
+    matches = [replace(m, date=shown[m.source]) if m.source in shown else m
+               for m in matches]
     # In the declared draw's order, which places a final it names its own way.
     draw = {rnd.number: rnd for rnd in declared.rounds} if declared else {}
     matches.sort(key=lambda m: (round_sort_key(m.round, draw), m.date, m.home,
@@ -562,9 +659,11 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
         "teams": merge_provenance(t.name_source for t in teams.values()),
         "players": merge_provenance(p.name_source for t in teams.values()
                                     for p in t.players),
+        # Over every team with a captain, a declared one on no card that counts
+        # included: asked of the squads, those were left out, and a division whose
+        # captains were all declared so read "derived".
         "captains": merge_provenance(
-            t.player(t.captain).captain_source for t in teams.values()
-            if t.captain and t.player(t.captain)),
+            t.captain_source for t in teams.values() if t.captain),
         "season": season_source,
         "rounds_total": total_source,
         "draw": (Provenance.DECLARED if draw_source == DRAW_DECLARED
@@ -575,6 +674,7 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
     competition = Competition(
         id=comp_id, day=day, division=division, fmt=fmt, rules=rules,
         season=season, season_key=season_key,
+        season_key_from=key_origin if season_key else "",
         label=declared.label if declared and declared.label else "",
         teams=teams, rounds=rounds, rounds_total=rounds_total,
         draw_outgrown_by=outgrown,
@@ -582,16 +682,63 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
         format_declared=format_declared, provenance=provenance,
         source=f"{len(usable)} scorecard{'' if len(usable) == 1 else 's'} "
                f"under {root}",
-        fill_in_names=fill_in_names,
+        fill_in_names=fill_in_names, strangers=strangers,
     )
 
     notes.extend(round_notes)
+    gaps_at = len(notes)
     notes.extend(_assumption_notes(competition, config, declared, key_origin,
                                    season_source, set_rule, matches,
                                    config_text=config_text))
     notes.extend(_merged_season_notes(competition, matches, config=config,
                                       root=root))
-    return competition, matches, usable, notes
+    return competition, matches, usable, notes, gaps_at
+
+
+def _off_night_dates(comp_id: str, cards: list[Card]
+                     ) -> tuple[dict[str, str], list[str]]:
+    """The date to show each card dated off its night on, by card, and a note each.
+
+    A card whose competition line names Tuesday nights and whose date is a
+    Thursday is filed under Tuesday (:func:`filing_day`), and its match is shown
+    on the date the round's other cards dated on a Tuesday print, when they agree
+    on one; when none is, or they print two, on its own. Measured on a club's 201
+    cards: each of the 2 dated two days after its night has 11 or 14 others in its
+    round, every one dated on the night and on one date. Decided here, where a
+    round's cards are together, and not by the reader, which sees one card; and a
+    note rather than a warning, since nothing is wrong with the result. Rejected:
+    the card's own date wherever it falls, which shows a Tuesday round's match on a
+    Thursday it was not played; and siblings on any night, which lets one stray
+    pick another's date. The card itself is never one of the others, since its
+    date is off the night; and an undated card is left alone, since a date its
+    round's other cards print is not one it printed.
+    """
+    shown: dict[str, str] = {}
+    notes: list[str] = []
+    for card in cards:
+        dated, night = weekday_of(card.date), card.night
+        if not (night and dated) or dated == night:
+            continue
+        rnd = round_key(card.round)
+        dates = sorted({other.date for other in cards
+                        if round_key(other.round) == rnd
+                        and weekday_of(other.date) == night})
+        disputed = disputed_weekday(card)
+        prints = f" (the card prints {disputed})" if disputed else ""
+        if len(dates) == 1:
+            shown[where(card)] = dates[0]
+            told = (f"shown on {dates[0]}, the date of every other card of round "
+                    f"{echoed(rnd)} on a {night}")
+        elif dates:
+            told = (f"shown on its own date, since the other cards of round "
+                    f"{echoed(rnd)} on a {night} are dated {in_words(dates)}")
+        else:
+            told = (f"shown on its own date, since no other card of round "
+                    f"{echoed(rnd)} is dated on a {night}")
+        notes.append(f"{comp_id}: {where(card)} is dated {card.date}, a {dated}"
+                     f"{prints}, but its competition line names {night} nights; "
+                     f"it is filed under {night} and {told}.")
+    return shown, notes
 
 
 def _resolve_sides(cards: list[Card], *, config: Config,
@@ -742,11 +889,13 @@ class _Squad:
 
 def _build_teams(comp_id: str, sided: list[_Sided], *, config: Config,
                  declared: CompetitionConfig | None, rostered: list[_Sided]
-                 ) -> tuple[dict[str, Team], bool, dict[str, str], list[str]]:
+                 ) -> tuple[dict[str, Team], bool, dict[str, str], list[str],
+                            tuple[str, ...]]:
     """The competition's teams, and whether the list is closed.
 
     Returns the teams, ``teams_declared``, a message per unrecognised team slug
-    for the matches that name it, and notes. ``teams_declared`` is the switch F1
+    for the matches that name it, notes, and the display name of each of those
+    teams, for ``Competition.strangers``. ``teams_declared`` is the switch F1
     hangs off: it is true only when a human has written the team list down, either
     as ``teams`` or as a draw whose fixtures name everybody, and it is what allows
     a bye to be materialised at all.
@@ -776,17 +925,20 @@ def _build_teams(comp_id: str, sided: list[_Sided], *, config: Config,
     order = list(closed) if closed else sorted(printed)
 
     unknown: dict[str, str] = {}
+    strangers: list[str] = []
     if teams_declared:
         for slug in sorted(set(printed) - set(closed)):
             hint = _did_you_mean(slug, closed)
             unknown[slug] = (
                 f"{printed[slug]!r} is not one of the teams declared for "
                 f"{comp_id}.{hint}")
+            strangers.append(_resolve_name(slug, printed[slug], config.team_names)[0])
     else:
         notes.extend(_lookalike_notes(comp_id, printed, appearances))
 
     squads = _squads(rostered, config=config)
     on_rosters = _squads(sided, config=config)     # registered or not
+    courts = _home_courts(sided)
     counted = {slug for entry in rostered for slug in (entry.home, entry.away)}
     waiting: list[str] = []
     teams: dict[str, Team] = {}
@@ -797,7 +949,7 @@ def _build_teams(comp_id: str, sided: list[_Sided], *, config: Config,
         waits = slug in printed and slug not in counted
         if waits:
             waiting.append(team_name)
-        players, captain, spelling, captain_notes = _players_of(
+        players, captain, spelling, captain_notes, marked = _players_of(
             slug, squads.get(slug, {}), comp_id=comp_id, config=config,
             declared=declared, team_name=team_name, waiting=waits,
             printed_names=set(on_rosters.get(slug, {})))
@@ -808,7 +960,8 @@ def _build_teams(comp_id: str, sided: list[_Sided], *, config: Config,
                                team_name),
             home_court=_int_for_team(declared.courts if declared else {}, slug,
                                      team_name),
-            captain=captain, players=players, captain_declared=spelling)
+            captain=captain, players=players, captain_declared=spelling,
+            courts_printed=courts.get(slug, ()), captain_marked=marked)
     if waiting:
         many = len(waiting) > 1
         notes.append(
@@ -817,7 +970,27 @@ def _build_teams(comp_id: str, sided: list[_Sided], *, config: Config,
             f"{'those teams' if many else 'that team'} and no (C) names "
             f"{'their captains' if many else 'its captain'}. A team's first card "
             f"that counts registers the players on its roster.")
-    return teams, teams_declared, unknown, notes
+    return teams, teams_declared, unknown, notes, tuple(strangers)
+
+
+def _home_courts(sided: list[_Sided]) -> dict[str, tuple[tuple[int, int], ...]]:
+    """The courts each team's home cards print: ``(court, cards)``, most first.
+
+    Every card prints the court it was played on, and a team's home cards print
+    its home court: on a real season of 201 cards, the court printed most at home
+    was the court its club had typed for each of the 54 teams with a home card,
+    and 2 of them printed a second. Every card filed counts, a washout with the
+    rest, since the night was drawn on that court whatever the rain did; and each
+    card, not each night, since that is what the comment the writer offers it
+    under says it counted. A tie is in order of the courts' numbers, and
+    :attr:`Team.court_printed` takes neither.
+    """
+    counts: dict[str, Counter[int]] = {}
+    for entry in sided:
+        if entry.card.court is not None:
+            counts.setdefault(entry.home, Counter())[entry.card.court] += 1
+    return {slug: tuple(sorted(count.items(), key=lambda item: (-item[1], item[0])))
+            for slug, count in counts.items()}
 
 
 def _closed_list(config: Config, declared: CompetitionConfig | None
@@ -1118,7 +1291,8 @@ def _spelling(held: str, printed: str, config: Config) -> str:
 def _players_of(team_slug_: str, squad: dict[str, _Squad], *, comp_id: str,
                 config: Config, declared: CompetitionConfig | None,
                 team_name: str, waiting: bool, printed_names: set[str]
-                ) -> tuple[tuple[Player, ...], str | None, str, list[str]]:
+                ) -> tuple[tuple[Player, ...], str | None, str, list[str],
+                           str | None]:
     """A team's registered players, and its captain if the cards agree on one.
 
     The captain comes from the ``(C)`` marks the cards carry. The predecessor
@@ -1130,7 +1304,10 @@ def _players_of(team_slug_: str, squad: dict[str, _Squad], *, comp_id: str,
 
     The third value is the spelling a declared captain was given, for
     ``Team.captain_declared``, and empty when the captain came from the cards or
-    the declaration held no name to slug.
+    the declaration held no name to slug. The fifth is the one player the (C)
+    marks name, for ``Team.captain_marked``, asked whether or not the club named a
+    captain, so that the writer can offer the marks beside a declared captain they
+    do not name.
 
     ``waiting`` is a team with cards and none of them counting. The caller's note
     says why its squad is empty, so a declared captain missing from it is not told
@@ -1151,6 +1328,7 @@ def _players_of(team_slug_: str, squad: dict[str, _Squad], *, comp_id: str,
     captain_slug: str | None = None
     captain_source = Provenance.CARD
     spelling = ""
+    marked = sorted(slug for slug, record in squad.items() if record.captain_marks)
     if declared_captain:
         try:
             captain_slug = _slug_player(declared_captain, config, team_slug_)
@@ -1160,8 +1338,6 @@ def _players_of(team_slug_: str, squad: dict[str, _Squad], *, comp_id: str,
             notes.append(f"[competitions.{comp_id}.captains] gives {team_name} a "
                          f"captain with no name in it ({declared_captain!r})")
     else:
-        marked = sorted(slug for slug, record in squad.items()
-                        if record.captain_marks)
         if len(marked) == 1:
             captain_slug = marked[0]
         elif len(marked) > 1:
@@ -1198,7 +1374,8 @@ def _players_of(team_slug_: str, squad: dict[str, _Squad], *, comp_id: str,
             f"{comp_id}: {team_name}'s declared captain ({declared_captain}) is "
             f"not on any of that team's cards that count, so no player carries the "
             f"mark. {why}")
-    return players, captain_slug, spelling, notes
+    return (players, captain_slug, spelling, notes,
+            marked[0] if len(marked) == 1 else None)
 
 
 def _listed(items: list[str]) -> str:
@@ -1323,13 +1500,20 @@ def _build_match(entry: _Sided, *, comp_id: str, fmt: fmt_mod.MatchFormat,
             # for is 0-0.
             home_forfeit=parsed.home_forfeit,
             away_forfeit=parsed.away_forfeit,
+            # Each side's 'Unspecified player' cells, so validate tells a place
+            # nobody filled from a name unread (4.448).
+            home_unnamed=parsed.home_unnamed,
+            away_unnamed=parsed.away_unnamed,
+            # And the side that retired, which the games cannot say (4.422).
+            home_retired=parsed.home_retired,
+            away_retired=parsed.away_retired,
         ))
 
     for slug in (entry.home, entry.away):
         if slug in unknown:
             warnings.append(unknown[slug])
 
-    return Match(
+    return _awarded(Match(
         competition=comp_id,
         round=round_key(card.round),
         home=entry.home,
@@ -1341,7 +1525,9 @@ def _build_match(entry: _Sided, *, comp_id: str, fmt: fmt_mod.MatchFormat,
         match_id=card.match_id,
         sets=tuple(sets),
         status=_match_status(card, sets),
-        forfeited_by=card.forfeited_by,
+        # The side the card gives the match up by, a walkover's too: a walkover
+        # is the forfeit its TOTAL row awards (4.418).
+        forfeited_by=card.forfeit_side,
         disputed=card.disputed,
         home_roster=_player_slugs([e.name for e in card.home_roster], config,
                                   warnings, entry.home),
@@ -1350,7 +1536,39 @@ def _build_match(entry: _Sided, *, comp_id: str, fmt: fmt_mod.MatchFormat,
         ratings=_ratings(card, config, entry.home, entry.away),
         source=where(card),
         warnings=tuple(warnings),
-    )
+    ))
+
+
+def _awarded(match: Match) -> Match:
+    """*match* with every rubber not played out scored as Match Centre scores it.
+
+    By :func:`~matchcentre.model.rubber_award` under the club's ``forfeit_award``
+    and set rule (4.421, 4.422): a rubber ticked Forfeit against one side a love
+    set, one a side retired from the other side's, raised to win it, and every
+    rubber of a match given up whole a love set to the side that came. Each such
+    set keeps the games its row prints as ``printed``, the record of what was
+    played. Scored here, once, so every reader of a set's games, the ladder, the
+    margins and the players' figures, reads the one scoring.
+    """
+    gave_up = match.given_up_by
+    sets = []
+    for result in match.sets:
+        award = rubber_award(status=result.status, home_games=result.home_games,
+                             away_games=result.away_games,
+                             games_to_win=result.rule.games_to_win,
+                             award=match.rules.forfeit_award,
+                             home_forfeit=result.home_forfeit,
+                             away_forfeit=result.away_forfeit,
+                             home_retired=result.home_retired,
+                             away_retired=result.away_retired,
+                             given_up_by=gave_up)
+        if award is not None:
+            side, home, away = award
+            result = replace(result, home_games=home, away_games=away,
+                             printed=(result.home_games, result.away_games),
+                             awarded_to=side)
+        sets.append(result)
+    return replace(match, sets=tuple(sets))
 
 
 def _player_slugs(names: Iterable[str], config: Config, warnings: list[str],
@@ -1405,14 +1623,19 @@ def _match_status(card: Card, sets: list[SetResult]) -> MatchStatus:
     unplayed" beside them, and nobody paid for it. Both boxes ticked on a 0-0 row
     award it to nobody, so a card of 0-0 rows ticking both on every one is still
     unplayed rather than a draw paid to two teams that both stayed at home.
+
+    A walkover is a forfeit too, though its card ticks Match Cancelled and no Match
+    Forfeited box: :attr:`~matchcentre.card.Card.forfeit_side` asks the box and the
+    walkover the reader read (``scorecard.walkover_side``), so a card Match Centre
+    writes as a match one side gave up counts, and is not called off.
     """
-    if card.forfeited_by:
+    if card.forfeit_side:
         return MatchStatus.FORFEIT
     if card.cancelled:
         return MatchStatus.CANCELLED
     if card.disputed:
         return MatchStatus.DISPUTED
-    if sets and not any(s.home_games or s.away_games or s.winner for s in sets):
+    if all_blank(sets):
         return MatchStatus.UNPLAYED
     return MatchStatus.PLAYED
 
@@ -1421,7 +1644,8 @@ def called_off(card: Card) -> bool:
     """Whether the card's own whole-match boxes call its match off.
 
     :func:`_match_status` asked of the boxes alone, before a row is read, so a card
-    ticking Match Forfeited as well is the forfeit it is read as, and counts. Such a
+    ticking Match Forfeited as well is the forfeit it is read as, and counts, as a
+    walkover does (:attr:`~matchcentre.card.Card.forfeit_side`). Such a
     card counts for nothing whatever its rows say, so nothing it prints beside them
     is evidence of how they were read, and :mod:`~matchcentre.validate` holds no
     card called off to its rows. Public, as :func:`filing_day` is, because
@@ -1524,8 +1748,7 @@ def _build_draw(comp_id: str, matches: list[Match], *,
         total = declared.season_length
         return (rounds, DRAW_DECLARED, total,
                 Provenance.DECLARED if total is not None else Provenance.DERIVED,
-                notes + _shortfall_notes(comp_id, rounds, matches, teams,
-                                         teams_declared), outgrown)
+                notes, outgrown)
 
     # No declared draw. Build the rounds the cards describe, using the
     # competition's own rule about byes: they need a closed team list.
@@ -1539,9 +1762,7 @@ def _build_draw(comp_id: str, matches: list[Match], *,
     _add_bye_only_rounds(rounds, stated)
     total = declared.rounds_total if declared else None
     source = Provenance.DECLARED if total is not None else Provenance.DERIVED
-    return (rounds, DRAW_FROM_CARDS, total, source,
-            notes + _shortfall_notes(comp_id, rounds, matches, teams,
-                                     teams_declared), ())
+    return (rounds, DRAW_FROM_CARDS, total, source, notes, ())
 
 
 def _stated_byes(declared: CompetitionConfig | None,
@@ -1657,57 +1878,88 @@ def _repeat_notes(comp_id: str, number: str,
 
 def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
                      matches: list[Match], teams: dict[str, Team],
-                     teams_declared: bool) -> list[str]:
+                     teams_declared: bool,
+                     strays: Sequence[FiledElsewhere] = ()) -> list[str]:
     """Rounds that look short of cards, said out loud instead of resolved.
 
     This is F1's whole point. A round missing a team is far more likely to be a
     scorecard that has not arrived than a team resting, and the predecessor read
     it as a rest: it credited a team that had played and won with its own average
     for a bye, and reported no errors at all.
+
+    Which teams a round leaves off is worked out whether or not the list was
+    declared (4.445): with it undeclared a round one card short of a full one leaves
+    two teams off and a rest leaves one, and only the one is a bye a checked list
+    would credit. A final is not held to the list, since it earns no ladder points
+    and its rounds are short by design, and so the fullest round is not a final.
+
+    A round after the last the cards reach, with none of its own, is a round still
+    to come and no gap (4.433): its declared byes wait for the night it is played.
+    Told apart by later cards, by the rule card-missing asks.
+
+    *strays* are cards of this competition's teams filed under another competition
+    (:class:`FiledElsewhere`); a gap one fits says what was read and where it went
+    in place of sending the club to find it (4.444).
     """
     notes: list[str] = []
     counts = {number: sum(1 for m in matches if m.round == number)
               for number in rounds}
     if not counts:
         return notes
-    busiest = max(counts.values())
+    busiest = max((count for number, count in counts.items()
+                   if not rounds[number].is_finals), default=0)
     awaiting: list[str] = []            # declared rounds with no cards at all
 
     order = sorted(rounds, key=lambda number: round_sort_key(number, rounds))
-    for number in order:
-        rnd = rounds[number]
-        if rnd.source == DRAW_DECLARED:
-            notes.extend(_declared_round_notes(comp_id, rnd, matches, teams,
-                                               awaiting))
-            continue
-        if teams_declared:
-            present = {slug for pair in rnd.fixtures for slug in pair}
-            present.update(rnd.byes)
-            absent = sorted(slug for slug in teams if slug not in present)
-            if len(absent) >= 2:
-                named = in_words(teams[slug].name for slug in absent)
-                notes.append(
-                    f"{comp_id}: round {echoed(number)} accounts for none of "
-                    f"{named}. "
-                    f"Two or more teams unaccounted for is missing scorecards, "
-                    f"not a bye, so no bye was credited — find the cards, or "
-                    f"declare the round's fixtures under "
-                    f"[[competitions.{comp_id}.rounds]].")
-        elif counts[number] < busiest:
-            notes.append(
-                f"{comp_id}: round {echoed(number)} has {counts[number]} card"
-                f"{'' if counts[number] == 1 else 's'} where the fullest round "
-                f"has {busiest}. With the team list undeclared that stays a gap: "
-                f"a bye is only ever credited from a team list you have checked, "
-                f"so uncomment teams = [...] under [competitions.{comp_id}] if "
-                f"the missing card is really a team resting.")
-
     # Two unlike things were reported in one sentence: a round in November nobody
     # has reached, and one the season went past with nothing exported from it. Told
     # apart by other cards and never by the clock -- the same rule, from the same
     # function, that decides `card-missing` in validate.py, because a club reading
     # this note and the dashboard must not be told two different things.
     later = later_round_with_cards(order, {n for n, c in counts.items() if c})
+    for number in order:
+        rnd = rounds[number]
+        absent = _unaccounted(rnd, teams, matches)
+        if rnd.source == DRAW_DECLARED:
+            notes.extend(_declared_round_notes(comp_id, rnd, matches, teams,
+                                               awaiting, strays))
+            # A draw typed in as its cards show the round lists no fixture of the
+            # teams whose card is missing; with the list declared that is the same
+            # gap, and the declared fixtures do not hide it.
+            if (teams_declared and counts[number] and not rnd.is_finals
+                    and len(absent) >= 2):
+                notes.append(_absent_note(
+                    comp_id, number, absent, teams, strays, teams_declared=True,
+                    step=f"add the fixtures it leaves out to the round under "
+                         f"[[competitions.{comp_id}.rounds]]"))
+            continue
+        if rnd.is_finals:
+            continue
+        if not (counts[number] or later[number]
+                or any(stray.fits(number, absent) for stray in strays)):
+            continue                    # a round still to come
+        step = (f"declare the round's fixtures under "
+                f"[[competitions.{comp_id}.rounds]]")
+        if teams_declared:
+            if len(absent) >= 2:
+                notes.append(_absent_note(comp_id, number, absent, teams, strays,
+                                          step=step, teams_declared=True))
+        elif counts[number] < busiest and len(absent) >= 2:
+            notes.append(_absent_note(
+                comp_id, number, absent, teams, strays, step=step,
+                teams_declared=False,
+                of=f", of the {len(teams)} teams the cards name"))
+        elif counts[number] < busiest and absent:
+            off = teams[absent[0]].name
+            # No file step: the same run's team-list note words that one from the
+            # file (4.192), and a second wording of it here would be a remedy told
+            # twice.
+            notes.append(
+                f"{comp_id}: round {echoed(number)} has no card of {off}, one of "
+                f"the {len(teams)} teams the cards name. With the team list "
+                f"undeclared that stays a gap; if {off} was resting, the bye is "
+                f"credited once you have checked the team list and declared it.")
+
     for passed, wording in (
         (True, "in the declared draw with no cards at all, and there are cards for "
                "later rounds, so the season has moved past {pronoun}. Those are "
@@ -1727,8 +1979,60 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
     return notes
 
 
+def _unaccounted(rnd: Round, teams: dict[str, Team],
+                 matches: list[Match]) -> list[str]:
+    """The teams of *teams* on no card, fixture or rest of *rnd*, in slug order.
+
+    The cards count as the fixtures do: a declared round's card of a fixture it does
+    not list is that card's own finding, and its two teams are not missing.
+    """
+    present = {slug for pair in rnd.fixtures for slug in pair}
+    present.update(rnd.byes)
+    present.update(slug for m in matches if m.round == rnd.number
+                   for slug in (m.home, m.away))
+    return sorted(slug for slug in teams if slug not in present)
+
+
+def _absent_note(comp_id: str, number: str, absent: list[str],
+                 teams: dict[str, Team], strays: Sequence[FiledElsewhere], *,
+                 step: str, teams_declared: bool, of: str = "") -> str:
+    """Round *number* accounts for none of *absent*, two or more teams.
+
+    A card filed elsewhere of two of them is told by what was read and where it
+    went (4.444), and the teams it leaves are what is still to find; one team left
+    is the one shape of a rest, which only a statement credits here, since the
+    card that would make it the one team off counts where it is filed. A statement
+    of a rest is read against a checked list alone: with the list read from the
+    cards, a byes table closes it to the teams the table names (F1), and every
+    other team on the cards is then an error, so the step asks for the list too.
+    """
+    head = (f"{comp_id}: round {echoed(number)} accounts for none of "
+            f"{in_words(teams[slug].name for slug in absent)}{of}.")
+    filed = [stray for stray in strays if stray.fits(number, absent)]
+    if not filed:
+        return (f"{head} Two or more teams unaccounted for is missing scorecards, "
+                f"not a bye, so no bye was credited — find the cards, or {step}.")
+    told = " ".join(stray.told(lambda slug: teams[slug].name) for stray in filed)
+    left = [slug for slug in absent
+            if not any(slug in (stray.home, stray.away) for stray in filed)]
+    uncounted = FiledElsewhere.uncounted(filed)
+    if not left:
+        return f"{head} {told} {uncounted}, and no bye was credited."
+    if len(left) == 1:
+        off = teams[left[0]].name
+        once = ("" if teams_declared
+                else " once you have checked the team list and declared it")
+        return (f"{head} {told} {uncounted}, and no bye was credited to {off}, the "
+                f"one team it leaves on no card. If {off} was resting, its line "
+                f"under [competitions.{comp_id}.byes] credits it{once}.")
+    return (f"{head} {told} Two or more teams unaccounted for is missing "
+            f"scorecards, not a bye, so no bye was credited — find the other "
+            f"cards, or {step}.")
+
+
 def _declared_round_notes(comp_id: str, rnd: Round, matches: list[Match],
-                          teams: dict[str, Team], awaiting: list[str]
+                          teams: dict[str, Team], awaiting: list[str],
+                          strays: Sequence[FiledElsewhere] = ()
                           ) -> list[str]:
     """What is missing from a round whose fixtures the club declared.
 
@@ -1740,6 +2044,10 @@ def _declared_round_notes(comp_id: str, rnd: Round, matches: list[Match],
     matters for a club that declares ten rounds in August; the caller splits that
     list again, because a round the season went past and a round it has not reached
     are two more things that must not be reported in the same words.
+
+    A missing fixture a card filed under another competition fits (*strays*) is told
+    by what was read and where it went, and its round, read after all, is not one
+    with no cards (4.444).
     """
     if not rnd.fixtures:
         return [f"{comp_id}: round {echoed(rnd.number)} is declared with no "
@@ -1754,22 +2062,99 @@ def _declared_round_notes(comp_id: str, rnd: Round, matches: list[Match],
     missing = counted.missing
     if not missing:
         return []
-    if not counted.carded and not counted.unlisted:
+    filed = [stray for stray in strays
+             if any(stray.fits(rnd.number, pair) for pair in missing)]
+    if not counted.carded and not counted.unlisted and not filed:
         awaiting.append(rnd.number)
         return []
 
-    listed = in_words([
-        f"{teams[home].name if home in teams else home} v "
-        f"{teams[away].name if away in teams else away}"
-        for home, away in missing])
-    return [f"{comp_id}: round {echoed(rnd.number)} has cards for "
+    def name(slug: str) -> str:
+        return teams[slug].name if slug in teams else slug
+
+    listed = in_words([f"{name(home)} v {name(away)}" for home, away in missing])
+    said = (f"{comp_id}: round {echoed(rnd.number)} has cards for "
             f"{counted.carded} of its {len(rnd.fixtures)} "
             f"declared fixture{'' if len(rnd.fixtures) == 1 else 's'} — {listed} "
             f"{'is' if len(missing) == 1 else 'are'} missing"
-            + ("" if counted.carded
+            + ("" if counted.carded or not counted.unlisted
                else f", and {unlisted_words(len(counted.unlisted))}")
-            + ". The draw says the "
-            f"fixture exists, so that is a card to find, not a team resting."]
+            + ".")
+    if not filed:
+        return [said + " The draw says the fixture exists, so that is a card to "
+                       "find, not a team resting."]
+    told = " ".join(stray.told(name) for stray in filed)
+    left = sum(1 for pair in missing
+               if not any(stray.fits(rnd.number, pair) for stray in filed))
+    if not left:
+        return [f"{said} {told} {FiledElsewhere.uncounted(filed)}."]
+    return [f"{said} {told} The draw says the "
+            f"{'other fixture exists' if left == 1 else 'other fixtures exist'}, "
+            f"so {'that is a card' if left == 1 else 'those are cards'} to find, "
+            f"not a team resting."]
+
+
+def _filed_elsewhere(competitions: Sequence[Competition],
+                     matches: dict[str, list[Match]],
+                     kept: dict[str, list[Card]]
+                     ) -> dict[str, tuple[FiledElsewhere, ...]]:
+    """By competition, the cards of two of its teams in its rounds filed elsewhere.
+
+    Looked for among the other competitions of the same season key only, since a
+    card of another season is not this season's card under any filing, and by the
+    two teams and the round label together: the division alone would make every
+    card of a genuine second night of one division fit every gap of the first. The
+    folder a card sits in is said, as evidence, and never asked, since a folder is
+    not a result. Nothing is moved: the card counts where routing filed it. In the
+    order the competitions and their matches are built in, which is sorted, so a
+    rebuild says them in the same order.
+    """
+    out: dict[str, tuple[FiledElsewhere, ...]] = {}
+    for comp in competitions:
+        folders: dict[str, set[Path]] = {}
+        for card in kept[comp.id]:
+            folders.setdefault(round_key(card.round), set()).add(
+                Path(card.source).parent)
+        found: list[FiledElsewhere] = []
+        for other in competitions:
+            if other.id == comp.id or other.season_key != comp.season_key:
+                continue
+            read = {where(card): card for card in kept[other.id]}
+            for match in matches[other.id]:
+                if (match.round not in comp.rounds or match.home not in comp.teams
+                        or match.away not in comp.teams):
+                    continue
+                card = read[match.source]
+                found.append(FiledElsewhere(
+                    round=match.round, home=match.home, away=match.away,
+                    source=match.source, filed_under=other.id,
+                    why=_why_filed_there(card, comp),
+                    beside=Path(card.source).parent in folders.get(match.round, ())))
+        if found:
+            out[comp.id] = tuple(found)
+    return out
+
+
+def _why_filed_there(card: Card, competition: Competition) -> str:
+    """Why routing filed *card* away from *competition*, in the card's own terms.
+
+    The weekday is :func:`filing_day`'s, asked once, as ``tools/doctor.py`` asks
+    it, so that a change to which of the date and the printed day files a card
+    reaches this sentence without a second edit.
+    """
+    dated, day = weekday_of(card.date), filing_day(card)
+    division = card.division.strip()
+    why: list[str] = []
+    if not _same(day, competition.day):
+        if dated and day == dated:
+            why.append(f"it is dated {card.date}, a {day}")
+        elif day:
+            why.append(f"it is filed by the {day} it prints")
+        else:
+            why.append("no weekday reads on it")
+    if not _same(division, competition.division):
+        why.append(f"it prints division {division}" if division
+                   else "it prints no division")
+    return in_words(why)
 
 
 def _merged_season_notes(competition: Competition, matches: list[Match], *,
@@ -2020,16 +2405,17 @@ def _namesake_notes(config: Config, club: Club,
     grades needs all four teams in the one entry, since the entry is keyed on the
     name, and that entry does separate people in both.
 
-    Except in multi-season mode, where the careers page joins one name across
-    grades as well as seasons: there an entry naming a team in each of two grades
-    gives each of two people a career of their own, and the warning's advice to
-    leave it off would merge them. The decider is asked about a build printing
-    names, whatever this run prints. A run that withholds them writes no careers
-    page, but the warning is advice about a line of the config, and the same
-    config built with ``--players names`` writes one. Rejected: the single-season
-    note for a run that withholds names, true of that run and not of the line.
-    Measured when it was given, a club that left the line off as told and then
-    built with ``--players names`` got one career for two people.
+    Except where the careers page is written, which is every build printing
+    names, in either mode (4.430): it joins one name across competitions as well
+    as seasons, so there an entry naming a team in each of two competitions gives
+    each of two people an entry of their own, and the warning's advice to leave
+    it off would merge them. The decider is asked about a build printing names,
+    whatever this run prints. A run that withholds them writes no careers page,
+    but the warning is advice about a line of the config, and the same config
+    built with ``--players names`` writes one. Rejected: the warning for a run
+    that withholds names, true of that run's pages and not of the line. Measured
+    when it was given, a club that left the line off as told and then built with
+    ``--players names`` got one career for two people.
 
     Whether the entry separated anybody is judged on the records it leaves on one
     page: the name, and the name with each of its teams, two or more of them on a
@@ -2650,8 +3036,9 @@ def _corrections_split_away(config: Config, club: Club,
 
 def _pages_shown(config: Config, club: Club,
                  matches: dict[str, list[Match]]) -> list[dict[str, str]]:
-    """The names the dashboard shows, a page at a time: each competition's, and in
-    multi-season mode the careers page, under each player's newest name."""
+    """The names the dashboard shows, a page at a time: each competition's, and the
+    careers page every build printing names writes, under each player's newest
+    name."""
     shown = {comp.id: player_names(matches.get(comp.id, ()), comp)
              for comp in club.competitions}
     pages = list(shown.values())
@@ -2690,8 +3077,8 @@ def _names_shared(config: Config, club: Club,
     joining it to the one that is right, and it leaves one person as two records.
 
     Judged on the names the dashboard shows, a page at a time: each competition's,
-    and in multi-season mode the careers page, which puts every season and grade on
-    one page under each player's newest name. Asked of a build printing names, as
+    and the careers page, which puts every season and competition on one page under
+    each player's newest name. Asked of a build printing names, as
     the namesakes note asks, since it is advice about a line of the config. Two
     records under one name on no one page are shown apart, so the club whole at
     once would call a line wrong that no page shows. A line under any of the
@@ -2902,9 +3289,10 @@ def _assumption_notes(comp: Competition, config: Config,
         notes.append(
             f"{comp.id}: the team list was read from the cards — "
             f"{len(comp.teams)} teams: {listed}. Check it, then {step}. Until "
-            f"you do, no bye is ever credited (a missing card and a resting team "
-            f"look identical from here) and a misspelt banner becomes a team of "
-            f"its own.")
+            f"you do, no bye is ever credited (a team on no card of a round is "
+            f"resting only if it is one of the division's, and only a list you "
+            f"have checked says so) and a misspelt banner becomes a team of its "
+            f"own.")
 
     guessed = sorted(slug for slug, team in comp.teams.items()
                      if team.name_source is Provenance.DERIVED)
@@ -2918,8 +3306,7 @@ def _assumption_notes(comp: Competition, config: Config,
 
     from_cards = sorted(
         team.name for team in comp.teams.values()
-        if team.captain and team.player(team.captain)
-        and team.player(team.captain).captain_source is Provenance.CARD)
+        if team.captain and team.captain_source is Provenance.CARD)
     # A team whose cards carry more than one (C) already has its own note from
     # _players_of naming the players, so it is left out here rather than told
     # twice in less useful words.

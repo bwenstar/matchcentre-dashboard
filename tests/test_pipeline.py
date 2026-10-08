@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1159,6 +1160,100 @@ class TestAWashoutStoppedHalfwayLeavesNothingBehind(SeasonCase):
         self.assertEqual(exported[0]["status"], "cancelled")
 
 
+class TestARoundEveryCardOfWhichWasCalledOffSaysNoneOfItsCardsWasPlayed(SeasonCase):
+    """A round says how many of its cards count as played, beside how many it has.
+
+    4.452. ``rounds[].played`` is true of a round with any card, and the Matches view
+    headed a round ``played``, in the green pill, by it alone. Measured through
+    ``build.py`` and headless Chrome on cardwriter cards
+    (/tmp/mcf/scratch/UNPLAYED/before.txt): rounds 1 and 3 played and round 2 two
+    Match Cancelled cards, one stopped at 6-1 6-0 3-0 and one with no games, gave
+    round 2 ``played: true`` and ``cards: 2``, and its heading read ``played`` over
+    two cards that each said ``cancelled — counts for nothing``. Now the round also
+    carries ``cards_played``, by ``Match.counts_as_played``, so the page has a count
+    to read and no rule of its own to keep. Here round 4 is two Match Cancelled
+    cards, one 6-2 6-1 0-0 0-0 and one 0-0, before a round 5 played in full.
+
+    ``played`` keeps its meaning, and the week stays among the rounds played, as
+    the association's sheet counts it. Rejected: ``played`` meaning a card that
+    counts, which would head the round ``not played yet`` over its own cards and
+    have the overview's Latest round skip a called-off last week for an older one;
+    dropping the round from ``meta.rounds_played``; and the cards the season's
+    totals keep, ``meta.regular_fixtures``' rule, which would call a night the cards
+    disagree about not played where each card of it was.
+    """
+
+    WASHED, NEXT = "4", "5"
+    DATES = {WASHED: "2026-09-08", NEXT: "2026-09-15"}
+    CARDS = (
+        (WASHED, "riverside-rockets", "hilltop-aces",
+         ((6, 2), (6, 1), (0, 0), (0, 0)), True),
+        (WASHED, "lakeside-spinners", "parkview-wanderers", ((0, 0),) * 4, True),
+        (NEXT, "riverside-rockets", "lakeside-spinners",
+         ((6, 3), (6, 4), (4, 6), (6, 2)), False),
+        (NEXT, "hilltop-aces", "parkview-wanderers",
+         ((6, 3), (6, 4), (6, 1), (6, 2)), False),
+    )
+
+    @classmethod
+    def extra_cards(cls):
+        for index, (rnd, home, away, scores, cancelled) in enumerate(cls.CARDS, 1):
+            home_name, home_players = TEAMS[home]
+            away_name, away_players = TEAMS[away]
+            folder = cls.data / f"Round{rnd}"
+            folder.mkdir(parents=True, exist_ok=True)
+            called_off = dict(cancelled=True, verb="VS", winner=cw.NO_TICK)
+            cw.write_card_file(folder / f"{home}-{away}.pdf", cw.CardSpec(
+                date=cls.DATES[rnd], round_label=rnd, division="B",
+                court=f"{index + 10:02d}", match_id=f"452{index:04d}",
+                home_name=home_name, away_name=away_name,
+                rows=rows_for(scores, home_players, away_players),
+                home_roster=squad_for(home, home_players)[0],
+                away_roster=squad_for(away, away_players)[0],
+                **(called_off if cancelled else {})))
+
+    def rounds(self, season: dict | None = None) -> dict[str, dict]:
+        return {r["number"]: r for r in (season or self.season)["rounds"]}
+
+    def test_the_round_called_off_has_its_cards_and_none_of_them_played(self):
+        # The pre-flight: both cards arrived as washouts, the one with games on it
+        # too, or the count below is of something else.
+        self.assertEqual(sorted((m["status"], m["home_games"], m["counts_as_played"])
+                                for m in self.season["matches"]
+                                if m["round"] == self.WASHED),
+                         [("cancelled", 0, False), ("cancelled", 12, False)])
+        washed = self.rounds()[self.WASHED]
+        self.assertEqual((washed["played"], washed["cards"], washed.get("cards_played")),
+                         (True, 2, 0))
+
+    def test_a_round_played_in_full_counts_every_card(self):
+        for number in ("1", "2", "3", self.NEXT):
+            with self.subTest(round=number):
+                found = self.rounds()[number]
+                self.assertEqual((found["played"], found["cards"],
+                                  found.get("cards_played")), (True, 2, 2))
+
+    def test_the_week_is_still_among_the_rounds_played(self):
+        # As the association's sheet counts it, over a washed-out round, and as the
+        # overview's Latest round shows it, with its cards.
+        self.assertEqual(self.season["meta"]["rounds_played"], 5)
+
+    def test_the_count_is_the_one_rule_s_answer(self):
+        # One rule, one function: asked of `Match.counts_as_played`, the count follows
+        # it wherever it says a card was played. Told the washout's cards were and
+        # round 5's were not, round 4 counts 2 and round 5 none.
+        with mock.patch.object(Match, "counts_as_played",
+                               new=property(lambda match: match.round != self.NEXT)):
+            season = export.build_season(
+                self.matches, competition=self.competition, source_dir=self.data,
+                generated="2026-09-10T12:00:00", club=self.discovery.club,
+                cards=self.cards, rejected=self.rejected,
+                seasons_mode=self.config.seasons_mode)
+        rounds = self.rounds(season)
+        self.assertEqual((rounds[self.WASHED].get("cards_played"),
+                          rounds[self.NEXT].get("cards_played")), (2, 0))
+
+
 class TestARowIsReadForMistakesExactlyWhereItsNumbersCount(SeasonCase):
     """The checks that read a card row by row read exactly the matches that count.
 
@@ -1195,9 +1290,13 @@ class TestARowIsReadForMistakesExactlyWhereItsNumbersCount(SeasonCase):
 
     @classmethod
     def extra_cards(cls):
+        # 4.442: Ana, on the rockets' roster block and on court, printed with no
+        # rating on the washout, since ratings-missing no longer asks the stranger,
+        # who is on no line of it, and so needs a rostered player to read there.
         cls.washout = cls.card("washout", "4", "2026-09-08", "riverside-rockets",
                                "hilltop-aces", ((6, 2), (6, 1), (0, 0), (0, 0)), "09",
-                               cancelled=True, verb="VS", winner=cw.NO_TICK)
+                               cancelled=True, verb="VS", winner=cw.NO_TICK,
+                               unrated=("Ana Fernandez",))
         cls.disputed = cls.card("disputed", "4", "2026-09-08", "lakeside-spinners",
                                 "parkview-wanderers", ((6, 3), (6, 2), (2, 6), (6, 4)),
                                 "10", disputed=True)
@@ -1206,12 +1305,12 @@ class TestARowIsReadForMistakesExactlyWhereItsNumbersCount(SeasonCase):
                                "11", forfeited_by="away")
 
     @classmethod
-    def card(cls, name, rnd, date, home, away, scores, court, **flags):
+    def card(cls, name, rnd, date, home, away, scores, court, unrated=(), **flags):
         """A card with the stranger in the home side's second place on court.
 
         `rows_for` puts the second place in both doubles and the second singles, so he
         is on the washout's first rubber, which finished 6-2, and on its two empty
-        ones.
+        ones. *unrated* are home players whose roster line prints no rating.
         """
         home_name, home_players = TEAMS[home]
         away_name, away_players = TEAMS[away]
@@ -1222,13 +1321,18 @@ class TestARowIsReadForMistakesExactlyWhereItsNumbersCount(SeasonCase):
             date=date, round_label=rnd, division="B", court=court,
             match_id=f"4{court}0001", home_name=home_name, away_name=away_name,
             rows=rows_for(scores, on_court, away_players),
-            home_roster=squad_for(home, home_players)[0],
+            home_roster=tuple(
+                dataclasses.replace(row, singles=None, doubles=None)
+                if row.name in unrated else row
+                for row in squad_for(home, home_players)[0]),
             away_roster=squad_for(away, away_players)[0], **flags))
 
-    # The stranger reaches three of the five checks: names against rosters, ratings,
-    # and one player on two courts. The matches below are made by hand to reach the
-    # other two, one mark each: a 9-2, which cannot happen under first-to-6, and a
-    # roster leaving out every player the cards registered to its team.
+    # The stranger reaches two of the five checks: names against rosters and one
+    # player on two courts, and the washout's unrated Ana a third, ratings (4.442
+    # moved it, since the stranger is on no roster line to rate). The matches
+    # below are made by hand to reach the other two, one mark each: a 9-2, which
+    # cannot happen under first-to-6, and a roster leaving out every player the
+    # cards registered to its team.
     MARKS = ("roster-incomplete", "set-implausible")
 
     def row_by_row(self, match) -> list[str]:
@@ -1247,14 +1351,15 @@ class TestARowIsReadForMistakesExactlyWhereItsNumbersCount(SeasonCase):
                      status=status, home_roster=("zed-quill",), **kw)
 
     def test_the_stranger_is_reported_on_each_card_that_counts_and_not_the_washout(self):
-        # Worked out on paper: three places on court on each card, so three findings
-        # on the disputed card, three on the forfeit and none on the washout, whose
-        # only finding is the one that names it. And not the stranger "on two courts"
+        # Worked out on paper: three places on court on each card, one name, so one
+        # finding on the disputed card naming its three rows, one on the forfeit and
+        # none on the washout, whose only finding is the one that names it (4.432
+        # moved it from three a card, one a row). And not the stranger "on two courts"
         # in round four, once on the disputed card and once on a night that did not
         # happen, which is the error this season has when the washout is read.
         found = [i for i in self.report.issues if i.rule == "unknown-player"]
         self.assertEqual(sorted(Path(i.detail).name for i in found),
-                         ["disputed.pdf"] * 3 + ["forfeit.pdf"] * 3)
+                         ["disputed.pdf", "forfeit.pdf"])
         about_the_washout = [i.rule for i in self.report.issues
                              if str(self.washout) in i.detail]
         self.assertEqual(about_the_washout, ["no-result"])
@@ -1463,6 +1568,9 @@ class TestACardThatCountsForNothingRegistersNobodyAndRatesNobody(SeasonCase):
         """
         path = str(self.not_yet)
         label = "R4 lakeside-spinners v parkview-wanderers"
+        # 4.424 moved this: a card not called off whose every row reads 0-0 is
+        # still told this one finding, which now says what its rows read and what
+        # to do if the match was played.
         self.assertEqual(
             [i for i in self.report.issues
              if path in (i.subject, i.detail) or path in i.message
@@ -1470,7 +1578,9 @@ class TestACardThatCountsForNothingRegistersNobodyAndRatesNobody(SeasonCase):
             [validate.Issue(
                 rule="no-result", severity=validate.WARNING,
                 message=f"{label}: recorded as unplayed, so it is not counted in "
-                        "the ladder.",
+                        "the ladder. Every set row reads 0-0: if the match was "
+                        "played, enter its result in Match Centre and export the "
+                        "card again.",
                 subject=label, detail=path)])
 
     def test_a_card_that_counts_registers_and_rates_with_no_result_on_it(self):
@@ -2123,6 +2233,293 @@ class TestARubberWithNoGamesIsNotReportedAsATie(SeasonCase):
         self.assertEqual(rockets["games_won"], EXPECTED_GAMES_FOR[self.HOME] + 9)
 
 
+# --- a club whose play stops at a fixed time ---------------------------------
+#
+# Rounds after the season's three, between the same four teams, so that one
+# competition holds them all. On every card the first three rubbers finish and
+# the last stops where the night did: short of a finished set, level, or with no
+# games on it at all, and nothing ticked to say why.
+
+STOPPED_DATES = {"4": "2026-09-08", "5": "2026-09-15", "6": "2026-09-22",
+                 "7": "2026-09-29", "9": "2026-10-13", "10": "2026-10-20",
+                 "11": "2026-10-27"}
+STOPPED_FINISHED = ((6, 2), (6, 3), (6, 4))
+
+
+def write_stopped_cards(data_dir: Path, fixtures) -> list[Path]:
+    """One card per ``(round, home, away, last_row)``, its first three sets won.
+
+    The last row is printed as played with names on both sides and no box ticked,
+    which is how a card reads when play stopped at the club's finishing time.
+    """
+    written = []
+    teams = list(TEAMS)
+    for rnd, home, away, last in fixtures:
+        home_name, home_players = TEAMS[home]
+        away_name, away_players = TEAMS[away]
+        folder = data_dir / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        written.append(cw.write_card_file(
+            folder / f"{home_name.title().replace(' ', '')}-"
+                     f"{away_name.title().replace(' ', '')}.pdf",
+            short_spec(home, away, date=STOPPED_DATES[rnd], round_label=rnd,
+                       court=f"6{teams.index(home)}",
+                       match_id=f"60{int(rnd):02d}0{teams.index(home)}"
+                                f"{teams.index(away)}",
+                       rows=rows_for(STOPPED_FINISHED + (last,), home_players,
+                                     away_players))))
+    return written
+
+
+class TestAClubThatStopsOnTimeIsToldEachRuleOnceForTheCompetition(SeasonCase):
+    """Seven nights whose last rubber stopped short, and one that finished.
+
+    Row 4.434. ``set-unfinished``, ``set-tied`` and ``set-no-games`` were raised
+    once a rubber, so a club whose play stops at 9 p.m. whatever the score had a
+    warning a night. Measured on the tree before, on these cards built by
+    ``build.py``: seven warnings under the three rules, one a card, in 30 report
+    lines, four or five each with the card's path; now three, in 21. The
+    integrator's count on a club's real export was 69 of its 267 warnings, none
+    of them about a match left undecided. Each is true, and 69 of them bury the
+    findings that want doing.
+
+    Now one finding a competition for each rule, listing every rubber with its
+    score in the order the nights were played, and its cards in the detail.
+    Rejected: folding per card, which on these cards (and on that export, where
+    every played match finished three or four sets) folds nothing, as no card
+    has two such rows; and a ``[rules]`` key silencing the three, a club rule no
+    card states, under which a misread row would go unreported.
+    """
+
+    STOPPED = (
+        ("4", "riverside-rockets", "hilltop-aces", (5, 4)),
+        ("4", "lakeside-spinners", "parkview-wanderers", (3, 3)),
+        ("5", "riverside-rockets", "lakeside-spinners", (4, 2)),
+        ("5", "hilltop-aces", "parkview-wanderers", (0, 0)),
+        ("6", "riverside-rockets", "parkview-wanderers", (3, 2)),
+        ("6", "hilltop-aces", "lakeside-spinners", (5, 5)),
+        ("7", "riverside-rockets", "hilltop-aces", (0, 0)),
+        # The control: a night that finished, on no list.
+        ("7", "lakeside-spinners", "parkview-wanderers", (6, 1)),
+    )
+
+    @classmethod
+    def extra_cards(cls):
+        cls.stopped = write_stopped_cards(cls.data, cls.STOPPED)
+
+    def found(self, rule):
+        return [i for i in self.report.issues if i.rule == rule]
+
+    def test_three_rubbers_short_of_a_set_are_one_warning_naming_each(self):
+        found, = self.found("set-unfinished")
+        self.assertEqual(
+            found.message,
+            "3 rubbers stopped short of a finished set under first-to-6 (first "
+            "to 6) and are not marked forfeit, retired or incomplete, so nobody "
+            "is credited them: R4 riverside-rockets v hilltop-aces d2 5-4, R5 "
+            "riverside-rockets v lakeside-spinners d2 4-2 and R6 "
+            "riverside-rockets v parkview-wanderers d2 3-2.")
+
+    def test_two_level_rubbers_are_one_warning_that_keeps_their_scores(self):
+        found, = self.found("set-tied")
+        self.assertEqual(
+            found.message,
+            "2 rubbers were left level, so nobody won those sets and nothing on "
+            "the cards says why they stopped: R4 lakeside-spinners v "
+            "parkview-wanderers d2 3-3 and R6 hilltop-aces v lakeside-spinners "
+            "d2 5-5.")
+
+    def test_two_empty_rubbers_are_one_warning_that_quotes_no_score(self):
+        found, = self.found("set-no-games")
+        self.assertEqual(
+            found.message,
+            "2 rubbers have no games on their rows at all and no box ticked, so "
+            "nobody is credited them: R5 hilltop-aces v parkview-wanderers d2 "
+            "and R7 riverside-rockets v hilltop-aces d2. A rubber that was never "
+            "played reads like this when the card does not say so.")
+
+    def test_each_finding_names_its_cards_and_no_subject_to_print_twice(self):
+        # The subject a lone rubber has is its key, and the message begins with
+        # it; a list of them is no key, and printed as one it would be the list a
+        # second time under "subject:" in the report and in brackets on the page.
+        cards = {rule: [str(self.stopped[i]) for i in rows]
+                 for rule, rows in (("set-unfinished", (0, 2, 4)),
+                                    ("set-tied", (1, 5)),
+                                    ("set-no-games", (3, 6)))}
+        for rule, paths in cards.items():
+            with self.subTest(rule=rule):
+                found, = self.found(rule)
+                self.assertEqual(found.detail, ", ".join(paths))
+                self.assertEqual(found.subject, "")
+                printed, = [w for w in self.season["validation"]["warnings"]
+                            if w["rule"] == rule]
+                self.assertEqual(printed["subject"], "")
+                self.assertFalse(printed["subject_said"])
+
+    def test_a_night_that_finished_is_on_no_list(self):
+        control = str(self.stopped[-1])
+        for rule in ("set-unfinished", "set-tied", "set-no-games"):
+            with self.subTest(rule=rule):
+                found, = self.found(rule)
+                self.assertNotIn("R7 lakeside-spinners", found.message)
+                self.assertNotIn(control, found.detail)
+
+    def test_they_are_still_warnings_and_fail_nothing(self):
+        # A misread row reads the same way, and the games on it still count.
+        for rule in ("set-unfinished", "set-tied", "set-no-games"):
+            with self.subTest(rule=rule):
+                self.assertEqual([i.severity for i in self.found(rule)],
+                                 [validate.WARNING])
+        self.assertEqual(self.report.errors, ())
+
+
+class TestALoneStoppedRubberReadsAsItAlwaysHas(SeasonCase):
+    """One rubber of each of the three rules in the competition.
+
+    Row 4.434. A lone rubber is the finding it was, byte for byte: its key as the
+    subject, which the message begins with, and its card as the detail. Rejected:
+    the listed sentence for one ("1 rubbers stopped short ..."), which reads as a
+    form filled in and moves every finding a club with one such night has already
+    read.
+    """
+
+    STOPPED = (
+        ("4", "riverside-rockets", "hilltop-aces", (5, 4)),
+        ("4", "lakeside-spinners", "parkview-wanderers", (3, 3)),
+        ("5", "riverside-rockets", "lakeside-spinners", (0, 0)),
+    )
+
+    @classmethod
+    def extra_cards(cls):
+        cls.stopped = write_stopped_cards(cls.data, cls.STOPPED)
+
+    def test_each_is_the_finding_it_was(self):
+        unfinished = "R4 riverside-rockets v hilltop-aces d2"
+        tied = "R4 lakeside-spinners v parkview-wanderers d2"
+        empty = "R5 riverside-rockets v lakeside-spinners d2"
+        expected = [
+            validate.Issue(
+                rule="set-no-games", severity=validate.WARNING,
+                message=f"{empty}: no games on the row at all and no box ticked, "
+                        "so nobody is credited the set. A rubber that was never "
+                        "played reads like this when the card does not say so.",
+                subject=empty, detail=str(self.stopped[2])),
+            validate.Issue(
+                rule="set-tied", severity=validate.WARNING,
+                message=f"{tied}: level at 3-3, so nobody won the set and nothing "
+                        "on the card says why it stopped.",
+                subject=tied, detail=str(self.stopped[1])),
+            validate.Issue(
+                rule="set-unfinished", severity=validate.WARNING,
+                message=f"{unfinished}: 5-4 is not a finished set under "
+                        "first-to-6 (first to 6) and is not marked forfeit, "
+                        "retired or incomplete, so nobody is credited the set.",
+                subject=unfinished, detail=str(self.stopped[0]))]
+        self.assertEqual(sorted((i for i in self.report.issues if i.rule in
+                                 ("set-unfinished", "set-tied", "set-no-games")),
+                                key=lambda i: i.rule), expected)
+
+
+class TestARubberThatLeavesItsMatchUndecidedIsListedWithTheRest(SeasonCase):
+    """A night that stopped two rubbers short, beside one that stopped one short.
+
+    Row 4.434. The rockets' card finished two sets of the three a result needs,
+    so ``no-result`` already names that match and says why it is not on the
+    ladder. Its two rows are listed in the one ``set-unfinished`` with the
+    spinners' row, since what each row says is the same, and the match is told
+    once, under the rule that is about the match. Rejected: a finding of their
+    own for such rows, a second ``set-unfinished`` in the competition chosen by
+    what another rule found.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        cls.short = write_short_card(cls.data, "4", STOPPED_DATES["4"],
+                                     "riverside-rockets", "hilltop-aces",
+                                     finished=2, marked=False, verb="VS",
+                                     winner=cw.NO_TICK)
+        cls.stopped = write_stopped_cards(cls.data, (
+            ("4", "lakeside-spinners", "parkview-wanderers", (5, 4)),))
+
+    def test_the_rows_of_the_undecided_match_are_in_the_one_list(self):
+        found, = [i for i in self.report.issues if i.rule == "set-unfinished"]
+        self.assertIn("3 rubbers stopped short of a finished set", found.message)
+        # In the order the matches are told everywhere else, which within a
+        # round is by their labels.
+        self.assertTrue(found.message.endswith(
+            ": R4 lakeside-spinners v parkview-wanderers d2 5-4, R4 "
+            "riverside-rockets v hilltop-aces s2 4-3 and R4 riverside-rockets v "
+            "hilltop-aces d2 3-2."), found.message)
+        # A card with two of the rows is named once.
+        self.assertEqual(found.detail, f"{self.stopped[0]}, {self.short}")
+
+    def test_the_match_itself_is_told_once_under_no_result(self):
+        told = [i.subject for i in self.report.issues if i.rule == "no-result"]
+        self.assertEqual(told, ["R4 riverside-rockets v hilltop-aces"])
+
+
+class TestAListIsInPlayedOrderAndMissesNoRowOfACard(SeasonCase):
+    """Nights in rounds 9 and 10, and a card with two rows left level.
+
+    Row 4.434. A list is in the order the matches were played, round 9 before
+    round 10, though ``Round10`` sorts before ``Round9`` as a folder and "10"
+    before "9" as text. The cards in rounds 4 to 7 cannot tell those orders apart:
+    measured, a list sorted by card path or by round as text passed every test
+    written on them, and on these cards puts round 10 first in the sentence and
+    its card first in the detail.
+
+    The round 11 card's second singles and second doubles were both left level,
+    the competition's only ``set-tied`` rows, so its match is short of a result
+    too. Both are on the one list, which says "the card" of them and not "the
+    cards", and the card is named once. Measured, the lone sentence chosen
+    whenever a rule's rows share a card tells the first row and the second
+    nowhere. Rejected: that lone sentence, a mistake told nowhere where it should
+    be told once.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        cls.stopped = write_stopped_cards(cls.data, (
+            ("9", "riverside-rockets", "hilltop-aces", (5, 4)),
+            ("10", "lakeside-spinners", "parkview-wanderers", (4, 2))))
+        home_name, home_players = TEAMS["riverside-rockets"]
+        away_name, away_players = TEAMS["lakeside-spinners"]
+        folder = cls.data / "Round11"
+        folder.mkdir(parents=True, exist_ok=True)
+        cls.level = cw.write_card_file(
+            folder / "RiversideRockets-LakesideSpinners.pdf",
+            short_spec("riverside-rockets", "lakeside-spinners",
+                       date=STOPPED_DATES["11"], round_label="11", court="69",
+                       match_id="6011002", verb="VS", winner=cw.NO_TICK,
+                       rows=rows_for(((6, 3), (6, 4), (3, 3), (2, 2)),
+                                     home_players, away_players)))
+
+    def found(self, rule):
+        found, = [i for i in self.report.issues if i.rule == rule]
+        return found
+
+    def test_round_nine_is_listed_before_round_ten_and_its_card_first(self):
+        found = self.found("set-unfinished")
+        self.assertEqual(
+            found.message,
+            "2 rubbers stopped short of a finished set under first-to-6 (first "
+            "to 6) and are not marked forfeit, retired or incomplete, so nobody "
+            "is credited them: R9 riverside-rockets v hilltop-aces d2 5-4 and R10 "
+            "lakeside-spinners v parkview-wanderers d2 4-2.")
+        self.assertEqual(found.detail, f"{self.stopped[0]}, {self.stopped[1]}")
+
+    def test_both_level_rows_of_one_card_are_listed_and_the_card_named_once(self):
+        found = self.found("set-tied")
+        self.assertEqual(
+            found.message,
+            "2 rubbers were left level, so nobody won those sets and nothing on "
+            "the card says why they stopped: R11 riverside-rockets v "
+            "lakeside-spinners s2 3-3 and R11 riverside-rockets v "
+            "lakeside-spinners d2 2-2.")
+        self.assertEqual(found.detail, str(self.level))
+        self.assertEqual(found.subject, "")
+
+
 # --- round four, a side short -----------------------------------------------
 #
 # Cards on which a side did not have the players for every rubber. At module level
@@ -2217,7 +2614,7 @@ def write_short_card(data_dir: Path, round_label: str, date: str, home: str,
                      disputed: bool = False, **fields) -> Path:
     """One card on which only ``finished`` of the four sets finished.
 
-    With ``marked`` the sets that stopped are ticked as retired, which is a card
+    With ``marked`` the sets that stopped are ticked Incomplete, which is a card
     saying why; without it they are left as played at 4-3 and 3-2, which is a set
     nobody said was stopped and may be a set length read wrongly.
     """
@@ -2226,8 +2623,11 @@ def write_short_card(data_dir: Path, round_label: str, date: str, home: str,
     scores = FINISHED_ROWS[:finished] + UNFINISHED_ROWS[:4 - finished]
     rows = list(rows_for(scores, home_players, away_players))
     if marked:
+        # 4.422 moved this: ticked Retired against the away side, which now gives
+        # home the set raised to 6 games, and these are sets that stopped.
         for index in range(finished, 4):
-            rows[index] = dataclasses.replace(rows[index], status=SetStatus.RETIRED,
+            rows[index] = dataclasses.replace(rows[index],
+                                              status=SetStatus.INCOMPLETE,
                                               status_side="away")
     teams = list(TEAMS)
     fields.setdefault("match_id", f"5{int(round_label):03d}0"
@@ -2425,7 +2825,10 @@ class TestARubberNobodyCameForGoesToTheSideThatDid(SeasonCase):
                 self.assertIs(result.status, SetStatus.FORFEIT)
                 self.assertTrue(result.away_forfeit)
                 self.assertFalse(result.home_forfeit)
-                self.assertEqual((result.home_games, result.away_games), (0, 0))
+                # 4.421 moved this: scored the love set, 6-0, and printed 0-0.
+                self.assertEqual((result.home_games, result.away_games), (6, 0))
+                self.assertEqual((result.printed_home_games,
+                                  result.printed_away_games), (0, 0))
 
     def test_each_forfeited_rubber_goes_to_the_side_that_turned_up(self):
         # 0-0 on the row, so the winner cannot have come from the games.
@@ -2446,18 +2849,24 @@ class TestARubberNobodyCameForGoesToTheSideThatDid(SeasonCase):
     def test_the_night_is_a_win_and_not_a_draw(self):
         # Level on games at 8-8, so the sets are what separate them, and two of the
         # three the rockets are credited are rubbers the aces did not come for.
+        # 4.421 moved this: those two are love sets, so the night is 20-8 on the
+        # games it is scored at, and decided on them; 8-8 is the games printed.
         match = self.match()
-        self.assertEqual(match.home_games, match.away_games)
+        self.assertEqual((match.home_games, match.away_games), (20, 8))
+        self.assertEqual((match.printed_home_games, match.printed_away_games),
+                         (8, 8))
         self.assertEqual(match.winner, "home")
         self.assertFalse(match.is_draw)
-        self.assertEqual(match.decided_by, "sets")
+        self.assertEqual(match.decided_by, "games")
 
     def test_the_points_are_a_win_and_a_loss_rather_than_two_draws(self):
         # games-bonus, worked out on paper: win 4 + 0.8 for eight games, loss 2 +
         # 0.8. A draw would have paid 3.8 to each of them, which is the figure the
         # ladder carried before the ticks reached the set.
+        # 4.421 moved this: win 4 + 2.0 for the twenty games its love sets score,
+        # where it was 4.8 for the eight printed.
         match = self.match()
-        self.assertAlmostEqual(match.points_for(self.HOME), 4.8)
+        self.assertAlmostEqual(match.points_for(self.HOME), 6.0)
         self.assertAlmostEqual(match.points_for(self.AWAY), 2.8)
 
     # --- the card's own cross-checks ----------------------------------------
@@ -2484,10 +2893,13 @@ class TestARubberNobodyCameForGoesToTheSideThatDid(SeasonCase):
         # won of twelve, and the twelfth is the one she lost on court. Ten of twelve
         # with one in neither column is what her record read before the fix: a rubber
         # in her played count that she is shown neither winning nor losing.
+        # 4.421 moved this: the singles nobody came for was played by nobody, so
+        # it is in no player's record (4.289), and the rockets' Share says so;
+        # she is credited the two doubles she played, ten won of eleven.
         players = {p["slug"]: p for p in self.season["players"]}
         ana = players["ana-fernandez"]
-        self.assertEqual(ana["sets_played"], 12)
-        self.assertEqual(ana["sets_won"], 11)
+        self.assertEqual(ana["sets_played"], 11)
+        self.assertEqual(ana["sets_won"], 10)
         self.assertEqual(ana["sets_lost"], 1)
 
     def test_a_rubber_credited_to_a_team_is_credited_to_no_absent_person(self):
@@ -2559,6 +2971,14 @@ class TestACardOfRubbersNobodyCameForIsANightThatHappened(SeasonCase):
     box for that, it was not ticked, and ``forfeit_award`` prices that box; ticking
     it on the club's behalf would price the night by a rule the card never invoked.
 
+    4.420 moved the price, and not the status: the night is still ``PLAYED`` with
+    the box unticked, and it is paid what a match given up whole is worth, through
+    ``Match.given_up_by``, since every row 0-0 and ticked against one side is that
+    side giving the night up, and 4.33's three tellings are paid alike. Measured on
+    the tree before this (/tmp/mcf/scratch/CANCEL/probe/describe.py): 4.0 and 2.0
+    under games-bonus here, where the box telling of the same night paid 4.0 and
+    2.0 as-played and 6.4 and 2.0 under full-games.
+
     And 0-0 is not a contest, which :class:`TestALevelScorelineSaysWhatDecidedTheMatch`
     already says of a washout. Measured with only the status fixed: ``tied_on_games``
     true and ``decided_by`` ``"sets"``, so the page printed "level on games, decided
@@ -2608,31 +3028,39 @@ class TestACardOfRubbersNobodyCameForIsANightThatHappened(SeasonCase):
 
     def test_every_rubber_is_awarded_to_the_side_that_turned_up(self):
         # The premise, and the class above's fix: four rubbers, four winners.
-        self.assertEqual([(s.status, s.home_games, s.away_games, s.winner)
+        # 4.421 moved this: each is scored the love set Match Centre totals it
+        # as, 6-0, where it was 0-0, and keeps the 0-0 it prints.
+        self.assertEqual([(s.status, s.home_games, s.away_games, s.winner,
+                           s.printed_home_games, s.printed_away_games)
                           for s in self.match().sets],
-                         [(SetStatus.FORFEIT, 0, 0, "home")] * 4)
+                         [(SetStatus.FORFEIT, 6, 0, "home", 0, 0)] * 4)
 
     def test_the_night_happened(self):
         self.assertIs(self.match().status, MatchStatus.PLAYED)
 
     def test_it_is_a_win_and_a_loss(self):
-        # games-bonus on paper: a win is 4 and a loss 2, plus a tenth per game won,
-        # and nobody won a game.
+        # 4.420 moved this: every row 0-0 and ticked Forfeit against away is a
+        # match away gave up whole, paid as the box is under games-bonus's
+        # full-games award, 6.4 for a win with every rubber a love set and 0 to
+        # the side that gave it up, where it was a played 4.0 and 2.0.
         match = self.match()
         self.assertEqual(match.winner, "home")
-        self.assertEqual(match.decided_by, "sets")
-        self.assertAlmostEqual(match.points_for(self.HOME), 4.0)
-        self.assertAlmostEqual(match.points_for(self.AWAY), 2.0)
+        # 4.421 moved this: decided on the 24-0 its love sets score, where 0-0
+        # was decided on sets.
+        self.assertEqual(match.decided_by, "games")
+        self.assertAlmostEqual(match.points_for(self.HOME), 6.4)
+        self.assertAlmostEqual(match.points_for(self.AWAY), 0.0)
 
     def test_the_ladder_counts_it_and_every_team_has_played_four(self):
-        # Worked out on paper from EXPECTED_POINTS: rockets 19.0 + 4.0; spinners
+        # Worked out on paper from EXPECTED_POINTS: rockets 19.0 + 6.4; spinners
         # 15.8 + 6.1 for a 21-game win; wanderers 11.1 + 3.5 for a 15-game loss;
-        # aces 10.7 + 2.0. And every team four matches, so the order is settled.
+        # aces 10.7 + 0. And every team four matches, so the order is settled.
+        # 4.420 moved this: the walkover pays 6.4 and 0, where it paid 4.0 and 2.0.
         teams = {t["slug"]: t for t in self.season["teams"]}
-        for slug, points in (("riverside-rockets", 23.0),
+        for slug, points in (("riverside-rockets", 25.4),
                              ("lakeside-spinners", 21.9),
                              ("parkview-wanderers", 14.6),
-                             ("hilltop-aces", 12.7)):
+                             ("hilltop-aces", 10.7)):
             with self.subTest(team=slug):
                 self.assertEqual(teams[slug]["played"], 4)
                 self.assertAlmostEqual(teams[slug]["points"], points, places=6)
@@ -2649,8 +3077,12 @@ class TestACardOfRubbersNobodyCameForIsANightThatHappened(SeasonCase):
 
     def test_it_is_not_described_as_level_on_games(self):
         row = self.exported()
-        self.assertEqual((row["home_games"], row["away_games"]), (0, 0))
-        self.assertEqual(row["decided_by"], "sets")
+        # 4.421 moved this: scored 24-0, its love sets, and printed 0-0, where it
+        # was 0-0 decided on sets.
+        self.assertEqual((row["home_games"], row["away_games"]), (24, 0))
+        self.assertEqual((row["printed_home_games"], row["printed_away_games"]),
+                         (0, 0))
+        self.assertEqual(row["decided_by"], "games")
         self.assertFalse(row["tied_on_games"],
                          "nobody played a game, so nobody was level on games")
 
@@ -2730,7 +3162,9 @@ class CardsBesideTheSeasonCase(SeasonCase):
         """Every finding naming the card read at *where*, or its match, whole.
 
         *where* is the card's path, with `` page 2`` after it for a second page, and
-        is matched whole, since the first page's path begins the second's.
+        is matched whole, since the first page's path begins the second's. A finding
+        folded over several cards (4.434) lists their paths in its detail, joined by
+        ", ", and is about each of them.
         """
         where = str(where)
         named = re.compile(re.escape(where) + r"(?! page \d)")
@@ -2738,6 +3172,7 @@ class CardsBesideTheSeasonCase(SeasonCase):
                   if m.source == where}
         return [i for i in (self.report.issues if issues is None else issues)
                 if where in (i.subject, i.detail) or named.search(i.message)
+                or where in i.detail.split(", ")
                 or any(i.subject == label or i.subject.startswith(f"{label} ")
                        for label in labels)]
 
@@ -2754,6 +3189,50 @@ class CardsBesideTheSeasonCase(SeasonCase):
             message=f"{label}: recorded as {recorded}, so it is not counted in the "
                     "ladder.",
             subject=label, detail=str(where))
+
+
+class TestAFindingThatListsSeveralCardsIsAboutEachOfThem(CardsBesideTheSeasonCase):
+    """A finding folded over several cards, found by :meth:`about` for each of them.
+
+    The rows that stop with no box ticked are told once a competition (4.434), with
+    no subject and every card the finding lists joined by ", " in its detail. Here,
+    in round 4, two cards beside the season each left 0-0 on one row with nothing
+    ticked, and a third whose every row finished. ``about`` matched a detail whole,
+    so it found the folded warning for neither card, and a test asking it whether a
+    card was told of a stopped row was told no whatever the card was told: CANCEL's
+    walkover test, that the side that never came owes no names, passed under the
+    mutant that read its walkover as a night played and told its 0-0 row as never
+    played.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        cls.first = cls.card("first", "4", "riverside-rockets", "hilltop-aces",
+                             ((6, 2), (6, 3), (0, 0), (6, 1)))
+        cls.second = cls.card("second", "4", "lakeside-spinners",
+                              "parkview-wanderers", ((2, 6), (0, 0), (3, 6), (1, 6)))
+        cls.finished = cls.card("finished", "5", "riverside-rockets",
+                                "lakeside-spinners", FINISHED_ROWS)
+
+    def test_a_folded_warning_is_about_each_card_it_lists(self):
+        for where in (self.first, self.second):
+            with self.subTest(card=where.name):
+                found, = [i for i in self.about(where) if i.rule == "set-no-games"]
+                self.assertEqual(found.subject, "")
+                self.assertIn(str(where), found.detail.split(", "))
+
+    def test_it_is_about_no_card_it_does_not_list(self):
+        self.assertEqual([i.rule for i in self.about(self.finished)
+                          if i.rule == "set-no-games"], [])
+
+    def test_a_second_page_it_lists_is_not_the_first_page(self):
+        # The first page's path begins the second's, so a path is a listed card
+        # whole or not at all.
+        folded = validate.Issue(rule="set-no-games", severity=validate.WARNING,
+                                message="2 rubbers have no games on their rows.",
+                                detail=f"{self.finished} page 2, {self.second}")
+        self.assertEqual(self.about(self.finished, [folded]), [])
+        self.assertEqual(self.about(self.second, [folded]), [folded])
 
 
 class TestACardThatCountsOrWasReadEmptyIsStillCrossChecked(CardsBesideTheSeasonCase):
@@ -2931,6 +3410,9 @@ class TestF6WarnsACardNothingConfirmsOfTheVerbItPrints(CardsBesideTheSeasonCase)
 
     Rejected: counting a printed verb nobody can use as available, which would
     silence F6 on a card nothing confirms.
+
+    4.424 moved the card read empty: claiming no result over rows that record
+    none, it is told its ``no-result`` alone.
     """
 
     BARE = dict(omit_totals=True, winner=cw.NO_TICK)
@@ -2977,11 +3459,13 @@ class TestF6WarnsACardNothingConfirmsOfTheVerbItPrints(CardsBesideTheSeasonCase)
         self.assertEqual(self.f6_of(self.none), self.warned(
             self.none, "TOTAL row, result verb or winner tick"))
 
-    def test_a_card_read_empty_is_told_the_vs_nothing_else_names(self):
-        self.assertEqual(self.f6_of(self.empty), self.warned(
-            self.empty, "TOTAL row or winner tick, and it prints 'VS' between the "
-                        "team names instead of a result"))
-        self.assertNotIn("verb-absent", self.rules(self.empty))
+    def test_a_card_read_empty_is_told_its_no_result_alone(self):
+        # 4.424 moved this: it was F6's warning naming the 'VS', its one finding
+        # about it. Ticking nothing over 0-0 rows and 'VS', the card records
+        # nothing, so no-result is its one finding, saying what its rows read
+        # and what to do if the match was played.
+        self.assertEqual(self.f6_of(self.empty), [])
+        self.assertEqual(self.rules(self.empty), ["no-result"])
 
 
 class TestAnF6ErrorOnAForfeitSaysTheTickDisagreesWithTheBox(CardsBesideTheSeasonCase):
@@ -3074,10 +3558,15 @@ class TestAWashoutIsHeldToNothingItPrintsBesideItsRows(CardsBesideTheSeasonCase)
     rows, and a ladder that leaves the match out may be missing a result. Measured
     on the tree before this (/tmp/t7/scratch/VW/probes/p233.py, cases v, f2, d and
     l): exit 0, ``recorded as cancelled`` alone, for every one. Now that one
-    finding is an error that names what the card claims, and the rows are still
-    held to nothing. Rejected: a second finding beside ``no-result``, which is one
-    card's mistake reported twice; and holding the winner to the rows, which is F6
-    over a night nobody counts.
+    finding names what the card claims, and the rows are still held to nothing.
+    Rejected: a second finding beside ``no-result``, which is one card's mistake
+    reported twice; and holding the winner to the rows, which is F6 over a night
+    nobody counts.
+
+    4.419 moved this: the finding was an error (4.233), and is the warning again,
+    saying the Match Cancelled tick decides, since that is the owner's ruling and
+    how Match Centre itself exports a washout with the side ahead ticked
+    (/tmp/mcf/scratch/CANCEL/probe/probe.py).
     """
 
     @classmethod
@@ -3107,18 +3596,19 @@ class TestAWashoutIsHeldToNothingItPrintsBesideItsRows(CardsBesideTheSeasonCase)
         cls.split, cls.ticked = str(path), f"{path} page 2"
 
     def washout(self, path, claims=""):
-        """The one finding about a washout, an error naming *claims* if any."""
+        """The one finding about a washout, the warning naming *claims* if any."""
         match, = [m for m in self.matches if m.source == str(path)]
         self.assertIs(match.status, MatchStatus.CANCELLED)
         found = self.no_result(path, f"R{match.round} {match.home} v {match.away}",
                                "cancelled")
         if not claims:
             return [found]
+        # 4.419 moved this: a warning, the claims overruled by the Cancelled tick.
+        said = claims.replace("the card ticks", "the card also ticks", 1)
         return [dataclasses.replace(
-            found, severity=validate.ERROR,
-            message=found.message.replace(
-                " ladder.", f" ladder, but {claims}. A match called off has no "
-                            "winner, so the card contradicts itself."))]
+            found, severity=validate.WARNING,
+            message=f"{found.message} {said[:1].upper()}{said[1:]}; the Match "
+                    "Cancelled tick decides.")]
 
     def test_a_washout_with_nothing_to_check_its_rows_by_is_not_warned_of_it(self):
         self.assertEqual(self.about(self.bare), self.washout(self.bare))
@@ -3126,13 +3616,14 @@ class TestAWashoutIsHeldToNothingItPrintsBesideItsRows(CardsBesideTheSeasonCase)
     def test_a_washout_printing_a_word_nobody_knows_is_not_warned_of_it(self):
         self.assertEqual(self.about(self.unknown), self.washout(self.unknown))
 
-    def test_a_washout_naming_a_winner_over_blank_rows_is_one_error_naming_both(self):
+    # 4.419 moved this: one warning, where it was one error.
+    def test_a_washout_naming_a_winner_over_blank_rows_is_one_warning_naming_both(self):
         self.assertEqual(self.about(self.winner), self.washout(
             self.winner, "the card ticks home as Match Winner and the verb "
                          "'DEFEATS' means home won"))
 
     def test_a_washout_whose_total_and_verb_contradict_its_rows_is_held_to_neither(self):
-        # Its verb names a winner, and that is the error; that the verb and the
+        # Its verb names a winner, and that is the warning's; that the verb and the
         # TOTAL row disagree with the rows is still said by nothing.
         self.assertEqual(self.about(self.reversed), self.washout(
             self.reversed, "the verb 'LOSES TO' means away won"))
@@ -3146,11 +3637,9 @@ class TestAWashoutIsHeldToNothingItPrintsBesideItsRows(CardsBesideTheSeasonCase)
         self.assertEqual(self.about(self.ticked), self.washout(
             self.ticked, "the card ticks away as Match Winner"))
 
-    def test_the_washouts_naming_a_winner_are_the_run_s_only_errors(self):
-        self.assertEqual(
-            sorted((i.rule, i.detail) for i in self.report.errors),
-            sorted(("no-result", str(path)) for path in (
-                self.winner, self.reversed, self.split, self.ticked)))
+    # 4.419 moved this: they were the run's only errors, and now fail nothing.
+    def test_the_washouts_naming_a_winner_fail_nothing(self):
+        self.assertEqual([(i.rule, i.detail) for i in self.report.errors], [])
 
     def test_the_cards_held_to_nothing_are_the_ones_discover_calls_off(self):
         # Asked, not restated: validate reads the boxes by the same function that
@@ -3164,6 +3653,737 @@ class TestAWashoutIsHeldToNothingItPrintsBesideItsRows(CardsBesideTheSeasonCase)
         self.assertEqual(sorted({i.rule for i in self.about(self.reversed,
                                                               report.issues)}),
                          ["F6", "no-result", "totals-mismatch"])
+
+
+class TestACancelledCardTotallingAWalkoverIsScoredAsTheForfeitItIs(
+        CardsBesideTheSeasonCase):
+    """Six walkovers beside the season, each ticking Match Cancelled and no Forfeit box.
+
+    Match Centre writes a match one side gave up as Match Cancelled ticked, the side
+    that came named the winner, and a TOTAL row of every rubber to it as a love
+    set. On the owner's export 4 of 201 cards are written so, 9 of the 18 errors of
+    the run being the cancelled cards that name a winner. The owner, of two of them:
+    not a cancelled match, but a winner paid 6.4 and a loser 0.0. Here, in rounds 4
+    to 6: the earlier draft's card, naming one away player and printing Match
+    Centre's 'Unspecified player' in the 3 other away cells; its mirror, the home
+    side's 6 cells the placeholder; the owner's card over play, 2-6, 6-4, 3-6 and
+    0-0, ticking home and printing DEFEATS over 4-0 and 24-0; that card's mirror,
+    over 6-2, 4-6, 6-3 and 0-0; a card printing the placeholder in all 12 cells;
+    and one naming its winner by its verb alone.
+
+    Measured on the tree before this (/tmp/mcf/scratch/CANCEL/probe/probe.py,
+    cases wo-blank-home-3cells, wo-blank-away-mirror, wo-play-home, wo-play-away,
+    wo-blank-both-placeholder and wo-no-tick-verb-only, each beside the season
+    through build.py): exit 1 on every one, status ``cancelled``, no points, the
+    one ``no-result`` error "A match called off has no winner, so the card
+    contradicts itself", and on the placeholder cards ``players-unrecorded``
+    saying "this match was called off". Now each is the forfeit its TOTAL row
+    describes, by the side the winner does not name, paid what the config says a
+    forfeit is worth (6.4 and 0.0 under ``games-bonus``, 4.420), with no error.
+    A walkover over rows that hold play is told once that its rows hold games its
+    TOTAL row does not count (``walkover-rows-played``). Rejected: B-1's condition
+    that the rows hold no play, which the owner's card over play fails though its
+    TOTAL row is the award; and holding a walkover's unfinished rows against it
+    as evidence, since on that card the side that gave the match up led on the
+    rubbers played, a set stood unfinished, and Match Centre still awards it
+    none. Rows that are evidence, every set finished, are read against a walkover
+    as against a box (the next class).
+    """
+
+    PLACE = "Unspecified player"
+    CAME = {"home": "away", "away": "home"}
+    EMPTY = ((0, 0),) * 4
+
+    @classmethod
+    def placed(cls, home, away, side, cells=None):
+        """0-0 rows naming *side*'s players by placeholder, in *cells* or all."""
+        rows, count = [], 0
+        for row in rows_for(cls.EMPTY, TEAMS[home][1], TEAMS[away][1]):
+            names = []
+            for name in getattr(row, f"{side}_players"):
+                count += 1
+                names.append(cls.PLACE if cells is None or count in cells else name)
+            rows.append(dataclasses.replace(row, **{f"{side}_players": tuple(names)}))
+        return tuple(rows)
+
+    @classmethod
+    def extra_cards(cls):
+        award, award_away = (4, 24, 0, 0), (0, 0, 24, 4)
+        cls.three = cls.card(
+            "three", "4", "riverside-rockets", "hilltop-aces", None,
+            rows=cls.placed("riverside-rockets", "hilltop-aces", "away", {2, 4, 6}),
+            cancelled=True, winner="home", verb="DEFEATS", totals=award)
+        cls.mirror = cls.card(
+            "mirror", "4", "lakeside-spinners", "parkview-wanderers", None,
+            rows=cls.placed("lakeside-spinners", "parkview-wanderers", "home"),
+            cancelled=True, winner="away", verb="DEF. BY", totals=award_away)
+        cls.play = cls.card("play", "5", "riverside-rockets", "lakeside-spinners",
+                            ((2, 6), (6, 4), (3, 6), (0, 0)), cancelled=True,
+                            winner="home", verb="DEFEATS", totals=award)
+        cls.play_away = cls.card("play-away", "5", "hilltop-aces",
+                                 "parkview-wanderers",
+                                 ((6, 2), (4, 6), (6, 3), (0, 0)), cancelled=True,
+                                 winner="away", verb="DEF. BY", totals=award_away)
+        both = cls.placed("riverside-rockets", "parkview-wanderers", "home")
+        cls.both = cls.card(
+            "both", "6", "riverside-rockets", "parkview-wanderers", None,
+            rows=tuple(dataclasses.replace(row, away_players=(cls.PLACE,)
+                                           * len(row.away_players))
+                       for row in both),
+            cancelled=True, winner="home", verb="DEFEATS", totals=award)
+        cls.verb_only = cls.card("verb-only", "6", "lakeside-spinners",
+                                 "hilltop-aces", cls.EMPTY, cancelled=True,
+                                 winner=cw.NO_TICK, verb="DEFEATS", totals=award)
+        cls.gave_up = {cls.three: "away", cls.mirror: "home", cls.play: "away",
+                       cls.play_away: "home", cls.both: "away",
+                       cls.verb_only: "away"}
+
+    def match_of(self, where):
+        match, = [m for m in self.matches if m.source == str(where)]
+        return match
+
+    def card_of(self, where):
+        card, = [c for c in self.cards if validate._where(c) == str(where)]
+        return card
+
+    def test_each_is_a_forfeit_by_the_side_its_winner_does_not_name(self):
+        for where, side in self.gave_up.items():
+            with self.subTest(card=where.name):
+                match = self.match_of(where)
+                self.assertIs(match.status, MatchStatus.FORFEIT)
+                self.assertEqual(match.forfeited_by, side)
+                self.assertTrue(match.decided)
+                self.assertEqual(match.winner, self.CAME[side])
+
+    def test_each_is_paid_what_a_forfeit_is_worth_and_the_side_that_gave_up_none(self):
+        for where, side in self.gave_up.items():
+            with self.subTest(card=where.name):
+                match = self.match_of(where)
+                paid = (match.points_for(match.team_for(self.CAME[side])),
+                        match.points_for(match.team_for(side)))
+                # A match called off is paid nothing, None to each side.
+                self.assertNotIn(None, paid)
+                self.assertAlmostEqual(paid[0], 6.4)
+                self.assertEqual(paid[1], 0.0)
+
+    def test_the_card_keeps_its_boxes_as_printed_beside_the_reading(self):
+        for where, side in self.gave_up.items():
+            with self.subTest(card=where.name):
+                card = self.card_of(where)
+                self.assertEqual(card.walkover_by, side)
+                self.assertIsNone(card.forfeited_by)
+                self.assertTrue(card.cancelled)
+                self.assertFalse(discover_mod.called_off(card))
+                self.assertTrue(card.confirmed)
+
+    def test_none_of_them_is_an_error(self):
+        self.assertEqual([(i.rule, i.message) for where in self.gave_up
+                          for i in self.about(where)
+                          if i.severity == validate.ERROR], [])
+
+    def test_none_is_reported_as_a_match_without_a_result(self):
+        self.assertEqual([i for where in self.gave_up for i in self.about(where)
+                          if i.rule in ("no-result", "F6", "totals-mismatch",
+                                        "verb-mismatch", "verb-no-result")], [])
+
+    def test_a_walkover_over_rows_that_hold_play_is_told_so_once(self):
+        for where, side, games, said in (
+                (self.play, "away", "11-16", "the home Match Winner tick and the "
+                                             "verb 'DEFEATS'"),
+                (self.play_away, "home", "16-11", "the away Match Winner tick and "
+                                                  "the verb 'DEF. BY'")):
+            with self.subTest(card=where.name):
+                came = self.CAME[side]
+                self.assertEqual(self.about(where), [validate.Issue(
+                    rule="walkover-rows-played", severity=validate.WARNING,
+                    message=f"{where}: the card ticks Match Cancelled and prints the "
+                            f"TOTAL row of a walkover conceded by {side}, every "
+                            f"rubber to {came} as a love set, but its set rows "
+                            f"hold games {games} that the TOTAL row does not "
+                            f"count. The match is scored as the walkover the "
+                            f"TOTAL row, {said} describe, a forfeit by {side}.",
+                    subject=str(where),
+                    detail="set rows " + ", ".join(
+                        f"{s.home_games}-{s.away_games}"
+                        for s in self.card_of(where).sets)
+                           + f"; printed {self.card_of(where).totals.describe()}")])
+
+    def test_a_walkover_over_rows_nobody_played_is_not_told_of_its_rows(self):
+        for where in (self.three, self.mirror, self.both, self.verb_only):
+            with self.subTest(card=where.name):
+                self.assertNotIn("walkover-rows-played",
+                                 {i.rule for i in self.about(where)})
+
+    def test_the_placeholder_cells_are_said_to_be_a_forfeit_s_not_a_washout_s(self):
+        for where, cells, rubbers in ((self.three, 3, 3), (self.mirror, 6, 4),
+                                      (self.both, 12, 4)):
+            with self.subTest(card=where.name):
+                issue, = [i for i in self.about(where)
+                          if i.rule == "players-unrecorded"]
+                self.assertEqual(
+                    issue.message,
+                    f"{where}: {cells} name cell(s) across {rubbers} of 4 "
+                    "rubber(s) print Match Centre's 'Unspecified player' "
+                    "placeholder rather than a person, so no name was recorded "
+                    "for them; this match was forfeited whole, so nobody played "
+                    "those rubbers.")
+
+    def test_the_side_that_gave_up_owes_no_roster_and_no_names(self):
+        # Rows nobody played on a forfeit: set-players-missing and roster-missing
+        # pass them by, as they pass a box forfeit's (4.33, 4.288).
+        for where in self.gave_up:
+            with self.subTest(card=where.name):
+                self.assertEqual({i.rule for i in self.about(where)}
+                                 & {"set-players-missing", "set-no-games",
+                                    "roster-missing"}, set())
+
+
+class TestAWalkoverIsHeldToItsFinishedRowsAndToTheClubsAwardAsABoxIs(
+        CardsBesideTheSeasonCase):
+    """Two walkovers beside the season that the club's own rules contradict.
+
+    The reader takes a walkover from the card alone (4.418), its TOTAL row held to
+    the award under every set rule Match Centre might total one under, since it
+    knows no club's. The build then holds it to the club's, as it holds a Match
+    Forfeited box (4.134): its rows where every set is finished, and its TOTAL row
+    to the award under the club's set rule. Here, in round 4: a card ticking away
+    and printing DEF. BY beside 0-0 and 24-4, the award to away, over 6-2, 4-6,
+    6-3 and 6-1, four finished sets and three of them to home, the side the
+    walkover says gave the match up; and a card ticking home and printing DEFEATS
+    over rows nobody played, whose TOTAL row, 4-0 and 16-0, is four love sets
+    under fast4, in a club whose set rule is first-to-6.
+
+    Measured on the tree before this (/tmp/mcf/scratch/CANCEL/probe/probe.py's
+    shapes, each card beside the season): each is the washout its Match
+    Cancelled box says, with the one ``no-result`` error "A match called off has
+    no winner, so the card contradicts itself". Now each is scored as the
+    walkover it is, and its one finding is the error its rules make of a box
+    forfeit printed so: ``forfeit-contradicted`` for the first, which is not
+    also told ``walkover-rows-played`` (one mistake, once), and
+    ``totals-mismatch`` for the second. Rejected: reading the first as the
+    washout because its rows hold play, which the owner's real walkover over
+    play rules out (the class above); and reading the second as a washout because
+    its award is not the club's, which would set a card naming its winner three
+    ways aside as no result, rather than saying the one cell that is wrong.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        cls.rows_say = cls.card("rows-say", "4", "riverside-rockets", "hilltop-aces",
+                                ((6, 2), (4, 6), (6, 3), (6, 1)), cancelled=True,
+                                winner="away", verb="DEF. BY",
+                                totals=(0, 0, 24, 4))
+        cls.fast4 = cls.card("fast4", "4", "lakeside-spinners", "parkview-wanderers",
+                             ((0, 0),) * 4, cancelled=True, winner="home",
+                             verb="DEFEATS", totals=(4, 16, 0, 0))
+
+    def match_of(self, where):
+        match, = [m for m in self.matches if m.source == str(where)]
+        return match
+
+    def test_both_are_scored_as_the_walkover_their_card_writes(self):
+        for where, side in ((self.rows_say, "home"), (self.fast4, "away")):
+            with self.subTest(card=where.name):
+                match = self.match_of(where)
+                self.assertIs(match.status, MatchStatus.FORFEIT)
+                self.assertEqual(match.forfeited_by, side)
+
+    def test_rows_every_set_finished_against_the_walkover_are_one_error(self):
+        self.assertEqual(self.about(self.rows_say), [validate.Issue(
+            rule="forfeit-contradicted", severity=validate.ERROR,
+            message=f"{self.rows_say}: the card says home forfeited the match, but "
+                    "its set rows, every set finished, give home more sets and the "
+                    "match.",
+            subject=str(self.rows_say),
+            detail="sets 3-1 and games 22-12 decided on games then sets say home; "
+                   "the walkover conceded by home gives the match to away, as "
+                   "the verb 'DEF. BY', the away Match Winner tick and the "
+                   "printed TOTAL row do")])
+
+    def test_an_award_under_another_set_rule_is_the_one_cell_it_gets_wrong(self):
+        self.assertEqual(self.about(self.fast4), [validate.Issue(
+            rule="totals-mismatch", severity=validate.ERROR,
+            message=f"{self.fast4}: the printed TOTAL row and the walkover "
+                    "conceded by away disagree on home games.",
+            subject=str(self.fast4),
+            detail="printed sets 4-0 games 16-0; a walkover's TOTAL row totals "
+                   "every rubber to home as a love set, sets 4-0 games 24-0 "
+                   "under first-to-6")])
+
+
+class TestAWalkoverIsToldItsRowsHoldPlayOnlyWherePlayIsLeftOutOfItsTotalRow(
+        CardsBesideTheSeasonCase):
+    """Six walkovers beside the season over rows with games on them.
+
+    ``walkover-rows-played`` says a walkover's set rows hold games its printed
+    TOTAL row does not count, and that the match is scored as the walkover the
+    card's TOTAL row, tick and verb describe. A TOTAL row of every rubber to the
+    side that came as a love set counts every game of a love set to that side, so
+    rows of love sets to it, or of love sets and 0-0, hold nothing it leaves out.
+    Here, in rounds 4 to 6: four love sets to home ticking home, two love sets and
+    two 0-0 rows ticking home, four love sets to away ticking away, a night
+    given up after 6-0 and 6-1 to home ticking home, its mirror ticking away, and
+    the rows of the real walkover over play, 2-6, 6-4, 3-6 and 0-0, naming home
+    by the verb DEFEATS alone with no tick.
+
+    Measured on the tree before this (/tmp/mcf/scratch/CANCEL/fixup/
+    probe_pipeline.py, cases love-rows, half-love-rows and verb-only-play, each
+    beside the season): the first two were told "its set rows hold games 24-0
+    that the TOTAL row does not count" and "12-0", which the TOTAL row of 4-0 and
+    24-0 does count, since the warning asked only whether the rows hold games.
+    Now it asks :func:`~matchcentre.validate.uncounted_play`, whether the rows
+    give either side more games than the printed TOTAL row credits it, which the
+    doctor's verdict asks too: so the love sets are told nothing, and the one
+    game the side that gave up won before it did is told so. The last card
+    names what it was named by, the TOTAL row and the verb, and no tick: a
+    mutant naming a tick that is not there survived every test of the unit as
+    reviewed (/tmp/mcf/scratch/CANCEL-review/own/run.py, #2). Rejected: asking
+    whether the rows total the printed TOTAL row, which would tell two love sets
+    and two 0-0 rows that their TOTAL row leaves out games it counts.
+    """
+
+    LOVE, LOVE_AWAY = ((6, 0),) * 4, ((0, 6),) * 4
+
+    @classmethod
+    def extra_cards(cls):
+        award, award_away = (4, 24, 0, 0), (0, 0, 24, 4)
+        home = dict(cancelled=True, winner="home", verb="DEFEATS", totals=award)
+        away = dict(cancelled=True, winner="away", verb="DEF. BY",
+                    totals=award_away)
+        cls.love = cls.card("love", "4", "riverside-rockets", "hilltop-aces",
+                            cls.LOVE, **home)
+        cls.half = cls.card("half", "4", "lakeside-spinners", "parkview-wanderers",
+                            ((6, 0), (6, 0), (0, 0), (0, 0)), **home)
+        cls.love_away = cls.card("love-away", "5", "riverside-rockets",
+                                 "lakeside-spinners", cls.LOVE_AWAY, **away)
+        cls.one_game = cls.card("one-game", "5", "hilltop-aces",
+                                "parkview-wanderers",
+                                ((6, 0), (6, 1), (0, 0), (0, 0)), **home)
+        cls.one_game_away = cls.card("one-game-away", "6", "riverside-rockets",
+                                     "parkview-wanderers",
+                                     ((0, 6), (1, 6), (0, 0), (0, 0)), **away)
+        cls.verb_only = cls.card("verb-only", "6", "lakeside-spinners",
+                                 "hilltop-aces", ((2, 6), (6, 4), (3, 6), (0, 0)),
+                                 cancelled=True, winner=cw.NO_TICK, verb="DEFEATS",
+                                 totals=award)
+        cls.gave_up = {cls.love: "away", cls.half: "away", cls.love_away: "home",
+                       cls.one_game: "away", cls.one_game_away: "home",
+                       cls.verb_only: "away"}
+
+    def told(self, where, side, games, said):
+        """The one ``walkover-rows-played`` warning on the card at *where*."""
+        card, = [c for c in self.cards if validate._where(c) == str(where)]
+        came = {"home": "away", "away": "home"}[side]
+        return [validate.Issue(
+            rule="walkover-rows-played", severity=validate.WARNING,
+            message=f"{where}: the card ticks Match Cancelled and prints the TOTAL "
+                    f"row of a walkover conceded by {side}, every rubber to {came} "
+                    f"as a love set, but its set rows hold games {games} that the "
+                    f"TOTAL row does not count. The match is scored as the "
+                    f"walkover {said} describe, a forfeit by {side}.",
+            subject=str(where),
+            detail="set rows " + ", ".join(f"{s.home_games}-{s.away_games}"
+                                           for s in card.sets)
+                   + f"; printed {card.totals.describe()}")]
+
+    def test_each_is_still_the_forfeit_its_total_row_describes(self):
+        for where, side in self.gave_up.items():
+            with self.subTest(card=where.name):
+                match, = [m for m in self.matches if m.source == str(where)]
+                self.assertIs(match.status, MatchStatus.FORFEIT)
+                self.assertEqual(match.forfeited_by, side)
+
+    def test_rows_of_love_sets_to_the_side_that_came_are_told_nothing(self):
+        for where in (self.love, self.half, self.love_away):
+            with self.subTest(card=where.name):
+                self.assertEqual(self.about(where), [])
+
+    def test_a_game_the_total_row_leaves_out_is_told_so_once(self):
+        for where, side, games, said in (
+                (self.one_game, "away", "12-1", "the TOTAL row, the home Match "
+                                                "Winner tick and the verb "
+                                                "'DEFEATS'"),
+                (self.one_game_away, "home", "1-12", "the TOTAL row, the away "
+                                                     "Match Winner tick and the "
+                                                     "verb 'DEF. BY'")):
+            with self.subTest(card=where.name):
+                self.assertEqual(self.about(where),
+                                 self.told(where, side, games, said))
+
+    def test_a_walkover_its_verb_alone_names_is_said_to_be_described_by_no_tick(
+            self):
+        self.assertEqual(self.about(self.verb_only),
+                         self.told(self.verb_only, "away", "11-16",
+                                   "the TOTAL row and the verb 'DEFEATS'"))
+
+
+class TestAMatchForfeitedWholeSaysItsBlankNamesAreAForfeitsWhicheverBoxItTicks(
+        CardsBesideTheSeasonCase):
+    """Three cards beside the season whose away name cells print the placeholder.
+
+    ``players-unrecorded`` ends by saying what the match was, so a club reading
+    "no name was recorded for them" knows whether anything is to be done. In
+    round 4: a Match Forfeited box ticked against away over 0-0 rows; the same
+    card ticking Match Cancelled too, which the model reads as the forfeit, as
+    0.1.0 did; and in round 5 a washout, Match Cancelled alone over two rubbers
+    played and two left 0-0, printing VS (4.424 moved this: over 0-0 rows alone
+    a washout records nothing, and is told its ``no-result`` alone).
+
+    Measured on 0.1.0 (/tmp/mcf/scratch/CANCEL/fixup/probe_pipeline.py, cases
+    box-blank and box-blank-cancel, before-base.txt): the first ended "so no name
+    was recorded for them." and nothing more, and the second "; this match was
+    called off.", of a match the build pays as a forfeit. The unit as reviewed
+    said of both that the match was forfeited whole, with no test: a mutant
+    asking the walkover alone, and one asking the Cancelled tick and not the
+    walkover, survived every test of it (/tmp/mcf/scratch/CANCEL-review/own/
+    run.py, #4 and #5). Now each says what the build makes of it, by
+    :func:`~matchcentre.discover.called_off` and ``Card.forfeit_side``, the
+    two functions that decide it. Rejected: wording the clause from the Cancelled
+    box, which tells a forfeit it was called off, and keeping 0.1.0's silence on
+    a box forfeit, which leaves its blank names reading as a played card's.
+    """
+
+    PLACE = "Unspecified player"
+
+    @classmethod
+    def blank(cls, home, away, scores=((0, 0),) * 4):
+        """Rows of *scores*, 0-0 unless given, naming every away player by
+        placeholder."""
+        return tuple(dataclasses.replace(row, away_players=(cls.PLACE,)
+                                         * len(row.away_players))
+                     for row in rows_for(scores, TEAMS[home][1],
+                                         TEAMS[away][1]))
+
+    @classmethod
+    def extra_cards(cls):
+        box = dict(forfeited_by="away", winner="home", verb="DEFEATS")
+        cls.box = cls.card("box", "4", "riverside-rockets", "hilltop-aces", None,
+                           rows=cls.blank("riverside-rockets", "hilltop-aces"),
+                           **box)
+        cls.box_cancelled = cls.card(
+            "box-cancelled", "4", "lakeside-spinners", "parkview-wanderers", None,
+            rows=cls.blank("lakeside-spinners", "parkview-wanderers"),
+            cancelled=True, **box)
+        # 4.424 moved this: two rubbers played before the rain, since over 0-0
+        # rows alone the washout records nothing and is told its no-result alone.
+        cls.washout = cls.card("washout", "5", "riverside-rockets",
+                               "lakeside-spinners", None,
+                               rows=cls.blank("riverside-rockets",
+                                              "lakeside-spinners",
+                                              ((6, 2), (3, 6), (0, 0), (0, 0))),
+                               cancelled=True, winner=cw.NO_TICK, verb="VS")
+
+    def said(self, where):
+        issue, = [i for i in self.about(where) if i.rule == "players-unrecorded"]
+        return issue.message
+
+    def test_a_forfeit_s_blank_names_are_said_to_be_a_forfeit_s(self):
+        for where in (self.box, self.box_cancelled):
+            with self.subTest(card=where.name):
+                match, = [m for m in self.matches if m.source == str(where)]
+                self.assertIs(match.status, MatchStatus.FORFEIT)
+                self.assertEqual(
+                    self.said(where),
+                    f"{where}: 6 name cell(s) across 4 of 4 rubber(s) print Match "
+                    "Centre's 'Unspecified player' placeholder rather than a "
+                    "person, so no name was recorded for them; this match was "
+                    "forfeited whole, so nobody played those rubbers.")
+
+    def test_a_washout_s_blank_names_are_said_to_be_a_washout_s(self):
+        self.assertEqual(
+            self.said(self.washout),
+            f"{self.washout}: 6 name cell(s) across 4 of 4 rubber(s) print Match "
+            "Centre's 'Unspecified player' placeholder rather than a person, so "
+            "no name was recorded for them; this match was called off.")
+
+
+def cut_cells(rows, side, cells, to=None):
+    """*rows* with *side*'s name cells numbered in *cells* printing *to*, or blank.
+
+    Numbered 1 up across the side's cells as :func:`rows_for` fills them: d1 1 and
+    2, s1 3, s2 4, d2 5 and 6, so ``{2, 4, 6}`` names one player on d1, s1 and d2.
+    """
+    out, count = [], 0
+    for row in rows:
+        names = []
+        for name in getattr(row, f"{side}_players"):
+            count += 1
+            if count not in cells:
+                names.append(name)
+            elif to is not None:
+                names.append(to)
+        out.append(dataclasses.replace(row, **{f"{side}_players": tuple(names)}))
+    return tuple(out)
+
+
+class TestARubberNobodyPlayedIsNotToldItsPairIsShortOfAName(
+        CardsBesideTheSeasonCase):
+    """Five forfeits beside the season whose absent side names one player a row.
+
+    A row of a whole-match forfeit left 0-0 is a rubber nobody played, and
+    ``set-no-games`` and ``set-players-missing`` pass it by through
+    ``validate._nobody_played``; ``set-player-count`` did not ask it, so a club
+    was sent to Match Centre for a partner's name on a rubber nobody played. In
+    round 4: the away Match Forfeited box over four 0-0 rows, the away side
+    naming one player on d1, s1 and d2 and leaving s2 and each pair's second
+    cell blank (the earlier draft's card); and a walkover of the same rows,
+    Match Cancelled ticked beside the home tick and a TOTAL row of 4-0 and 24-0.
+    In round 5: the away box given up after two rubbers, d1 and s1 played 6-2
+    and 6-3 and d2 left 0-0, the away side naming one player on each pair; and
+    the walkover printing Match Centre's 'Unspecified player' in those 3 away
+    cells, the shape of the owner's 3-cell walkover. In round 6: the forfeit
+    given up part way again, those 3 cells printing the placeholder.
+
+    Measured on the tree before this (/tmp/mcf/scratch/UNSPEC/probe/probe.py,
+    cases box-one-name, wo-one-name, box-part-way, wo-three and
+    box-part-way-placeholder, each beside the season through build.py): two
+    ``set-player-count`` warnings on each, on d1 and d2, that the away side has
+    1 player(s) named and the rubber is a doubles set; the 3-cell walkover's
+    beside its ``players-unrecorded``, and the last card's beside one saying
+    "those rubbers have games but nobody to credit them to", of two rubbers
+    nobody played and a pair credited to its one name. Now the row nobody played
+    is passed by, the forfeit given up part way keeps its warning for the doubles
+    rubber it played, and its placeholder is told of that rubber alone, "those
+    rubbers with games", as half credited to nobody (4.448). Rejected: 4.290's
+    side-level ``_never_came``, which passes by only a side that gave up every
+    row, so the forfeit given up part way would still be told of d2; and keeping
+    the warning with a clause saying the match was forfeited, which still
+    reports players on a rubber nobody played.
+
+    In round 6 too, a played card, not a forfeit: d1, s1 and s2 played 6-1, 6-2
+    and 6-3 and d2 left 0-0 with no box ticked, the away pair naming one player
+    there and leaving the second cell blank. The card does not say nobody played
+    d2, and the players' figures count the names on it: measured with
+    /tmp/mcf/scratch/UNSPEC/fixup/probe.py, case stopped-one-name-blank, the
+    named player has 12 sets played and the partner the card leaves out 11, one
+    fewer than with both named. So the row is held to its names, as 0.1.0 held
+    it. Rejected: passing by every row left 0-0, which keeps quiet a name the
+    figures are short of.
+    """
+
+    PLACE = "Unspecified player"
+    EMPTY = ((0, 0),) * 4
+    AWARD = dict(winner="home", verb="DEFEATS", totals=(4, 24, 0, 0))
+
+    @classmethod
+    def extra_cards(cls):
+        def one_name(home, away, scores=cls.EMPTY, to=None):
+            return cut_cells(rows_for(scores, TEAMS[home][1], TEAMS[away][1]),
+                             "away", {2, 4, 6}, to)
+        cls.box = cls.card("box", "4", "riverside-rockets", "hilltop-aces", None,
+                           rows=one_name("riverside-rockets", "hilltop-aces"),
+                           forfeited_by="away", **cls.AWARD)
+        cls.walkover = cls.card(
+            "walkover", "4", "lakeside-spinners", "parkview-wanderers", None,
+            rows=one_name("lakeside-spinners", "parkview-wanderers"),
+            cancelled=True, **cls.AWARD)
+        cls.part_way = cls.card(
+            "part-way", "5", "riverside-rockets", "lakeside-spinners", None,
+            rows=one_name("riverside-rockets", "lakeside-spinners",
+                          ((6, 2), (6, 3), (0, 0), (0, 0))),
+            forfeited_by="away", winner="home", verb="DEFEATS")
+        cls.three = cls.card(
+            "three", "5", "hilltop-aces", "parkview-wanderers", None,
+            rows=one_name("hilltop-aces", "parkview-wanderers", to=cls.PLACE),
+            cancelled=True, **cls.AWARD)
+        cls.placed = cls.card(
+            "placed", "6", "riverside-rockets", "hilltop-aces", None,
+            rows=one_name("riverside-rockets", "hilltop-aces",
+                          ((6, 2), (6, 3), (0, 0), (0, 0)), to=cls.PLACE),
+            forfeited_by="away", winner="home", verb="DEFEATS")
+        cls.stopped = cls.card(
+            "stopped", "6", "lakeside-spinners", "parkview-wanderers", None,
+            rows=cut_cells(rows_for(((6, 1), (6, 2), (6, 3), (0, 0)),
+                                    TEAMS["lakeside-spinners"][1],
+                                    TEAMS["parkview-wanderers"][1]),
+                           "away", {6}))
+
+    def match_of(self, where):
+        match, = [m for m in self.matches if m.source == str(where)]
+        return match
+
+    def test_each_is_the_forfeit_by_away_it_describes(self):
+        for where in (self.box, self.walkover, self.part_way, self.three,
+                      self.placed):
+            with self.subTest(card=where.name):
+                match = self.match_of(where)
+                self.assertIs(match.status, MatchStatus.FORFEIT)
+                self.assertEqual(match.forfeited_by, "away")
+
+    def test_a_forfeit_over_rows_nobody_played_is_told_nothing_of_their_names(self):
+        for where in (self.box, self.walkover):
+            with self.subTest(card=where.name):
+                # Both pairs name one away player; nobody played either rubber.
+                self.assertEqual([len(s.away_players)
+                                  for s in self.match_of(where).sets],
+                                 [1, 1, 0, 1])
+                self.assertEqual(self.about(where), [])
+
+    def test_a_forfeit_given_up_part_way_is_told_of_the_pair_it_played(self):
+        label = "R5 riverside-rockets v lakeside-spinners d1"
+        self.assertEqual(self.about(self.part_way), [validate.Issue(
+            rule="set-player-count", severity=validate.WARNING,
+            message=f"{label}: the away side has 1 player(s) named (gil-ahearn), "
+                    "and Doubles 1 is a doubles set.",
+            subject=label, detail=str(self.part_way))])
+
+    def test_the_three_cell_walkover_is_told_once_of_its_placeholders(self):
+        # The words CANCEL chose for a walkover's placeholders (4.418), with the
+        # side in the detail (4.448), and no set-player-count beside them.
+        self.assertEqual(self.about(self.three), [validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{self.three}: 3 name cell(s) across 3 of 4 rubber(s) print "
+                    "Match Centre's 'Unspecified player' placeholder rather than "
+                    "a person, so no name was recorded for them; this match was "
+                    "forfeited whole, so nobody played those rubbers.",
+            subject=str(self.three),
+            detail="3 placeholder cell(s): away in rubber(s) 1, 3, 4")])
+
+    def test_a_forfeit_given_up_part_way_names_only_the_rubbers_it_played(self):
+        # d1 has games and one away name above the placeholder; s2 and d2 are
+        # rubbers nobody played, and have no games to credit to anybody.
+        self.assertEqual(self.about(self.placed), [validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{self.placed}: 3 name cell(s) across 3 of 4 rubber(s) print "
+                    "Match Centre's 'Unspecified player' placeholder rather than "
+                    "a person, so no name was recorded for them; those rubbers "
+                    "with games have only one player of the pair to credit on the "
+                    "away side of rubber(s) 1, so half of those games are "
+                    "credited to nobody.",
+            subject=str(self.placed),
+            detail="3 placeholder cell(s): away in rubber(s) 1, 3, 4")])
+
+    def test_a_played_rubber_left_at_love_with_no_box_is_still_held_to_its_names(self):
+        # No box says nobody played d2, so it is not passed by as a forfeit's
+        # row is, and set-no-games tells it beside its one name.
+        label = "R6 lakeside-spinners v parkview-wanderers d2"
+        match = self.match_of(self.stopped)
+        self.assertIs(match.status, MatchStatus.PLAYED)
+        self.assertEqual([len(s.away_players) for s in match.sets], [2, 1, 1, 1])
+        self.assertCountEqual(self.about(self.stopped), [
+            validate.Issue(
+                rule="set-no-games", severity=validate.WARNING,
+                message=f"{label}: no games on the row at all and no box ticked, "
+                        "so nobody is credited the set. A rubber that was never "
+                        "played reads like this when the card does not say so.",
+                subject=label, detail=str(self.stopped)),
+            validate.Issue(
+                rule="set-player-count", severity=validate.WARNING,
+                message=f"{label}: the away side has 1 player(s) named "
+                        "(jo-calder), and Doubles 2 is a doubles set.",
+                subject=label, detail=str(self.stopped))])
+
+
+class TestACancelledCardNamingAWinnerIsTheWashoutItsCancelledTickSays(
+        CardsBesideTheSeasonCase):
+    """Six washouts beside the season, five naming a winner, none a walkover.
+
+    On the owner's export 5 of 201 cards tick Match Cancelled, tick a Match
+    Winner box and print the verb for the same side over the rows of a night the
+    rain stopped, the TOTAL row being the rows as printed, a set credited only
+    where it finished. The owner: the Match Cancelled tick takes precedence, and
+    both teams get the W of a night not played; Match Centre itself exports them
+    so. 0.1.0 scored them so, and failed the run on each with the ``no-result``
+    error "A match called off has no winner, so the card contradicts itself",
+    beside README advice to correct the card, which the club cannot act on: the
+    card is what Match Centre made. Measured on the tree before this
+    (/tmp/mcf/scratch/CANCEL/probe/probe.py, cases wash-play-total-is-rows,
+    wash-away-ahead, wash-home-ahead, wash-tick-no-total, wash-vs-retired-forfeit
+    and wo-split-tick-verb, each beside the season through build.py): exit 1 on
+    every one that names a winner, its one finding that error; and exit 0 on the
+    card printing VS over 1-6, 2-6, a 0-0 rubber ticked Retired and a 0-0 rubber
+    ticked Forfeit, whose TOTAL row is Match Centre's 0-4 and 3-24, with the
+    warning alone.
+
+    Now each is scored as before, no result and no points, and its one finding is
+    the ``no-result`` warning, which says what the card claims and that the Match
+    Cancelled tick decides. The verb and tick cross-checks stay set aside on a
+    card called off, so no F6, ``verb-mismatch`` or ``totals-mismatch`` is said
+    of any of them. Rejected: keeping 4.233's error, against the owner's ruling
+    and Match Centre's own export; reading any cancelled card naming a winner as
+    a forfeit, which these five refute, their TOTAL rows being their rows; and
+    paying the washout by its tick, which the owner says earns no points.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        cls.play = cls.card("play", "4", "riverside-rockets", "hilltop-aces",
+                            ((2, 6), (6, 4), (3, 6), (0, 0)), cancelled=True,
+                            winner="home", verb="DEFEATS", totals=(1, 11, 16, 2))
+        cls.away = cls.card("away", "4", "lakeside-spinners", "parkview-wanderers",
+                            ((3, 6), (4, 6), (3, 3), (0, 0)), cancelled=True,
+                            winner="away", verb="DEF. BY", totals=(0, 10, 15, 2))
+        cls.home = cls.card("home", "5", "riverside-rockets", "lakeside-spinners",
+                            ((6, 2), (6, 4), (2, 3), (0, 0)), cancelled=True,
+                            winner="home", verb="DEFEATS", totals=(2, 14, 9, 0))
+        cls.no_total = cls.card("no-total", "5", "hilltop-aces",
+                                "parkview-wanderers",
+                                ((6, 2), (6, 4), (2, 3), (0, 0)), cancelled=True,
+                                winner="home", verb="DEFEATS", omit_totals=True)
+        _, rockets = TEAMS["riverside-rockets"]
+        _, wanderers = TEAMS["parkview-wanderers"]
+        stopped = tuple(dataclasses.replace(row, **extra) for row, extra in zip(
+            rows_for(((1, 6), (2, 6), (0, 0), (0, 0)), rockets, wanderers),
+            ({}, {}, dict(status=SetStatus.RETIRED, status_side="home"),
+             dict(status=SetStatus.FORFEIT, status_side="home"))))
+        cls.vs = cls.card("vs", "6", "riverside-rockets", "parkview-wanderers",
+                          None, rows=stopped, cancelled=True, winner=cw.NO_TICK,
+                          verb="VS", totals=(0, 3, 24, 4))
+        # The TOTAL row is the award to the side ticked, which the verb does not
+        # name.
+        cls.split = cls.card("split", "6", "lakeside-spinners", "hilltop-aces",
+                             ((0, 0),) * 4, cancelled=True, winner="away",
+                             verb="DEFEATS", totals=(0, 0, 24, 4))
+
+    def washout(self, where, claims=""):
+        """The one finding about a washout: the warning, saying *claims* if any."""
+        match, = [m for m in self.matches if m.source == str(where)]
+        found = self.no_result(where, f"R{match.round} {match.home} v {match.away}",
+                               "cancelled")
+        if claims:
+            found = dataclasses.replace(
+                found, message=f"{found.message} {claims}; the Match Cancelled "
+                               "tick decides.")
+        return [found]
+
+    def test_each_is_a_washout_paid_nothing(self):
+        for where in (self.play, self.away, self.home, self.no_total, self.vs,
+                      self.split):
+            with self.subTest(card=where.name):
+                match, = [m for m in self.matches if m.source == str(where)]
+                self.assertIs(match.status, MatchStatus.CANCELLED)
+                self.assertIsNone(match.points_for(match.home))
+                self.assertIsNone(match.points_for(match.away))
+
+    def test_a_washout_whose_total_row_is_its_rows_is_one_warning_naming_its_claims(
+            self):
+        for where, side, verb in ((self.play, "home", "DEFEATS"),
+                                  (self.away, "away", "DEF. BY"),
+                                  (self.home, "home", "DEFEATS")):
+            with self.subTest(card=where.name):
+                self.assertEqual(self.about(where), self.washout(
+                    where, f"The card also ticks {side} as Match Winner and the "
+                           f"verb '{verb}' means {side} won"))
+
+    def test_a_washout_with_a_tick_and_no_total_row_is_the_same_one_warning(self):
+        self.assertEqual(self.about(self.no_total), self.washout(
+            self.no_total, "The card also ticks home as Match Winner and the verb "
+                           "'DEFEATS' means home won"))
+
+    def test_a_tick_and_a_verb_naming_different_sides_over_the_award_is_a_washout(
+            self):
+        self.assertEqual(self.about(self.split), self.washout(
+            self.split, "The card also ticks away as Match Winner and the verb "
+                        "'DEFEATS' means home won"))
+
+    def test_vs_over_match_centre_s_arithmetic_names_no_winner_and_stays_a_washout(
+            self):
+        # Its TOTAL row credits away every rubber, as Match Centre credits a
+        # rubber retired and one forfeited, but not as the award 0-4 and 0-24.
+        self.assertEqual(self.about(self.vs), self.washout(self.vs))
+
+    def test_none_of_them_fails_the_run(self):
+        self.assertEqual([i for i in self.report.errors], [])
 
 
 class TestACardWithNoNameIsNamedByTheOneFunctionItsMatchIsNamedBy(
@@ -3228,12 +4448,17 @@ class TestACardWithNoNameIsNamedByTheOneFunctionItsMatchIsNamedBy(
         self.assertEqual(self.unnamed(self.zeros), self.named(self.zeros))
 
     def test_a_washout_naming_a_winner_is_found_by_its_match_when_unnamed(self):
-        # The one finding about it is an error only if the card is found by the
-        # name its match has.
+        # The one finding about it names the card's claims only if the card is
+        # found by the name its match has. 4.419 moved this: that finding is a
+        # warning saying the Match Cancelled tick decides, where it was an error.
         self.assertEqual(self.unnamed(self.washout), self.named(self.washout))
         found, = [i for i in self.named(self.washout)
                   if i.detail == "<unnamed card>"]
-        self.assertEqual((found.rule, found.severity), ("no-result", validate.ERROR))
+        self.assertEqual((found.rule, found.severity),
+                         ("no-result", validate.WARNING))
+        self.assertTrue(found.message.endswith(
+            "The card also ticks home as Match Winner and the verb 'DEFEATS' means "
+            "home won; the Match Cancelled tick decides."), found.message)
 
 
 class TestTwoCardsThatSwapWhoForfeitedWhichRubberDisagree(SeasonCase):
@@ -3329,13 +4554,17 @@ class TestTwoCardsThatSwapWhoForfeitedWhichRubberDisagree(SeasonCase):
         # 0-6 ticked against the rockets alone or against both, because each tick
         # is compared on its own: with the aces' tick left out, the first pair
         # still differs on the rockets' tick and only this one is a repeat.
+        # 4.421 moved this: a set as discover builds it carries its award, so the
+        # row is rebuilt from the games alone, and the second singles is scored the
+        # love set its tick gives the aces, 0-6, where it counted 0-0.
         a, _ = self.pair()
-        cases = (((6, 0), "away", "home", (2, 2, 14, 8)),
-                 ((0, 6), "home", "away", (1, 3, 8, 14)))
+        cases = (((6, 0), "away", "home", (2, 2, 14, 14)),
+                 ((0, 6), "home", "away", (1, 3, 8, 20)))
         for (home, away), alone, winner, figures in cases:
             with self.subTest(ticked_against=alone):
                 rubber = dataclasses.replace(a.sets[1], home_games=home,
-                                             away_games=away)
+                                             away_games=away, printed=None,
+                                             awarded_to=None)
                 rows = (dataclasses.replace(rubber, home_forfeit=alone == "home",
                                             away_forfeit=alone == "away"),
                         dataclasses.replace(rubber, home_forfeit=True,
@@ -3492,13 +4721,19 @@ class TestARowThatForfeitsTheSideItShowsWinningIsReported(SeasonCase):
         _, spinners = TEAMS["lakeside-spinners"]
         _, wanderers = TEAMS["parkview-wanderers"]
         forfeit = SetStatus.FORFEIT
+        # 4.423 moved this: the writer's TOTAL row now counts the rubber the love
+        # set it is scored, 1-3 and 11-20, which is the card saying the tick is
+        # meant, and the warning stands down there. So the card prints the TOTAL
+        # row the writer printed before, of the games on court, which says
+        # nothing of it.
         cls.contradicts = cw.write_card_file(folder / "contradicts.pdf", short_spec(
             "riverside-rockets", "hilltop-aces", court="10", match_id="4000010",
             rows=(cw.SetRow(6, 2, True, rockets[:2], aces[:2]),
                   cw.SetRow(6, 0, False, rockets[:1], aces[:1], status=forfeit,
                             status_side="home"),
                   cw.SetRow(3, 6, False, rockets[1:2], aces[1:2]),
-                  cw.SetRow(2, 6, True, rockets[:2], aces[:2]))))
+                  cw.SetRow(2, 6, True, rockets[:2], aces[:2])),
+            totals=(1, 17, 14, 3)))
         cls.consistent = cw.write_card_file(folder / "consistent.pdf", short_spec(
             "lakeside-spinners", "parkview-wanderers", court="11",
             match_id="4000011",
@@ -3527,8 +4762,11 @@ class TestARowThatForfeitsTheSideItShowsWinningIsReported(SeasonCase):
         # the writer printed says so in its TOTAL row, so nothing else reports it.
         match = self.match(self.contradicts)
         rubber = match.sets[1]
+        # 4.421 moved this: scored the love set to the aces, 0-6, and printed 6-0.
         self.assertEqual((rubber.home_games, rubber.away_games, rubber.home_forfeit,
-                          rubber.away_forfeit), (6, 0, True, False))
+                          rubber.away_forfeit), (0, 6, True, False))
+        self.assertEqual((rubber.printed_home_games, rubber.printed_away_games),
+                         (6, 0))
         self.assertEqual(rubber.winner, "away")
         self.assertEqual((match.home_sets, match.away_sets), (1, 3))
         card, = [c for c in self.cards if c.source == str(self.contradicts)]
@@ -3546,7 +4784,8 @@ class TestARowThatForfeitsTheSideItShowsWinningIsReported(SeasonCase):
         issue, = self.issues_about(self.match(self.contradicts))
         self.assertIn("6-0", issue.message)
         self.assertIn("ticks Forfeit against riverside-rockets", issue.message)
-        self.assertIn("credited to hilltop-aces", issue.message)
+        # 4.423 moved this: what the set is, scored, where it said "credited to".
+        self.assertIn("scored 6-0 to hilltop-aces as forfeited", issue.message)
         self.assertEqual(issue.detail, str(self.contradicts))
 
     def test_it_stops_nothing(self):
@@ -3567,8 +4806,11 @@ class TestARowThatForfeitsTheSideItShowsWinningIsReported(SeasonCase):
         # the tick is the only thing that says who the rubber goes to.
         match = self.match(self.consistent)
         rubber = match.sets[0]
+        # 4.421 moved this: scored the love set to the wanderers, printed 4-2.
         self.assertEqual((rubber.home_games, rubber.away_games, rubber.winner),
-                         (4, 2, "away"))
+                         (0, 6, "away"))
+        self.assertEqual((rubber.printed_home_games, rubber.printed_away_games),
+                         (4, 2))
         self.assertEqual(self.issues_about(match), [])
 
 
@@ -3922,6 +5164,96 @@ class TestAWholeMatchForfeitAsksNoRosterOfTheSideThatNeverCame(unittest.TestCase
         with mock.patch.object(validate, "_nobody_played", return_value=False):
             said = [i.rule for i in self.issues("filed")]
         self.assertIn("roster-missing", said)
+
+
+class TestANightGivenUpByItsRowsAloneAsksNoRosterOfTheSideThatNeverCame(
+        unittest.TestCase):
+    """A side every 0-0 row forfeits, with the Match Forfeited box empty, owes no roster.
+
+    The class above passes by the roster of a side the Match Forfeited box gives
+    the match up against. Row 4.288 found the same night told by its rows alone,
+    every rubber 0-0 with its Forfeit box ticked against the aces and nobody
+    printed for them, still told ``roster-missing``, because
+    :func:`validate._never_came` read ``match.forfeited_by``, which only the box
+    sets. Measured on the tree before this
+    (/tmp/mcf/scratch/CANCEL/probe/roster_4288.py, the night below through
+    ``validate.validate``): ``roster-missing`` "no away roster was read from the
+    card, so fill-ins on that side cannot be detected and nobody who played away
+    has a rating for this round.", where the same night with the box ticked as
+    well has none. Now :func:`validate._never_came` asks
+    :attr:`~matchcentre.model.Match.given_up_by`, the one reading of who gave a
+    match up whole (4.420), which the rows give as the box does, so the aces owe
+    none. The rockets, who came, still owe theirs, and so does the side of a
+    night whose rows a rubber was played on.
+
+    Rejected: needing the box, since the rows say the same thing rubber by
+    rubber (4.138's ruling); and reading the rows as the box, ticking it on the
+    club's behalf, which would change the night's status as printed (4.15).
+    """
+
+    HOME, AWAY = "riverside-rockets", "hilltop-aces"
+    NIGHTS = {
+        "told by its rows": dict(played=False, away_roster=()),
+        "the rockets' roster unread": dict(played=False, home_roster=()),
+        "a rubber played": dict(played=True, away_roster=()),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        _, rockets = TEAMS[cls.HOME]
+        cls.found, cls.matches = {}, {}
+        for index, (name, night) in enumerate(cls.NIGHTS.items()):
+            fields = dict(night)
+            rows = conceded_rows(rockets, by="away")
+            if fields.pop("played"):
+                _, aces = TEAMS[cls.AWAY]
+                rows = (cw.SetRow(6, 2, True, rockets[:2], aces[:2]),) + rows[1:]
+            data = root / f"night-{index}" / "data"
+            folder = data / f"Round{SHORT_ROUND}"
+            folder.mkdir(parents=True)
+            cw.write_card_file(folder / "card.pdf", dataclasses.replace(short_spec(
+                cls.HOME, cls.AWAY, court="10", match_id="4000010", rows=rows,
+                totals=(4, 0, 0, 0), verb="DEFEATS", winner="home"), **fields))
+            cards, rejected = scorecard.read_tree(data)
+            found = discover_mod.discover(
+                cards, rejected, config=config_mod.Config(path=root / "config.toml"),
+                root=data)
+            comp_id, = sorted(found.matches)
+            competition = next(c for c in found.club.competitions if c.id == comp_id)
+            cls.matches[name], = found.matches[comp_id]
+            report = validate.validate(found.matches[comp_id], competition,
+                                       club=found.club, cards=cards,
+                                       rejected=rejected)
+            cls.found[name] = [i.message for i in report.issues
+                               if i.rule == "roster-missing"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def said(self, side):
+        return (f"R4 riverside-rockets v hilltop-aces: no {side} roster was read "
+                "from the card, so fill-ins on that side cannot be detected and "
+                f"nobody who played {side} has a rating for this round.")
+
+    def test_the_night_keeps_its_status_and_box_as_printed(self):
+        match = self.matches["told by its rows"]
+        self.assertIs(match.status, MatchStatus.PLAYED)
+        self.assertIsNone(match.forfeited_by)
+        self.assertEqual(match.given_up_by, "away")
+
+    def test_the_side_its_rows_forfeit_owes_no_roster(self):
+        self.assertEqual(self.found["told by its rows"], [])
+
+    def test_the_side_that_came_still_owes_its_roster(self):
+        self.assertEqual(self.found["the rockets' roster unread"],
+                         [self.said("home")])
+
+    def test_a_night_a_rubber_was_played_on_still_owes_the_roster(self):
+        self.assertIsNone(self.matches["a rubber played"].given_up_by)
+        self.assertEqual(self.found["a rubber played"], [self.said("away")])
 
 
 class TestEveryHandOffIsOneReportByTheCheckNamedOrByForfeitContradicted(
@@ -4371,7 +5703,11 @@ class TestAVerbTheRowsContradictIsReportedOnceByVerbMismatch(OneNightCase):
     naming the side the verb names. A tick for another side is a second thing
     the card says, and keeps its own F6. Where ``verb-mismatch`` does not fire, on
     a card read empty that counts for nothing or one with too few finished sets,
-    F6 is still the report and keeps both.
+    F6 is still the report and keeps both. Row 4.425 then had the reader ask the
+    rows under each set rule as well, and ``DEFEATS`` over the rows short of sets
+    below, which first-to-6 gives home on their one finished set, no longer
+    disagrees with them: ``verb-no-result`` is that card's one report, and two of
+    the expectations below moved with it, each saying so.
 
     Rejected: keeping F6 and dropping ``verb-mismatch``, since F6 cannot see
     the rules or the box; and ``reported_by="verb-mismatch"`` set by the reader
@@ -4431,13 +5767,17 @@ class TestAVerbTheRowsContradictIsReportedOnceByVerbMismatch(OneNightCase):
     def test_a_verb_verb_mismatch_passes_by_is_still_f6s_to_report(self):
         # Read empty, the card counts for nothing and no verb check holds its verb
         # to a result; short of sets, it is verb-no-result's. Neither is the report
-        # F6 stands down for, so the verb and the tick keep theirs.
-        for key, also in ((("DEFEATS", "home", "read empty", None), []),
+        # F6 stands down for, so the verb and the tick keep theirs where the reader
+        # disagrees. Row 4.425 moved the second: first-to-6 gives home the 6-4 and
+        # finishes no other row, so the reader no longer disagrees with DEFEATS
+        # and the home tick there, and verb-no-result is the one report, where it
+        # was F6 twice beside it.
+        for key, said in ((("DEFEATS", "home", "read empty", None),
+                           [("F6", "verb"), ("F6", "winner-tick")]),
                           (("DEFEATS", "home", "short of sets", None),
                            [("verb-no-result", validate.ERROR)])):
             with self.subTest(night=key):
-                self.assertEqual(self.errors(key), [("F6", "verb"),
-                                                    ("F6", "winner-tick"), *also])
+                self.assertEqual(self.errors(key), said)
 
     def test_on_every_night_a_verb_is_reported_once_and_its_tick_with_it(self):
         both = alone = handed = 0
@@ -4464,11 +5804,14 @@ class TestAVerbTheRowsContradictIsReportedOnceByVerbMismatch(OneNightCase):
                 self.assertEqual([what for rule, what in said if rule == "F6"],
                                  expected)
         # The premise: the reader disagreed on verbs verb-mismatch reports, and on
-        # verbs it does not, so neither half of the property is vacuous. The 15 are
-        # the 12 read empty or short of sets with no box, and 3 that restate the
-        # box over rows short of sets, which the club's rule does not finish; the
-        # 3 that restate it over rows to away are forfeit-contradicted's.
-        self.assertEqual((both, alone, handed), (30, 15, 3))
+        # verbs it does not, so neither half of the property is vacuous. The 9 are
+        # the 6 read empty with no box, and the 3 that make a draw of rows short of
+        # sets with no box; the 3 that restate the box over rows to away are
+        # forfeit-contradicted's. Row 4.425 moved it from 15: the 6 nights with
+        # DEFEATS over rows short of sets, each tick with the box and without,
+        # which first-to-6 gives home on their one finished set, now agree with
+        # the reader on the verb.
+        self.assertEqual((both, alone, handed), (30, 9, 3))
 
     def test_f6_asks_the_verb_check_where_it_reports(self):
         # A spy rather than a card: F6 keeping its own copy of the verb check's
@@ -4485,6 +5828,196 @@ class TestAVerbTheRowsContradictIsReportedOnceByVerbMismatch(OneNightCase):
         self.assertIn("the verb 'LOSES TO' means away won, but the set rows give "
                       "home.", words)
         self.assertNotIn("cross-check disagrees", words)
+
+
+class TestANightLevelOnGamesAndWonOnItsSetsIsScoredWithNoError(OneNightCase):
+    """A card won on its finished sets, level on games, is scored and not an error.
+
+    Row 4.425, through validate and build.py. The reader held the verb and tick to
+    the most sets each side can have won, which credits a last rubber the clock
+    stopped with no box ticked to its leader, so a correct card won on its
+    finished sets was two F6 errors though the ladder scored it rightly. Measured
+    on the tree before this (/tmp/mcf/scratch/F6/probe/nights.py,
+    before/nights2/summary.txt): rows 4-6, 2-6, 6-2 and 4-2, the writer's own
+    ``LOSES TO``, away tick and TOTAL row, was ``2 error(s)``, F6 on the verb and
+    on the tick, exit 1, and the dashboard flagged ``2 validation errors``, with
+    the match scored 3.6 to 5.6, away on sets; so was the mirror, and a 17-17
+    night won 2-1 on sets. One club's real season holds two such cards. Now each
+    is scored as before and has no error; the warning that its last rubber is
+    unfinished stays, since that is the card's to explain.
+
+    The cost, accepted: a swap the reader alone would have caught can now pass it,
+    where some set rule gives the swapped rows to the verb's side. Night X1' is
+    one that escapes the build: a home win on games of 5-3, 5-3, 5-3 and 1-6,
+    ``DEFEATS`` and the home tick, read with its columns swapped, its TOTAL row
+    derived from the swapped rows, under a config that scores ``sets-first`` with
+    ``min_sets_for_result = 1``, which is not the order the card was decided in.
+    First-to-6 gives home the swapped 6-1 and nothing else, the verb's side, so
+    the reader agrees, and the config scores the swapped rows for home on sets,
+    where the true rows give away the one set: nothing reports it, as it was F6
+    on the verb and the tick before. The TOTAL row the card really prints, which
+    a swap of the rows does not touch, still faults its games, and under the
+    default rules ``verb-no-result`` still reports the card.
+
+    The same cost seen from the tick: a Match Winner tick for the side that lost,
+    beside a verb for the side that won, is held to nothing but the reader, since
+    ``verb-mismatch`` holds the verb alone to the club's rule. Rows 4-6, 3-6, 6-0
+    and 5-4 with ``DEFEATS`` and the away tick, home on games 18-16 and scored
+    so, were F6 on the tick, the most sets being 2-2. First-to-6 gives away the
+    finished sets 1-2, so the tick agrees now and a card that contradicts itself
+    builds clean, scored from its rows as before. Over seeded decided cards
+    (/tmp/mcf/scratch/F6/probe/swaps.py, after/swaps.txt), such a tick passed the
+    reader in 13740 of 228481 before and passes in 25904 now. A swap of the two
+    columns is the other side's claim over the true rows, so the swapped reads
+    the reader passes are the same 13740 and 25904, and the card's own rule and
+    order score none of those swaps for the verb's side.
+
+    Rejected: standing F6 down in validate where the club's rule agrees, which
+    makes two places answer one question and leaves the reader's record false in
+    the doctor and describe; and holding the verb to the printed TOTAL row, which
+    may be blank or unread (4.250, 4.252).
+    """
+
+    CLUBS = ((4, 6), (2, 6), (6, 2), (4, 2))
+    SWAPPED = ((3, 5), (3, 5), (3, 5), (6, 1))
+    LENIENT = '[rules]\nscoring = "sets-first"\nmin_sets_for_result = 1\n'
+    UNFINISHED = [("set-unfinished", validate.WARNING)]
+
+    @classmethod
+    def cases(cls):
+        swapped = dict(scores=cls.SWAPPED, verb="DEFEATS", winner="home")
+        return {"the club's shape": dict(scores=cls.CLUBS),
+                "its mirror": dict(scores=((6, 4), (6, 2), (2, 6), (2, 4))),
+                "17-17, sets 2-1": dict(scores=((6, 4), (6, 3), (2, 6), (3, 4))),
+                "X1'": dict(swapped, config=cls.LENIENT),
+                "X1', its own TOTAL row": dict(swapped, config=cls.LENIENT,
+                                               totals=(0, 16, 15, 1)),
+                "X1', the default rules": swapped,
+                "a tick for the side that lost": dict(
+                    scores=((4, 6), (3, 6), (6, 0), (5, 4)), verb="DEFEATS",
+                    winner="away")}
+
+    def build(self, key) -> tuple[int, str]:
+        done = subprocess.run((sys.executable, str(self.BUILD), "--check"),
+                              cwd=self.nights[key]["root"], capture_output=True,
+                              text=True, timeout=600,
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        return done.returncode, " ".join((done.stdout + done.stderr).split())
+
+    def test_each_is_scored_on_its_sets_with_only_its_unfinished_rubber_warned(self):
+        for key, winner, points in (("the club's shape", "away", (3.6, 5.6)),
+                                    ("its mirror", "home", (5.6, 3.6)),
+                                    ("17-17, sets 2-1", "home", (5.7, 3.7))):
+            with self.subTest(night=key):
+                match, = self.nights[key]["given"]["matches"]
+                self.assertEqual((match.winner, match.decided_by), (winner, "sets"))
+                self.assertEqual(match.home_games, match.away_games)
+                self.assertEqual(
+                    tuple(round(match.points_for(team), 1)
+                          for team in (self.HOME, self.AWAY)), points)
+                self.assertEqual(self.nights[key]["said"], self.UNFINISHED)
+
+    def test_the_build_passes_the_clubs_card(self):
+        code, words = self.build("the club's shape")
+        self.assertEqual(code, 0, words)
+        self.assertIn("0 error(s)", words)
+        self.assertNotIn("cross-check disagrees", words)
+
+    def test_night_x1_prime_is_the_swap_that_now_escapes(self):
+        # The accepted cost, pinned so that it is seen: nothing reports this card.
+        self.assertEqual(self.errors("X1'"), [])
+        match, = self.nights["X1'"]["given"]["matches"]
+        self.assertEqual((match.winner, match.decided_by), ("home", "sets"))
+
+    def test_its_own_total_row_or_the_default_rules_still_report_the_swap(self):
+        for key, said in (("X1', its own TOTAL row", "totals-mismatch"),
+                          ("X1', the default rules", "verb-no-result")):
+            with self.subTest(night=key):
+                self.assertEqual(self.errors(key), [(said, validate.ERROR)])
+
+    def test_a_tick_for_the_side_that_lost_beside_the_right_verb_now_passes(self):
+        # The same cost from the tick, pinned so that it is seen: the card says
+        # DEFEATS and ticks away, and nothing reports it.
+        self.assertEqual(self.errors("a tick for the side that lost"), [])
+        match, = self.nights["a tick for the side that lost"]["given"]["matches"]
+        self.assertEqual((match.winner, match.decided_by), ("home", "games"))
+
+
+class TestATickForTheSideThatForfeitedTheMatchIsStillAnF6Error(OneNightCase):
+    """A Match Winner tick for the side that forfeited is F6, as it was before 4.425.
+
+    Row 4.425, through validate. The row's first draft let a set rule's finished
+    sets back a tick for the side the Match Forfeited box names, so a card ticking
+    the side that forfeited built with no error. Measured on that draft against
+    the tree before it (/tmp/mcf/scratch/F6/fixup/nights2-start.txt), the aces at
+    home's box ticked and the home tick: rows 6-4, 3-5, 2-2 and 0-0, beside
+    ``LOSES TO`` or no verb, and rows 6-4, 4-5, 4-5 and 0-2 the same, were each
+    one F6 error on the tick before and no error in the draft, the warnings about
+    the unfinished rows alone. Each is one F6 error again, and the match is the
+    side that came's, on its box.
+
+    Rejected: standing the tick's F6 down where the verb restates the box, which
+    leaves a card ticking the side that forfeited, beside a verb for the side
+    that came, with nothing on it saying the two disagree.
+    """
+
+    BLANK = ((6, 4), (3, 5), (2, 2), (0, 0))
+    PART_WAY = ((6, 4), (4, 5), (4, 5), (0, 2))
+
+    @classmethod
+    def cases(cls):
+        return {f"{label}, {verb or 'no verb'}": dict(
+                    scores=scores, forfeited_by="home", verb=verb, winner="home")
+                for label, scores in (("blank", cls.BLANK),
+                                      ("part way", cls.PART_WAY))
+                for verb in ("LOSES TO", "")}
+
+    def test_each_is_one_f6_error_on_its_tick_and_the_match_is_the_side_that_came(
+            self):
+        for key in self.nights:
+            with self.subTest(night=key):
+                self.assertEqual(self.errors(key), [("F6", "winner-tick")])
+                match, = self.nights[key]["given"]["matches"]
+                self.assertEqual(match.winner, "away")
+
+
+class TestARightTickBesideAWrongVerbIsNotASecondError(OneNightCase):
+    """A tick the rows back, beside a verb they do not, is the verb's one error.
+
+    Row 4.425, the tick held to the rows as the verb is. Holding the tick to the
+    games and the ceiling alone wherever the verb names the other side would
+    report the tick that 4.425's cost lets pass, a tick for the side that lost
+    beside the right verb; it was weighed in review and rejected. Measured on a
+    copy holding the tick so (/tmp/mcf/scratch/F6/fixup/guardF/nights.txt): rows
+    4-6, 2-6, 6-2 and 4-2 with ``DEFEATS`` and the away tick, the away side's on
+    its sets, and the 17-17 night won 2-1 on sets by home with ``LOSES TO`` and
+    the home tick, were each ``verb-mismatch`` and F6 on the correct tick, as
+    before 4.425; they are ``verb-mismatch`` alone. Over swaps.py's seeded
+    decided cards (/tmp/mcf/scratch/F6/fixup/guardF/sweep.txt) it would report
+    12164 more of the 228481 ticks for the side that lost, passing 13740 where
+    25904 pass, and fault 7115 correct ticks beside a wrong verb, where none is.
+    A tick does not score the match, the verb names the card's mistake, and a
+    second error calling a correct tick misread is advice a club cannot act on.
+    """
+
+    @classmethod
+    def cases(cls):
+        return {"the club's shape, DEFEATS and the away tick": dict(
+                    scores=((4, 6), (2, 6), (6, 2), (4, 2)), verb="DEFEATS",
+                    winner="away"),
+                "17-17, sets 2-1, LOSES TO and the home tick": dict(
+                    scores=((6, 4), (6, 3), (2, 6), (3, 4)), verb="LOSES TO",
+                    winner="home")}
+
+    def test_each_is_one_verb_mismatch_and_its_tick_agrees(self):
+        for key in self.nights:
+            with self.subTest(night=key):
+                self.assertEqual(self.errors(key),
+                                 [("verb-mismatch", validate.ERROR)])
+                tick = self.check(key, "winner-tick")
+                side = self.nights[key]["card"].winner_tick
+                self.assertEqual((tick.agrees, tick.detail), (
+                    True, f"the {side} Match Winner tick agrees with the set rows"))
 
 
 class TestAForfeitWhoseRowsGiveTheMatchToTheSideThatForfeitedIsOneError(OneNightCase):
@@ -4549,6 +6082,7 @@ class TestAForfeitWhoseRowsGiveTheMatchToTheSideThatForfeitedIsOneError(OneNight
     PRO8 = '[rules]\nscoring = "games-bonus"\nsets = "pro-8"\n'
     FAST4 = '[rules]\nsets = "fast4"\n'
     ADVANTAGE6 = '[rules]\nsets = "advantage-6"\n'
+    AS_PLAYED = '[rules]\nforfeit_award = "as-played"\n'
     MINE = ("forfeit-contradicted", validate.ERROR)
     MESSAGE = ("the card says away forfeited the match, but its set rows, every "
                "set finished, give away more sets and the match.")
@@ -4601,6 +6135,10 @@ class TestAForfeitWhoseRowsGiveTheMatchToTheSideThatForfeitedIsOneError(OneNight
                                                  config=cls.PRO8),
             "restating the box, pro-8": dict(away, omit_totals=True, config=cls.PRO8),
             "the award": dict(away, **bare, totals=(4, 24, 0, 0)),
+            # 4.421: under full-games the award is the rows as scored, so a TOTAL
+            # row of it is held to it; as played, it is held to the rows.
+            "the award, as played": dict(away, **bare, totals=(4, 24, 0, 0),
+                                         config=cls.AS_PLAYED),
             "another rule's award": dict(away, **bare, totals=(4, 32, 0, 0)),
             "no award": dict(away, **bare, totals=(4, 9, 0, 0)),
             "no TOTAL row": dict(away, **bare, omit_totals=True),
@@ -4728,11 +6266,12 @@ class TestAForfeitWhoseRowsGiveTheMatchToTheSideThatForfeitedIsOneError(OneNight
 
     def test_a_verb_and_award_on_rows_another_rule_finishes_are_as_they_were(self):
         # At first to 6 the rows give nothing, so the verb for the aces is held to
-        # the box and the award to the rows, as on the base; at fast4 the rows give
-        # the aces the match, and both are the finding's, which names them.
+        # the box, as on the base; at fast4 the rows give the aces the match, and
+        # both are the finding's, which names them. 4.421 moved this: the award
+        # is the rows as Match Centre scores them, every rubber a love set to the
+        # side that came, so totals-mismatch no longer holds it to the rows.
         self.assertEqual(self.errors("short, verb and award"),
-                         [("totals-mismatch", validate.ERROR),
-                          ("verb-mismatch", validate.ERROR)])
+                         [("verb-mismatch", validate.ERROR)])
         self.assertEqual(self.errors("short, fast4, verb and award"), [self.MINE])
         self.assertEqual(self.finding("short, fast4, verb and award").detail,
                          "sets 1-3 and games 12-12 decided on games then sets say "
@@ -4831,20 +6370,24 @@ class TestAForfeitWhoseRowsGiveTheMatchToTheSideThatForfeitedIsOneError(OneNight
                          {(comp.fmt.set_rule, comp.rules)})
         # Told the rows are not against the box, validate reports nothing of them,
         # and verb-mismatch and totals-mismatch what they passed by.
+        # 4.421 moved this: the award as played, since under full-games it is
+        # the rows as scored, which totals-mismatch holds a TOTAL row to.
         with mock.patch.object(validate, "rows_against_box", return_value=""):
-            for key, said in (("for the forfeiter", "verb-mismatch"),
-                              ("the award", "totals-mismatch")):
+            for key, said in (("for the forfeiter", ["verb-mismatch"]),
+                              ("the award, as played", ["totals-mismatch"]),
+                              ("the award", [])):
                 with self.subTest(night=key):
                     report = self.validate(self.nights[key]["given"])
                     self.assertEqual([s for s in self.said_of(report)
                                       if s[1] != validate.WARNING],
-                                     [(said, validate.ERROR)])
+                                     [(rule, validate.ERROR) for rule in said])
 
     def test_validate_prices_the_box_as_the_reader_does(self):
         # A spy, as above: told the box awards something else, validate holds the
         # row to the rows and names it in nothing.
         self.assertIs(validate.box_award, scorecard.box_award)
-        given = self.nights["the award"]["given"]
+        # 4.421 moved this: as played, where the row is held to the rows.
+        given = self.nights["the award, as played"]["given"]
         other = dataclasses.replace(scorecard.box_award("away", given["comp"].fmt),
                                     home_sets=3)
         with mock.patch.object(validate, "box_award", return_value=other):
@@ -4856,9 +6399,12 @@ class TestAForfeitWhoseRowsGiveTheMatchToTheSideThatForfeitedIsOneError(OneNight
 
     def test_the_box_is_named_in_the_words_the_readers_checks_use(self):
         # A spy for the same reason: the box worded a second way reads the same.
-        with mock.patch.object(validate, "_box", return_value="THE BOX") as named:
+        # 4.418 moved this: validate names what gave the match up by the reader's
+        # _given_up, the box or the walkover, and asks it of the card.
+        with mock.patch.object(validate, "_given_up", return_value="THE BOX") as named:
             report = self.validate(self.nights["filed"]["given"])
-        self.assertIn(mock.call("away"), named.call_args_list)
+        self.assertIn("away", {call.args[0].forfeit_side
+                               for call in named.call_args_list})
         found, = [i for i in report.errors if i.rule == "forfeit-contradicted"]
         self.assertEqual(found.detail, self.READ.replace(
             "the away Match Forfeited box", "THE BOX") + ", and the away Match Winner "
@@ -4934,11 +6480,13 @@ class TestAForfeitsVerbMismatchSaysWhatTheBoxGivesTheMatchTo(OneNightCase):
 
     def test_the_box_is_named_in_the_words_every_check_held_to_it_uses(self):
         # A spy rather than a card: a second wording that agrees today cannot be
-        # told apart from the one by any card.
-        self.assertIs(validate._box, scorecard._box)
-        with mock.patch.object(validate, "_box", return_value="THE BOX") as named:
+        # told apart from the one by any card. 4.418 moved this: the wording is the
+        # reader's _given_up, which names the box or the walkover, asked of the card.
+        self.assertIs(validate._given_up, scorecard._given_up)
+        with mock.patch.object(validate, "_given_up", return_value="THE BOX") as named:
             report = self.validate(self.nights["LOSES TO"]["given"])
-        self.assertIn(mock.call("away"), named.call_args_list)
+        self.assertIn("away", {call.args[0].forfeit_side
+                               for call in named.call_args_list})
         self.assertEqual(report.errors[0].detail,
                          "verb 'LOSES TO' says away; THE BOX gives the match to home")
 
@@ -5179,11 +6727,18 @@ class TestATotalRowTheRowsDoNotAddToIsReportedOnceByTotalsMismatch(OneNightCase)
                          ["home games"])
 
     def test_a_forfeit_whose_rows_give_a_result_is_held_to_its_rows(self):
+        # 4.421 moved this: held to its rows as Match Centre scores them too, every
+        # rubber a love set to the side that came, as the box gives it whatever
+        # was played. Its TOTAL row totals that, so it agrees, and says under which
+        # set rules.
         key = "forfeit with rows, the award"
-        self.assertEqual(self.errors(key), [("totals-mismatch", validate.ERROR)])
-        self.assertEqual(self.message(key)[0], "the printed TOTAL row and the set "
-                                               "rows disagree on away games.")
-        self.assertFalse(self.check(key, "totals").agrees)
+        self.assertEqual(self.errors(key), [])
+        check = self.check(key, "totals")
+        self.assertTrue(check.agrees)
+        self.assertTrue(check.detail.endswith(
+            "as Match Centre counts them under first-to-6, advantage-6 or "
+            "six-game-tiebreak: every rubber to home as a love set, for the away "
+            "Match Forfeited box"), check.detail)
 
     def test_a_wrong_total_stands_down_the_totals_check_alone(self):
         # Read empty, the card counts for nothing, so its verb and its tick are
@@ -5232,7 +6787,8 @@ class TestATotalRowTheRowsDoNotAddToIsReportedOnceByTotalsMismatch(OneNightCase)
                     self.assertIn(("totals-mismatch", validate.ERROR), said)
         # The premise: the reader disagreed on TOTAL rows totals-mismatch reports,
         # and on one it holds to nothing, so neither half is vacuous.
-        self.assertEqual((stood_down, called_off), (11, 1))
+        # 4.421 moved this: "forfeit with rows, the award" now agrees.
+        self.assertEqual((stood_down, called_off), (10, 1))
 
     def test_f6_asks_the_totals_check_where_it_reports(self):
         # A spy rather than a card: F6 keeping its own account of which cards
@@ -5286,8 +6842,692 @@ class TestATotalRowTheRowsDoNotAddToIsReportedOnceByTotalsMismatch(OneNightCase)
                 self.assertIn("cross-check totals: DISAGREES - ", done.stdout)
                 self.assertIn("cross-checks  3 available, 1 disagreeing\n",
                               done.stdout)
-                self.assertIn("build.py reports this as an error rather than "
-                              "scoring it.", " ".join(done.stdout.split()))
+                # 4.426 moved it: the build fails the run and records what the
+                # rows give.
+                self.assertIn("build.py reports this as an error, which fails the "
+                              "run, and still records the match as its set rows",
+                              " ".join(done.stdout.split()))
+
+
+class AwardedNightCase(OneNightCase):
+    """:class:`OneNightCase`, with Forfeit, Retired and Incomplete boxes on rows.
+
+    ``marks`` are ``(row, status, side)``, the status box ticked on that side of
+    that row; ``blank`` are ``(row, side)``, a side that printed nobody on the row,
+    as on a rubber nobody came for. ``match`` is the night as discovered and
+    ``season`` the season export builds of it, so the players and the teams can be
+    read as the pages read them.
+    """
+
+    AS_PLAYED = '[rules]\nforfeit_award = "as-played"\n'
+    FAST4 = '[rules]\nsets = "fast4"\n'
+    F, R, I = SetStatus.FORFEIT, SetStatus.RETIRED, SetStatus.INCOMPLETE
+
+    @classmethod
+    def night(cls, number: int, *, scores, config: str = "", marks=(), blank=(),
+              twin=None, **fields) -> dict:
+        _, rockets = TEAMS[cls.HOME]
+        _, aces = TEAMS[cls.AWAY]
+        root = Path(cls._tmp.name) / f"night-{number}"
+        data = root / "data"
+        folder = data / f"Round{SHORT_ROUND}"
+        folder.mkdir(parents=True)
+        if config:
+            (root / "config.toml").write_text(config)
+
+        def laid(scores, marks, blank):
+            rows = list(rows_for(scores, rockets, aces))
+            for index, status, side in marks:
+                rows[index] = dataclasses.replace(rows[index], status=status,
+                                                  status_side=side)
+            for index, side in blank:
+                rows[index] = dataclasses.replace(rows[index],
+                                                  **{f"{side}_players": ()})
+            return tuple(rows)
+
+        path = cw.write_card_file(folder / "card.pdf", short_spec(
+            cls.HOME, cls.AWAY, court="10", match_id="4000010",
+            rows=laid(scores, marks, blank), **fields))
+        if twin is not None:
+            # The same night again, its rows as *twin* gives them.
+            cw.write_card_file(folder / "twin.pdf", short_spec(
+                cls.HOME, cls.AWAY, court="10", match_id="4000010",
+                rows=laid(twin, marks, blank), **fields))
+        cards, rejected = scorecard.read_tree(data)
+        found = discover_mod.discover(
+            cards, rejected,
+            config=(config_mod.load(root / "config.toml") if config
+                    else config_mod.Config(path=root / "config.toml")),
+            root=data)
+        comp_id, = sorted(found.matches)
+        competition = next(c for c in found.club.competitions if c.id == comp_id)
+        given = dict(matches=found.matches[comp_id], comp=competition,
+                     club=found.club, cards=cards, rejected=rejected)
+        report = cls.validate(given)
+        card = next(c for c in cards if c.source.endswith("card.pdf"))
+        season = export.build_season(
+            found.matches[comp_id], competition=competition, source_dir=data,
+            generated="2026-09-10T12:00:00", club=found.club, cards=cards,
+            rejected=rejected)
+        return dict(root=root, path=path, card=card, given=given, report=report,
+                    said=cls.said_of(report), match=given["matches"][0],
+                    season=season)
+
+    def match(self, key) -> Match:
+        return self.nights[key]["match"]
+
+    def games(self, key) -> tuple[int, int, int, int]:
+        """The night's ``(home_sets, home_games, away_games, away_sets)``."""
+        m = self.match(key)
+        return (m.home_sets, m.home_games, m.away_games, m.away_sets)
+
+    def points(self, key) -> tuple[float, float]:
+        m = self.match(key)
+        return (round(m.points_for(m.home), 1), round(m.points_for(m.away), 1))
+
+    def rows(self, key) -> list[tuple]:
+        """Each rubber's scored games and winner, then the games printed."""
+        return [(r.home_games, r.away_games, r.winner,
+                 r.printed_home_games, r.printed_away_games)
+                for r in self.match(key).sets]
+
+    def messages(self, key, rule: str) -> list[str]:
+        return [i.message for i in self.nights[key]["report"].issues
+                if i.rule == rule]
+
+    def player(self, key, slug: str) -> dict | None:
+        """The player's figures as the season has them, or None if it has none."""
+        return next((p for p in self.nights[key]["season"]["players"]
+                     if p["slug"] == slug), None)
+
+    def figures(self, key, slug: str) -> tuple:
+        p = self.player(key, slug)
+        return (p["matches"], p["sets_played"], p["sets_won"], p["sets_lost"],
+                p["games_won"], p["games_lost"])
+
+    def gap(self, key, team: str) -> dict:
+        row, = [t for t in self.nights[key]["season"]["teams"] if t["slug"] == team]
+        return row["contribution_gap"]
+
+
+AWARDED = ((2, 6), (6, 2), (1, 6), (3, 6))
+AWARDED_MARKS = ((0, SetStatus.FORFEIT, "away"), (2, SetStatus.FORFEIT, "away"),
+                 (3, SetStatus.FORFEIT, "away"))
+AWARDED_FIELDS = dict(scores=AWARDED, marks=AWARDED_MARKS, verb="DEFEATS",
+                      winner="home")
+
+
+class TestARubberTickedForfeitIsScoredAsTheLoveSetMatchCentreTotalsIt(
+        AwardedNightCase):
+    """A rubber ticked Forfeit against one side is a love set to the other.
+
+    The card, in the shape Match Centre exports: d1 2-6, s1 6-2, s2 1-6 and d2
+    3-6, the away Forfeit box ticked on d1, s2 and d2, DEFEATS, the home Match
+    Winner box, and a TOTAL row of sets 4-0 games 24-2. The owner scores it 6.4 to
+    2.2, the away side's 2.2 the 2 games of the one rubber played and not
+    forfeited. 0.1.0 scored the rows' printed games, 12-20, paid the away side 6.0
+    and the home side 3.2, and reported totals-mismatch and verb-mismatch, both
+    errors, so the run stopped (/tmp/mcf/scratch/RUBBER/probe/before.txt). Now each
+    forfeited rubber is scored 6-0 to the side that stayed, at the set rule's
+    games to win, by :func:`~matchcentre.model.rubber_award`, under ``full-games``
+    and ``fixed``; the games printed are kept beside it. ``as-played`` scores the
+    games printed, as 0.1.0 did. A TOTAL row may total the rows either way, and
+    one that totals neither is one totals-mismatch naming both. Rejected: the
+    games printed under every award (0.1.0, and what the card's own TOTAL row
+    contradicts), and a TOTAL row read against the scored rows alone, which would
+    make every card totalled on the printed games an error.
+
+    So may a verb and a tick, as the reader's checks have them. 0.1.0's own writer
+    filled the card in as played, ``LOSES TO``, the away tick and a TOTAL row of
+    4-0 12-20; it built clean on 0.1.0, and validate holding the verb to the rows
+    as scored alone failed it on ``verb-mismatch``, ``the set rows give home``,
+    while the doctor said its verb and tick agreed
+    (/tmp/mcf/scratch/RUBBER/fix/before-fix.txt). A verb neither reckoning bears
+    out is named against both.
+    """
+
+    @classmethod
+    def cases(cls):
+        return {
+            "totalled as scored": dict(**AWARDED_FIELDS, totals=(4, 24, 2, 0)),
+            "totalled as printed": dict(**AWARDED_FIELDS, totals=(4, 12, 20, 0)),
+            "totalled on court": dict(**AWARDED_FIELDS, totals=(1, 12, 20, 3)),
+            "as-played": dict(**AWARDED_FIELDS, totals=(4, 24, 2, 0),
+                              config=cls.AS_PLAYED),
+            "fast4": dict(scores=((2, 4), (4, 2), (1, 4), (3, 4)),
+                          marks=AWARDED_MARKS, verb="DEFEATS", winner="home",
+                          totals=(4, 16, 2, 0), set_rule="fast4",
+                          config=cls.FAST4),
+            "d1 ticked both": dict(
+                scores=AWARDED, marks=((0, cls.F, "both"),) + AWARDED_MARKS[1:]),
+            "d1 misread": dict(AWARDED_FIELDS,
+                               scores=((7, 2),) + AWARDED[1:]),
+            "a game off the love sets": dict(**AWARDED_FIELDS,
+                                             totals=(4, 24, 3, 0)),
+            "verb as printed": dict(AWARDED_FIELDS, verb="LOSES TO",
+                                    winner="away", totals=(4, 12, 20, 0)),
+            "a draw verb": dict(AWARDED_FIELDS, verb="DRAWS WITH",
+                                winner=cw.NO_TICK, totals=(4, 24, 2, 0)),
+            "a verb for neither": dict(
+                scores=((6, 2), (6, 3), (2, 6), (6, 1)), marks=AWARDED_MARKS[1:2],
+                verb="LOSES TO", winner="away", totals=(4, 24, 6, 0)),
+        }
+
+    def test_the_owners_card_is_scored_6_4_to_2_2_with_no_error(self):
+        self.assertEqual(self.errors("totalled as scored"), [])
+        self.assertEqual(self.games("totalled as scored"), (4, 24, 2, 0))
+        self.assertEqual(self.points("totalled as scored"), (6.4, 2.2))
+        self.assertEqual(self.match("totalled as scored").winner, "home")
+
+    def test_each_forfeited_rubber_is_a_love_set_and_keeps_the_games_printed(self):
+        self.assertEqual(self.rows("totalled as scored"), [
+            (6, 0, "home", 2, 6), (6, 2, "home", 6, 2), (6, 0, "home", 1, 6),
+            (6, 0, "home", 3, 6)])
+        self.assertTrue(all(r.completed for r in self.match("totalled as scored").sets))
+
+    def test_its_players_are_credited_the_rubbers_as_scored(self):
+        # Every row was played, so every name on it is credited, with the result
+        # it is scored: the players still add up to their team's games.
+        self.assertEqual(self.figures("totalled as scored", "ana-fernandez"),
+                         (1, 3, 3, 0, 18, 2))
+        self.assertEqual(self.figures("totalled as scored", "bo-nakamura"),
+                         (1, 3, 3, 0, 18, 0))
+        self.assertEqual(self.figures("totalled as scored", "dev-raman"),
+                         (1, 3, 0, 3, 2, 18))
+        self.assertEqual(self.figures("totalled as scored", "elin-sotto"),
+                         (1, 3, 0, 3, 0, 18))
+        self.assertEqual(self.gap("totalled as scored", "hilltop-aces")["games"], 0)
+        self.assertEqual(self.gap("totalled as scored", "riverside-rockets")["games"],
+                         0)
+
+    def test_a_total_row_of_the_games_printed_is_no_error_either(self):
+        self.assertEqual(self.errors("totalled as printed"), [])
+        self.assertEqual(self.games("totalled as printed"), (4, 24, 2, 0))
+
+    def test_a_total_row_of_neither_is_one_totals_mismatch_naming_both(self):
+        self.assertEqual(self.errors("totalled on court"),
+                         [("totals-mismatch", validate.ERROR)])
+        issue, = [i for i in self.nights["totalled on court"]["report"].issues
+                  if i.rule == "totals-mismatch"]
+        self.assertTrue(issue.message.endswith(
+            "the printed TOTAL row and the set rows disagree on home sets and "
+            "away sets."), issue.message)
+        self.assertEqual(issue.detail,
+                         "printed sets 1-3 games 12-20; set rows add to sets 4-0 "
+                         "games 24-2 as scored under first-to-6, or sets 4-0 "
+                         "games 12-20 as printed")
+
+    def test_as_played_scores_the_games_printed_as_0_1_0_did(self):
+        self.assertEqual(self.games("as-played"), (4, 12, 20, 0))
+        self.assertEqual(self.points("as-played"), (3.2, 6.0))
+        self.assertEqual(self.match("as-played").winner, "away")
+        self.assertEqual(self.rows("as-played")[0], (2, 6, "home", 2, 6))
+        self.assertEqual(sorted(self.errors("as-played")),
+                         [("totals-mismatch", validate.ERROR),
+                          ("verb-mismatch", validate.ERROR)])
+
+    def test_a_love_set_is_the_set_rules_games_to_win(self):
+        self.assertEqual(self.errors("fast4"), [])
+        self.assertEqual(self.games("fast4"), (4, 16, 2, 0))
+        self.assertEqual(self.points("fast4"), (5.6, 2.2))
+        self.assertEqual(self.rows("fast4")[0], (4, 0, "home", 2, 4))
+
+    def test_a_total_row_nearer_the_love_sets_is_named_against_them(self):
+        # One cell off the rows as scored and two off them as printed: the
+        # disagreement is named against the nearer reckoning, the away games.
+        key = "a game off the love sets"
+        self.assertEqual(self.errors(key), [("totals-mismatch", validate.ERROR)])
+        said, = self.messages(key, "totals-mismatch")
+        self.assertTrue(said.endswith(
+            "the printed TOTAL row and the set rows disagree on away games."), said)
+
+    def test_a_verb_and_tick_of_the_games_printed_are_no_error_either(self):
+        # The games printed give the away side the night 12-20, as 0.1.0's
+        # writer worded and ticked it; the night is still scored 24-2 to home.
+        key = "verb as printed"
+        self.assertEqual(self.errors(key), [])
+        self.assertEqual(self.games(key), (4, 24, 2, 0))
+        self.assertEqual(self.messages(key, "verb-mismatch"), [])
+
+    def test_a_verb_neither_reckoning_bears_out_is_named_against_both(self):
+        key = "a draw verb"
+        self.assertEqual(self.errors(key), [("verb-mismatch", validate.ERROR)])
+        issue, = [i for i in self.nights[key]["report"].issues
+                  if i.rule == "verb-mismatch"]
+        self.assertTrue(issue.message.endswith(
+            "the verb 'DRAWS WITH' says the match was drawn, but the set rows "
+            "give home as scored and away as printed."), issue.message)
+        self.assertEqual(issue.detail,
+                         "verb 'DRAWS WITH' says draw; sets 4-0 and games 24-2 "
+                         "decided on games then sets say home as scored under "
+                         "first-to-6, and sets 4-0 and games 12-20 decided on "
+                         "games then sets say away as printed")
+
+    def test_a_verb_both_reckonings_go_against_names_the_side_they_give(self):
+        # s2 ticked against away and won by home on court: home on both.
+        key = "a verb for neither"
+        self.assertEqual(self.errors(key), [("verb-mismatch", validate.ERROR)])
+        said, = self.messages(key, "verb-mismatch")
+        self.assertTrue(said.endswith(
+            "the verb 'LOSES TO' means away won, but the set rows give home."), said)
+
+    def test_a_row_misread_is_still_said_to_be_though_its_award_is_a_love_set(self):
+        # The games printed are what was read, so they are what set-implausible
+        # asks: the love set the tick scores the row cannot hide a misreading.
+        self.assertIn(("set-implausible", validate.ERROR), self.errors("d1 misread"))
+        self.assertEqual(self.rows("d1 misread")[0], (6, 0, "home", 7, 2))
+        said, = self.messages("d1 misread", "set-implausible")
+        self.assertIn(" d1: 7-2 cannot happen under first-to-6 ", said)
+
+    def test_a_rubber_ticked_against_both_sides_keeps_its_games(self):
+        self.assertEqual(self.errors("d1 ticked both"), [])
+        self.assertEqual(self.games("d1 ticked both"), (3, 20, 8, 1))
+        self.assertEqual(self.points("d1 ticked both"), (6.0, 2.8))
+        self.assertEqual(self.rows("d1 ticked both")[0], (2, 6, "away", 2, 6))
+
+
+RETIRED_BEHIND = ((6, 3), (6, 0), (6, 4), (5, 1))
+RETIRED_AHEAD = ((1, 6), (4, 2), (2, 6), (6, 4))
+
+
+class TestACardWithARetiredRubberIsScoredAsItsRetiredBoxSays(AwardedNightCase):
+    """A rubber one side retired from is the other side's set, at the games to win.
+
+    Two cards in the shapes Match Centre exports: d2 5-1 with the away Retired
+    box, DEFEATS, TOTAL 4-0 24-8; and s1 4-2 with the home Retired box, the home
+    side retiring while ahead, DEF. BY, TOTAL 1-3 13-22. Match Centre gives the
+    side that did not retire the set, its games raised to 6 where it had fewer,
+    and the side that retired keeps its own. 0.1.0 credited the set to nobody at
+    its printed games, counted 23 and 18 games where the cards total 24 and 22,
+    and failed the run on both (totals-mismatch,
+    /tmp/mcf/scratch/RUBBER/probe/before.txt). The reader read the row as RETIRED
+    from either side's box and kept no side, and on the 4-2 card the side that
+    retired is only on the box: it led. Now
+    :class:`~matchcentre.card.ParsedSet` keeps which box is ticked, and
+    :func:`~matchcentre.model.rubber_award` scores the row. ``as-played`` gives the
+    set to the side that stayed at the games printed: the box states the set, and
+    raising the games is the award. Both boxes ticked is nobody's set at the games
+    printed, warned once as ``set-retired-both``. Rejected: the set to the side
+    ahead, which the 4-2 card contradicts, and raising the games under
+    ``as-played``.
+    """
+
+    @classmethod
+    def cases(cls):
+        behind = dict(scores=RETIRED_BEHIND, marks=((3, cls.R, "away"),),
+                      verb="DEFEATS", winner="home", totals=(4, 24, 8, 0))
+        ahead = dict(scores=RETIRED_AHEAD, marks=((1, cls.R, "home"),),
+                     verb="DEF. BY", winner="away", totals=(1, 13, 22, 3))
+        return {
+            "behind": behind,
+            "ahead": ahead,
+            "behind as-played": dict(behind, config=cls.AS_PLAYED),
+            "ahead as-played": dict(ahead, config=cls.AS_PLAYED),
+            "at love": dict(scores=((6, 3), (6, 0), (0, 0), (6, 4)),
+                            marks=((2, cls.R, "away"),), verb="DEFEATS",
+                            winner="home", totals=(4, 24, 7, 0)),
+            "both boxes": dict(scores=RETIRED_BEHIND, marks=((3, cls.R, "both"),),
+                               verb="DEFEATS", winner="home", totals=(3, 23, 8, 0)),
+            "incomplete": dict(scores=RETIRED_BEHIND,
+                               marks=((3, cls.I, "away"),)),
+        }
+
+    def test_the_side_that_retired_behind_leaves_the_set_at_6_1(self):
+        self.assertEqual(self.errors("behind"), [])
+        self.assertEqual(self.games("behind"), (4, 24, 8, 0))
+        self.assertEqual(self.points("behind"), (6.4, 2.8))
+        self.assertEqual(self.rows("behind")[3], (6, 1, "home", 5, 1))
+        self.assertTrue(self.match("behind").sets[3].completed)
+
+    def test_the_side_that_retired_ahead_loses_the_set_and_keeps_its_games(self):
+        self.assertEqual(self.errors("ahead"), [])
+        self.assertEqual(self.games("ahead"), (1, 13, 22, 3))
+        self.assertEqual(self.points("ahead"), (3.3, 6.2))
+        self.assertEqual(self.rows("ahead")[1], (4, 6, "away", 4, 2))
+
+    def test_as_played_gives_the_set_and_keeps_the_games_printed(self):
+        self.assertEqual(self.games("behind as-played"), (4, 23, 8, 0))
+        self.assertEqual(self.rows("behind as-played")[3], (5, 1, "home", 5, 1))
+        self.assertEqual(self.games("ahead as-played"), (1, 13, 18, 3))
+        self.assertEqual(self.rows("ahead as-played")[1], (4, 2, "away", 4, 2))
+        # The cards total Match Centre's award, which this club does not pay.
+        for key in ("behind as-played", "ahead as-played"):
+            self.assertEqual(self.errors(key), [("totals-mismatch", validate.ERROR)])
+
+    def test_a_rubber_retired_from_at_love_is_a_love_set_somebody_played(self):
+        self.assertEqual(self.errors("at love"), [])
+        self.assertEqual(self.rows("at love")[2], (6, 0, "home", 0, 0))
+        self.assertFalse(self.match("at love").nobody_played(
+            self.match("at love").sets[2]))
+        self.assertEqual(self.figures("at love", "bo-nakamura")[1:4], (3, 3, 0))
+
+    def test_both_boxes_ticked_is_nobodys_set_warned_once(self):
+        self.assertEqual(self.errors("both boxes"), [])
+        self.assertEqual(self.games("both boxes"), (3, 23, 8, 0))
+        self.assertEqual(self.rows("both boxes")[3], (5, 1, None, 5, 1))
+        self.assertFalse(self.match("both boxes").sets[3].completed)
+        self.assertEqual(self.messages("both boxes", "set-retired-both"), [
+            "R4 riverside-rockets v hilltop-aces d2: both sides' Retired boxes are "
+            "ticked, so who retired cannot be read from the card, and nobody is "
+            "credited the set; it counts at the 5-1 printed."])
+
+    def test_an_incomplete_rubber_is_still_nobodys(self):
+        self.assertEqual(self.games("incomplete"), (3, 23, 8, 0))
+        self.assertEqual(self.rows("incomplete")[3], (5, 1, None, 5, 1))
+        self.assertEqual(self.messages("incomplete", "set-retired-both"), [])
+
+
+class TestASetForfeitContradictedStandsDownWhereTheTotalRowCountsTheLoveSet(
+        AwardedNightCase):
+    """``set-forfeit-contradicted`` is not asked where the card has said it meant it.
+
+    The forfeit card above (d1 2-6, s1 6-2, s2 1-6, d2 3-6, the away Forfeit box on
+    d1, s2 and d2) drew three ``set-forfeit-contradicted`` warnings on 0.1.0, one a
+    row, though its TOTAL row, 4-0 24-2, counts each of the three as a love set to
+    the home side: the card says three times over that the ticks are meant, and the
+    owner confirms they are (/tmp/mcf/scratch/RUBBER/probe/before.txt). Now the
+    warning stands down where the TOTAL row totals the rows as scored and not as
+    printed (``validate._says_awarded``). With no TOTAL row, or one of the games
+    printed, it stays, and says what the set is now scored: "scored 6-0 to ... as
+    forfeited", or "credited to ..." under ``as-played``, where the games printed
+    stand. A TOTAL row both reckonings give, as where two ticks cross, says
+    neither, and its rows are warned. Rejected: dropping the warning wherever the
+    tick and the games disagree, which leaves a card that ticked the wrong side
+    unwarned, and keeping it beside a TOTAL row that answers it.
+    """
+
+    @classmethod
+    def cases(cls):
+        return {
+            "totalled as scored": dict(**AWARDED_FIELDS, totals=(4, 24, 2, 0)),
+            "totalled as printed": dict(**AWARDED_FIELDS, totals=(4, 12, 20, 0)),
+            "totalled on court": dict(**AWARDED_FIELDS, totals=(1, 12, 20, 3)),
+            "no total row": dict(**AWARDED_FIELDS, omit_totals=True),
+            "as-played": dict(**AWARDED_FIELDS, totals=(4, 24, 2, 0),
+                              config=cls.AS_PLAYED),
+            "derived": dict(scores=AWARDED, marks=AWARDED_MARKS),
+            "either reckoning": dict(
+                scores=((6, 2), (6, 0), (0, 6), (6, 3)),
+                marks=((1, cls.F, "home"), (2, cls.F, "away")), verb="DEFEATS",
+                winner="home", totals=(3, 18, 11, 1)),
+            "fast4, no total row": dict(
+                scores=((2, 4), (4, 2), (1, 4), (3, 4)), marks=AWARDED_MARKS,
+                verb="DEFEATS", winner="home", omit_totals=True,
+                set_rule="fast4", config=cls.FAST4),
+        }
+
+    def said(self, key):
+        return self.messages(key, "set-forfeit-contradicted")
+
+    def test_a_total_row_of_the_love_sets_is_the_card_saying_so(self):
+        self.assertEqual(self.said("totalled as scored"), [])
+
+    def test_the_writers_own_card_totals_the_love_sets_and_is_not_warned(self):
+        self.assertEqual(self.nights["derived"]["card"].totals.home_games, 24)
+        self.assertEqual(self.said("derived"), [])
+
+    def test_otherwise_each_row_is_warned_with_what_it_is_scored(self):
+        for key in ("totalled as printed", "totalled on court", "no total row"):
+            with self.subTest(night=key):
+                self.assertEqual(self.said(key), [
+                    f"R4 riverside-rockets v hilltop-aces {slot}: the row ticks "
+                    f"Forfeit against hilltop-aces and prints {score}, a set "
+                    "hilltop-aces won on court. The tick decides, so the set is "
+                    "scored 6-0 to riverside-rockets as forfeited; check which of "
+                    "the two the card meant."
+                    for slot, score in (("d1", "2-6"), ("s2", "1-6"),
+                                        ("d2", "3-6"))])
+
+    def test_a_total_row_either_reckoning_gives_says_nothing_of_the_ticks(self):
+        # Two ticks crossed, each against the side that won its row on court: the
+        # love sets total what the games printed do, so the TOTAL row cannot say
+        # the ticks are meant, and both rows are warned.
+        self.assertEqual(self.errors("either reckoning"), [])
+        self.assertEqual([m.split(":")[0] for m in self.said("either reckoning")],
+                         ["R4 riverside-rockets v hilltop-aces s1",
+                          "R4 riverside-rockets v hilltop-aces s2"])
+
+    def test_the_love_set_it_says_is_the_set_rules(self):
+        said = self.said("fast4, no total row")
+        self.assertEqual(len(said), 3)
+        self.assertIn("The tick decides, so the set is scored 4-0 to "
+                      "riverside-rockets as forfeited;", said[0])
+
+    def test_as_played_says_the_set_is_credited_at_the_games_printed(self):
+        said = self.said("as-played")
+        self.assertEqual(len(said), 3)
+        self.assertIn("The tick decides, so the set is credited to "
+                      "riverside-rockets; check which of the two the card meant.",
+                      said[0])
+
+
+class TestAMatchGivenUpWholeIsEveryRubberALoveSetAndCreditsOnlyWhoPlayed(
+        AwardedNightCase):
+    """A whole-match forfeit scores every rubber a love set to the side that came.
+
+    Match Centre totals a walkover and a Match Forfeited card 4-0 24-0, even over
+    rows that hold play: a walkover printing 2-6, 6-4, 3-6 and 0-0 totals 4-0
+    24-0. 0.1.0 recorded that walkover 11-16 in games and 1-2 in sets,
+    and a box forfeit over 6-2, 6-3, 2-6, 6-1 at 20-12 and 3-1, and over blank rows
+    at 0-0, crediting the names on blank rows with a match and sets played (4.289)
+    (/tmp/mcf/scratch/RUBBER/probe/before.txt). Now every rubber of a match given up
+    whole, by the box, a walkover or every row ticked, is a love set to the side
+    that came, rows with play included; a rubber nobody played, 0-0 under a
+    forfeit, credits no player and is counted in the team's ``ContributionGap``
+    as ``rubbers_nobody_played``. The points are the forfeit's flat price either
+    way. Rejected: keeping a whole-match forfeit's rows played to a finish at
+    their games (PRICE-1's (3)), which the walkover's own TOTAL row contradicts;
+    and crediting players with a rubber nobody played.
+    """
+
+    @classmethod
+    def cases(cls):
+        blank4 = ((0, 0),) * 4
+        return {
+            "walkover over play": dict(
+                scores=((2, 6), (6, 4), (3, 6), (0, 0)), cancelled=True,
+                winner="home", verb="DEFEATS", totals=(4, 24, 0, 0)),
+            "box over play": dict(scores=((6, 2), (6, 3), (2, 6), (6, 1)),
+                                  forfeited_by="away", totals=(4, 24, 0, 0)),
+            "box over an unfinished rubber": dict(
+                scores=((6, 2), (6, 3), (2, 6), (3, 2)),
+                marks=((3, cls.I, "both"),), forfeited_by="away",
+                totals=(4, 24, 0, 0)),
+            "box over blank rows": dict(scores=blank4, forfeited_by="away"),
+            "box over blank rows, the away names blank": dict(
+                scores=blank4, forfeited_by="away",
+                blank=tuple((i, "away") for i in range(4))),
+            "every row ticked": dict(
+                scores=blank4, marks=tuple((i, cls.F, "away") for i in range(4)),
+                blank=tuple((i, "away") for i in range(4)), verb="DEFEATS",
+                winner="home", totals=(4, 0, 0, 0)),
+            "two rubbers nobody came for": dict(
+                scores=((6, 2), (0, 0), (0, 0), (2, 6)),
+                marks=((1, cls.F, "away"), (2, cls.F, "away")),
+                blank=((1, "away"), (2, "away")), verb="DEFEATS", winner="home",
+                totals=(3, 8, 8, 1)),
+            "a rubber the home side did not come for": dict(
+                scores=((0, 0), (1, 6), (2, 6), (6, 4)),
+                marks=((0, cls.F, "home"),), blank=((0, "home"),),
+                verb="DEF. BY", winner="away", totals=(1, 9, 22, 3)),
+        }
+
+    def test_every_rubber_of_a_walkover_over_play_is_a_love_set(self):
+        self.assertEqual(self.errors("walkover over play"), [])
+        self.assertEqual(self.games("walkover over play"), (4, 24, 0, 0))
+        self.assertEqual(self.points("walkover over play"), (6.4, 0.0))
+        self.assertEqual(self.rows("walkover over play"), [
+            (6, 0, "home", 2, 6), (6, 0, "home", 6, 4), (6, 0, "home", 3, 6),
+            (6, 0, "home", 0, 0)])
+
+    def test_a_walkovers_players_are_credited_the_rubbers_they_played(self):
+        # d1 and s1: Ana played both, and the 0-0 d2 nobody played.
+        self.assertEqual(self.figures("walkover over play", "ana-fernandez"),
+                         (1, 2, 2, 0, 12, 0))
+        self.assertEqual(self.figures("walkover over play", "dev-raman"),
+                         (1, 2, 0, 2, 0, 12))
+        self.assertEqual(self.gap("walkover over play", "riverside-rockets")
+                         ["rubbers_nobody_played"], 1)
+
+    def test_the_box_over_play_is_every_rubber_a_love_set_too(self):
+        self.assertEqual(self.games("box over play"), (4, 24, 0, 0))
+        self.assertEqual(self.rows("box over play")[2], (6, 0, "home", 2, 6))
+        self.assertEqual(self.figures("box over play", "bo-nakamura"),
+                         (1, 3, 3, 0, 18, 0))
+
+    def test_a_rubber_left_unfinished_is_a_love_set_finished_too(self):
+        # Its box says it stopped short, which leaves a played night's set
+        # nobody's; the match given up gives it to the side that came, finished.
+        key = "box over an unfinished rubber"
+        self.assertEqual(self.errors(key), [])
+        self.assertEqual(self.games(key), (4, 24, 0, 0))
+        self.assertEqual(self.rows(key)[3], (6, 0, "home", 3, 2))
+        self.assertEqual(self.match(key).completed_sets, 4)
+
+    def test_nobody_is_credited_a_match_nobody_played(self):
+        for key in ("box over blank rows", "every row ticked"):
+            with self.subTest(night=key):
+                self.assertEqual(self.errors(key), [])
+                self.assertEqual(self.games(key), (4, 24, 0, 0))
+                self.assertEqual(self.points(key), (6.4, 0.0))
+                self.assertTrue(self.match(key).no_rubber_played)
+                for slug in ("ana-fernandez", "bo-nakamura"):
+                    p = self.player(key, slug)
+                    self.assertTrue(p is None or p["matches"] == 0, p)
+                gap = self.gap(key, "riverside-rockets")
+                self.assertEqual((gap["rubbers_nobody_played"], gap["games"]),
+                                 (4, 24))
+
+    def test_a_match_nobody_played_is_owed_no_name_by_the_side_that_never_came(self):
+        # Its blank rows are love sets, 6-0 each, so who played them is asked of
+        # the games printed: asked of the games scored, every row the away side
+        # named nobody on would be a name missing.
+        key = "box over blank rows, the away names blank"
+        self.assertEqual(self.games(key), (4, 24, 0, 0))
+        self.assertEqual([i.rule for i in self.nights[key]["report"].issues
+                          if i.rule in ("set-players-missing", "roster-missing",
+                                        "set-no-games")], [])
+
+    def test_rubbers_nobody_came_for_are_love_sets_nobody_is_credited(self):
+        key = "two rubbers nobody came for"
+        self.assertEqual(self.errors(key), [])
+        self.assertEqual(self.games(key), (3, 20, 8, 1))
+        self.assertEqual(self.points(key), (6.0, 2.8))
+        self.assertFalse(self.match(key).no_rubber_played)
+        # Ana was named on s1, which nobody came to play: d1 and d2 are hers.
+        self.assertEqual(self.figures(key, "ana-fernandez"), (1, 2, 1, 1, 8, 8))
+        gap = self.gap(key, "riverside-rockets")
+        self.assertEqual((gap["rubbers_nobody_played"], gap["games"]), (2, 12))
+
+    def test_a_rubber_the_home_side_did_not_come_for_totals_as_its_card_does(self):
+        key = "a rubber the home side did not come for"
+        self.assertEqual(self.errors(key), [])
+        self.assertEqual(self.games(key), (1, 9, 22, 3))
+        self.assertEqual(self.points(key), (2.9, 6.2))
+        gap = self.gap(key, "hilltop-aces")
+        self.assertEqual((gap["rubbers_nobody_played"], gap["games"]), (1, 6))
+
+    def test_the_side_that_gave_a_rubber_up_has_no_rubber_nobody_played(self):
+        # The count is of rubbers whose love set is in the team's Games column;
+        # the side that gave one up won no games from it, and its caption says
+        # none.
+        for key, gave_up in (("walkover over play", "hilltop-aces"),
+                             ("box over blank rows", "hilltop-aces"),
+                             ("every row ticked", "hilltop-aces"),
+                             ("two rubbers nobody came for", "hilltop-aces"),
+                             ("a rubber the home side did not come for",
+                              "riverside-rockets")):
+            with self.subTest(night=key):
+                self.assertEqual(self.gap(key, gave_up)["rubbers_nobody_played"], 0)
+
+
+class TestTheSeasonSaysWhatEachRubberPrintedAndWhetherAnybodyPlayedIt(
+        AwardedNightCase):
+    """The export writes the games printed and the one rule of who played.
+
+    The pages show a forfeited rubber's games on court beside its award ("Forfeit,
+    2-6 on court", "0-6 (6-2 on court)"), leave a rubber nobody played out of a
+    player's sets, and leave a night no rubber was played on out of the overview's
+    Sets completed, Games played, Tightest and Biggest tiles. JavaScript renders and
+    Python decides, so each is a field: ``printed_home_games`` and
+    ``printed_away_games`` and ``nobody_played`` on each set, and the printed games
+    and ``no_rubber_played`` on each match, from
+    :meth:`~matchcentre.model.Match.nobody_played`. 0.1.0 wrote none of them.
+    Rejected: the rule written again in app.js.
+
+    A washout's rows are scored by the same rule, though it counts for nothing:
+    Match Centre totals a cancelled card's rows 1-6, 2-6, s2 0-0 with the home
+    Retired box and d2 0-0 with the home Forfeit box 0-4 3-24, and so does its
+    match page. The base wrote it 0-3 3-12, s2 nobody's and d2 the away side's
+    at 0-0 (/tmp/mcf/scratch/RUBBER/fix/base-wash.txt). Rejected: leaving a
+    washout's rows as printed, a second rule for one status.
+    """
+
+    @classmethod
+    def cases(cls):
+        return {
+            "awarded": dict(**AWARDED_FIELDS, totals=(4, 24, 2, 0)),
+            "box over blank rows": dict(scores=((0, 0),) * 4, forfeited_by="away"),
+            "washout": dict(scores=((1, 6), (2, 6), (0, 0), (0, 0)),
+                            marks=((2, cls.R, "home"), (3, cls.F, "home")),
+                            blank=((3, "home"),), cancelled=True, verb="VS",
+                            winner=cw.NO_TICK, totals=(0, 3, 24, 4)),
+        }
+
+    def exported(self, key) -> dict:
+        match, = self.nights[key]["season"]["matches"]
+        return match
+
+    def test_each_set_says_the_games_printed_beside_the_games_scored(self):
+        sets = self.exported("awarded")["sets"]
+        self.assertEqual([(s["home_games"], s["away_games"], s["printed_home_games"],
+                           s["printed_away_games"], s["nobody_played"])
+                          for s in sets],
+                         [(6, 0, 2, 6, False), (6, 2, 6, 2, False),
+                          (6, 0, 1, 6, False), (6, 0, 3, 6, False)])
+
+    def test_each_match_says_its_games_printed_and_whether_a_rubber_was_played(self):
+        match = self.exported("awarded")
+        self.assertEqual((match["home_games"], match["away_games"],
+                          match["printed_home_games"], match["printed_away_games"],
+                          match["no_rubber_played"]), (24, 2, 12, 20, False))
+        match = self.exported("box over blank rows")
+        self.assertEqual((match["home_games"], match["printed_home_games"],
+                          match["no_rubber_played"]), (24, 0, True))
+        self.assertTrue(all(s["nobody_played"] for s in match["sets"]))
+
+    def test_a_washouts_rows_are_scored_as_its_card_totals_them_for_nothing(self):
+        match = self.exported("washout")
+        self.assertEqual((match["status"], match["result"]), ("cancelled", "none"))
+        self.assertEqual((match["home_sets"], match["home_games"], match["away_games"],
+                          match["away_sets"], match["printed_home_games"],
+                          match["printed_away_games"]), (0, 3, 24, 4, 3, 12))
+        self.assertEqual([(s["home_games"], s["away_games"], s["winner"],
+                           s["printed_home_games"], s["printed_away_games"],
+                           s["nobody_played"]) for s in match["sets"]][2:],
+                         [(0, 6, "away", 0, 0, False), (0, 6, "away", 0, 0, True)])
+        self.assertEqual([i.rule for i in self.nights["washout"]["report"].issues
+                          if i.severity == validate.ERROR], [])
+
+
+class TestTwoCardsOfANightThatPrintDifferentGamesStillDisagree(AwardedNightCase):
+    """Two cards of one night are held to the games printed, not the love sets.
+
+    The pair differ only in d1, ticked Forfeit against away on both and printed 2-6
+    on one and 3-6 on the other. Both score it 6-0 to the home side, so the scored
+    rows agree; the cards do not, and 0.1.0's ``F9`` names them. ``stats._scoreline``
+    keeps the games printed and the Retired boxes, so it still does. Rejected:
+    comparing the scored games, which would take one card of two that disagree.
+    """
+
+    @classmethod
+    def cases(cls):
+        return {"pair": dict(**AWARDED_FIELDS, totals=(4, 24, 2, 0),
+                             twin=((3, 6),) + AWARDED[1:])}
+
+    def test_the_pair_is_one_f9_error(self):
+        self.assertEqual([s for s in self.errors("pair") if s[0] == "F9"],
+                         [("F9", validate.ERROR)])
 
 
 class TestTheVerbsRealCardsPrintAreReadAsTheyWere(unittest.TestCase):
@@ -5444,8 +7684,11 @@ class TestTheSeasonSaysWhoWonEachRubberSoNoPageHasToWorkItOut(SeasonCase):
             cw.SetRow(0, 0, False, (), (away_players[0],),
                       status=SetStatus.FORFEIT, status_side="home"),
             # Ahead when it stopped, which is not the same as having won it.
+            # 4.422 moved this: ticked Retired against both sides, where it was
+            # the away side, which now gives home the set raised to 6 games; who
+            # retired cannot be read, and the lead is still not a win.
             cw.SetRow(5, 4, True, pair_home, pair_away,
-                      status=SetStatus.RETIRED, status_side="away"),
+                      status=SetStatus.RETIRED, status_side="both"),
         )
         cw.write_card_file(folder / "every-kind.pdf", cw.CardSpec(
             date="2026-09-08", round_label=cls.ROUND, division="B",
@@ -5475,7 +7718,10 @@ class TestTheSeasonSaysWhoWonEachRubberSoNoPageHasToWorkItOut(SeasonCase):
 
     def test_a_rubber_nobody_came_for_goes_to_the_side_that_did_on_either_side(self):
         sets = self.sets()
-        self.assertEqual((sets["s1"]["home_games"], sets["s1"]["away_games"]), (0, 0))
+        # 4.421 moved this: scored the love set to home, printed 0-0.
+        self.assertEqual((sets["s1"]["home_games"], sets["s1"]["away_games"]), (6, 0))
+        self.assertEqual((sets["s1"]["printed_home_games"],
+                          sets["s1"]["printed_away_games"]), (0, 0))
         self.assertEqual(sets["s1"]["winner"], "home",
                          "a rubber the away side did not come for is not the home "
                          "side's in the document, and 0-0 gives it to nobody")
@@ -6109,10 +8355,11 @@ class TestNoFindingNamesTheCompetitionItIsListedUnder(unittest.TestCase):
         # put in a folder reaches that handler today -- it is there because a ledger is
         # free to grow a second reason to refuse, and because the alternative is the
         # report dying on one competition of three. Its sentence is shown to a club like
-        # any other sentence, so it is swept like any other.
-        with mock.patch("matchcentre.validate.points_ledger",
-                        side_effect=scoring.ScoringError(
-                            "games-bonus has no value for a draw")):
+        # any other sentence, so it is swept like any other. Patched in stats since
+        # 4.428, where F10 now asks for the counts (`stats.ladder_counts`).
+        with mock.patch.object(stats, "points_ledger",
+                               side_effect=scoring.ScoringError(
+                                   "games-bonus has no value for a draw")):
             refused = validate.validate([won], self.competition())
         return [
             ("a ledger that refuses to price the season", refused),
@@ -6857,7 +9104,9 @@ class TestAFixtureTheSeasonWentPastWithNoCardIsReported(unittest.TestCase):
         comp = self.competition()
         for declared, digit, words in (
                 (True, "2", "accounts for none of BOLTS and COMETS."),
-                (False, "2", "has 1 card where the fullest round has 2.")):
+                # 4.445: the undeclared branch names the teams it leaves off too.
+                (False, "2", "accounts for none of BOLTS and COMETS, of the 4 teams "
+                             "the cards name.")):
             with self.subTest(teams_declared=declared):
                 note, = discover_mod._shortfall_notes(
                     comp.id, rounds, cards, dict(comp.teams), declared)
@@ -6878,6 +9127,1087 @@ class TestAFixtureTheSeasonWentPastWithNoCardIsReported(unittest.TestCase):
             f"{', '.join(labels[:-1])} and {labels[-1]} are in the declared draw with "
             f"no cards at all"),
             note[:300])
+
+
+class TestARoundShortOfCardsNamesTheTeamsItLeavesOffAndOffersARestOnlyForOne(
+        unittest.TestCase):
+    """4.445: with the team list undeclared, a round short of cards names who it leaves off.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p445/before.txt), through
+    :func:`~matchcentre.discover._shortfall_notes` itself: a six-team round one card
+    short, which leaves two teams on no card, and a five-team one, which leaves three,
+    were each told ``has 2 cards where the fullest round has 3`` (``1 card ... 2``)
+    and ``uncomment teams = [...] under [competitions.c] if the missing card is
+    really a team resting``. F1 credits a bye only where exactly one team of the
+    declared list is on no card, and with the list declared those two rounds say
+    ``accounts for none of`` two and three teams and credit nothing, so the step the
+    note gave could not do what it offered. A four-team round with every team on a
+    card, beside a fullest round carrying a catch-up, was offered the same rest though
+    nobody rested; and SF and GF from the cards were told short of cards undeclared
+    and ``Two or more teams unaccounted for`` declared, though a final earns no
+    ladder points and its rounds are short by design.
+
+    Now the undeclared branch works the teams out as the declared one does: two or
+    more off get the declared branch's sentence with the number of teams the cards
+    name, one off is named with the bye a checked list would credit and no file step
+    (the same run's team-list note words that step from the file, 4.192), nobody off
+    is no note, and a final is skipped and sets no fullest round.
+
+    Rejected: keying the offer on an even team count, since the five-team round is
+    offered it as falsely; firing on teams off at any card count, since on a list
+    read from the cards a misspelt banner is a team of its own that every round but
+    its card's leaves off; wording the step from the file, which is the team-list
+    note's step told twice; skipping finals only where the list is undeclared, since
+    the declared branch is as wrong of them.
+    """
+
+    SIX = (("1", (("aces", "bears"), ("hawks", "nets"), ("rockets", "spinners"))),
+           ("2", (("aces", "hawks"), ("bears", "rockets"))))
+
+    @staticmethod
+    def shortfall(rounds, *, declared, finals=()):
+        from types import SimpleNamespace
+        rounds = dict(rounds)
+        slugs = sorted({slug for pairs in rounds.values() for pair in pairs
+                        for slug in pair})
+        teams = {slug: Team(slug=slug, name=slug.title()) for slug in slugs}
+        built = {number: Round(number=number, fixtures=tuple(pairs),
+                               source=DRAW_FROM_CARDS, is_finals=number in finals)
+                 for number, pairs in rounds.items()}
+        matches = [SimpleNamespace(round=number, home=home, away=away)
+                   for number, pairs in rounds.items() for home, away in pairs]
+        return discover_mod._shortfall_notes("c", built, matches, teams, declared)
+
+    def test_a_six_team_round_one_card_short_names_its_two_teams_and_offers_no_rest(
+            self):
+        self.assertEqual(self.shortfall(self.SIX, declared=False), [
+            "c: round 2 accounts for none of Nets and Spinners, of the 6 teams the "
+            "cards name. Two or more teams unaccounted for is missing scorecards, "
+            "not a bye, so no bye was credited — find the cards, or declare the "
+            "round's fixtures under [[competitions.c.rounds]]."])
+
+    def test_a_five_team_round_one_card_short_names_its_three_teams(self):
+        note, = self.shortfall(
+            (("1", (("aces", "bears"), ("hawks", "rockets"))),
+             ("2", (("aces", "spinners"),))), declared=False)
+        self.assertTrue(note.startswith(
+            "c: round 2 accounts for none of Bears, Hawks and Rockets, of the 5 "
+            "teams the cards name. Two or more teams unaccounted for is missing "
+            "scorecards, not a bye"), note)
+        self.assertNotIn("uncomment", note)
+
+    def test_one_team_off_beside_a_round_carrying_a_catch_up_is_named_with_its_bye(
+            self):
+        # The one shape where checking the list credits something: every team on a
+        # card but one, in a round a catch-up made look short.
+        self.assertEqual(self.shortfall(
+            (("1", (("aces", "bears"), ("hawks", "rockets"), ("spinners", "aces"))),
+             ("2", (("aces", "hawks"), ("bears", "spinners")))), declared=False), [
+            "c: round 2 has no card of Rockets, one of the 5 teams the cards name. "
+            "With the team list undeclared that stays a gap; if Rockets was "
+            "resting, the bye is credited once you have checked the team list and "
+            "declared it."])
+
+    def test_a_round_with_every_team_on_a_card_gets_no_note(self):
+        # Fewer cards than the fullest round, which carries a catch-up, and nobody
+        # left off: there is no gap to tell and no rest to offer.
+        self.assertEqual(self.shortfall(
+            (("1", (("aces", "bears"), ("hawks", "rockets"), ("aces", "hawks"))),
+             ("2", (("aces", "rockets"), ("bears", "hawks")))), declared=False), [])
+
+    def test_a_full_round_a_misspelt_banner_leaves_teams_off_is_no_gap(self):
+        # On a list read from the cards a banner typed two ways is two teams, and
+        # every round but its card's leaves one of them off: a round with as many
+        # cards as the fullest is short of none, with one such team off or two.
+        for off, rounds in (
+                (1, (("1", (("aces", "bears"), ("hawks", "nets"),
+                            ("falcoms", "herons"))),
+                     ("2", (("aces", "hawks"), ("bears", "herons"),
+                            ("nets", "falcons"))))),
+                (2, (("1", (("aces", "bears"), ("nets", "owls"),
+                            ("falcoms", "herons"))),
+                     ("2", (("aces", "nets"), ("bears", "owls"),
+                            ("falcons", "hirons")))))):
+            with self.subTest(off=off):
+                self.assertEqual(self.shortfall(rounds, declared=False), [])
+
+    def test_finals_from_the_cards_get_no_note_declared_or_not(self):
+        rounds = (("1", (("aces", "bears"), ("hawks", "nets"), ("rockets", "spinners"))),
+                  ("2", (("aces", "hawks"), ("bears", "rockets"), ("nets", "spinners"))),
+                  ("SF", (("aces", "rockets"), ("hawks", "bears"))),
+                  ("GF", (("aces", "hawks"),)))
+        for declared in (False, True):
+            with self.subTest(teams_declared=declared):
+                self.assertEqual(self.shortfall(rounds, declared=declared,
+                                                finals=("SF", "GF")), [])
+
+    def test_the_fullest_round_is_taken_over_the_rounds_that_are_not_finals(self):
+        # Five teams, two cards a night and one resting: no regular round is short.
+        # A finals night of three cards is not the number they are held to.
+        rounds = (("1", (("aces", "bears"), ("hawks", "rockets"))),
+                  ("2", (("aces", "hawks"), ("bears", "spinners"))),
+                  ("Finals", (("aces", "bears"), ("hawks", "rockets"),
+                              ("spinners", "aces"))))
+        self.assertEqual(self.shortfall(rounds, declared=False,
+                                        finals=("Finals",)), [])
+
+
+class TestTheTeamListNoteSaysWhatCheckingTheListBuys(unittest.TestCase):
+    """4.445: the team-list note no longer says a missing card and a rest look alike.
+
+    Measured before: the note on a list read from the cards said no bye is credited
+    until it is checked because ``a missing card and a resting team look identical
+    from here``. They do not: a round one card short of a full one leaves two teams
+    off, and a rest leaves one, which F1 credits only from a list that was checked.
+    What checking buys is that the one team off is the division's own, and not a
+    misspelt banner or a team never seen; the parenthetical says that now. The pinned
+    sentence in tests/test_cli.py
+    (test_the_notes_still_say_everything_they_said_before) moved with it. Rejected:
+    dropping the parenthetical, which leaves the club no reason to check the list at
+    all.
+    """
+
+    def test_the_note_gives_the_reason_a_bye_needs_a_checked_list(self):
+        data = Path(self.enterContext(tempfile.TemporaryDirectory())) / "data"
+        write_six_tuesdays(data.parent, "complete", "none")
+        cards, rejected = scorecard.read_tree(data)
+        found = discover_mod.discover(
+            cards, rejected, config=config_mod.Config(path=data.parent / "c.toml"),
+            root=data)
+        note, = [n for n in found.notes if "the team list was read from" in n]
+        self.assertIn("Until you do, no bye is ever credited (a team on no card of "
+                      "a round is resting only if it is one of the division's, and "
+                      "only a list you have checked says so) and a misspelt banner "
+                      "becomes a team of its own.", note)
+        self.assertNotIn("look identical", note)
+
+
+# Six teams over three Tuesdays, three matches a night, so nobody rests in an
+# ordinary week; each team its own roster. Fictional, from cardwriter.
+SIX_TEAMS = {
+    "HILLTOP ACES": ("Ada Quill", "Bea Rook", "Cy Moss"),
+    "RIVERSIDE ROCKETS": ("Dee Fane", "Eli Gorse", "Fay Holt"),
+    "LAKESIDE SPINNERS": ("Gus Ivey", "Hal Jett", "Ida Kerr"),
+    "WESTFIELD HAWKS": ("Jo Lyle", "Kit Marr", "Lou Nash"),
+    "EASTWOOD BEARS": ("Max Orme", "Ned Pike", "Ona Rusk"),
+    "NORTHSIDE NETS": ("Pia Shew", "Quoy Tate", "Rae Umber"),
+}
+SIX_OTHERS = {
+    "CORVID LANE": ("Sol Vane", "Tia Wren", "Uma Yale"),
+    "BRAMBLE FINCHES": ("Vic Zorn", "Wyn Abel", "Xan Bligh"),
+}
+SIX_NAMES = tuple(SIX_TEAMS)
+SIX_DRAW = {"1": ((0, 1), (2, 3), (4, 5)), "2": ((0, 2), (1, 4), (3, 5)),
+            "3": ((0, 3), (1, 5), (2, 4))}
+SIX_DATES = {"1": "2026-04-07", "2": "2026-04-14", "3": "2026-04-21"}
+SIX_THURSDAY = "2026-04-23"         # the Thursday after round 3
+
+
+def write_six_tuesdays(root: Path, case: str, config: str) -> None:
+    """The six-team season into ``root/data``, and ``root/config.toml``.
+
+    *case*: ``complete``; ``gone``, round 3's third card never exported; ``thu``,
+    that card dated the Thursday after, in its round's folder; ``apart``, the same
+    in a folder of its own; ``otherdiv``, as ``gone``, plus a Thursday card of two
+    other teams for round 3, beside the gap. *config*: ``none``, no file; ``teams``, the six
+    declared; ``draw``, every fixture declared too; ``seen``, round 3 declared as
+    its two Tuesday cards show it.
+    """
+    data = root / "data"
+
+    def card(index, rnd, home, away, date, folder, rosters=SIX_TEAMS):
+        folder.mkdir(parents=True, exist_ok=True)
+        hp, ap = rosters[home], rosters[away]
+        cw.write_card_file(
+            folder / f"{home.split()[0].title()}-{away.split()[0].title()}.pdf",
+            cw.CardSpec(date=date, round_label=rnd, division="C",
+                        court=f"{index:02d}", match_id=f"600{index:04d}",
+                        home_name=home, away_name=away,
+                        rows=rows_for(((6, 2), (6, 3), (2, 6), (6, 4)), hp, ap),
+                        home_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                                          for i, n in enumerate(hp)),
+                        away_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                                          for i, n in enumerate(ap))))
+
+    index = 0
+    for rnd, pairs in SIX_DRAW.items():
+        for k, (home, away) in enumerate(pairs):
+            last = rnd == "3" and k == 2
+            if last and case in ("gone", "otherdiv"):
+                continue
+            index += 1
+            card(index, rnd, SIX_NAMES[home], SIX_NAMES[away],
+                 SIX_THURSDAY if last and case in ("thu", "apart") else SIX_DATES[rnd],
+                 data / ("Thursday" if last and case == "apart" else f"Round{rnd}"))
+    if case == "otherdiv":
+        card(index + 1, "3", "CORVID LANE", "BRAMBLE FINCHES", SIX_THURSDAY,
+             data / "Round3", SIX_OTHERS)
+    if config == "none":
+        return
+    lines = ["[competitions.tue-c]", 'day = "Tuesday"', 'division = "C"',
+             "teams = [" + ", ".join(f'"{n.title()}"' for n in SIX_NAMES) + "]"]
+    if config in ("draw", "seen"):
+        for rnd, pairs in SIX_DRAW.items():
+            listed = pairs[:2] if config == "seen" and rnd == "3" else pairs
+            lines += ["", "[[competitions.tue-c.rounds]]", f'number = "{rnd}"',
+                      f'date = "{SIX_DATES[rnd]}"',
+                      "fixtures = [" + ", ".join(
+                          f'["{SIX_NAMES[h].title()}", "{SIX_NAMES[a].title()}"]'
+                          for h, a in listed) + "]"]
+    (root / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class SixTuesdaysCase(unittest.TestCase):
+    """``build.py --check`` over the six-team season in each of ``CASES``."""
+
+    CASES: tuple[tuple[str, str], ...] = ()
+    BUILD = ROOT / "build.py"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.runs = {}
+        for case, config in cls.CASES:
+            root = Path(cls._tmp.name) / f"{case}-{config}"
+            write_six_tuesdays(root, case, config)
+            done = subprocess.run(
+                (sys.executable, str(cls.BUILD), "--check", "--data",
+                 str(root / "data"), "--config", str(root / "config.toml"),
+                 "--out", str(root / "site"), "--generated", "2026-06-01T00:00:00"),
+                cwd=root, capture_output=True, text=True, timeout=600)
+            cls.runs[case, config] = (root, done.returncode, done.stdout + done.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def flat(self, case, config):
+        return " ".join(self.runs[case, config][2].split())
+
+    def notes(self, case, config, prefix):
+        """The report's notes beginning *prefix*, each unwrapped onto one line."""
+        out, current = [], None
+        for line in self.runs[case, config][2].splitlines():
+            text = line.strip()
+            if text.startswith("note: "):
+                if current is not None:
+                    out.append(current)
+                current = text[len("note: "):]
+            elif current is not None and line.startswith("        ") and text:
+                current += " " + text
+            elif current is not None:
+                out.append(current)
+                current = None
+        if current is not None:
+            out.append(current)
+        return [note for note in out if note.startswith(prefix)]
+
+    def path_of(self, case, config, folder="Round3"):
+        return str(self.runs[case, config][0] / "data" / folder
+                   / "Lakeside-Eastwood.pdf")
+
+
+class TestACardNeverExportedIsNamedByTheTwoTeamsItLeavesOff(SixTuesdaysCase):
+    """4.445, through build.py: the round one card short names its two teams.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p444/before-gone-none/out.txt): the
+    six-team season with round 3's third card never exported, no config, was told
+    ``round 3 has 2 cards where the fullest round has 3 ... uncomment teams = [...]
+    under [competitions.tuesday-division-c] if the missing card is really a team
+    resting``, two teams off, which uncommenting credits nothing for.
+    """
+
+    CASES = (("gone", "none"),)
+
+    def test_the_note_names_the_two_teams_and_offers_no_rest(self):
+        note, = self.notes("gone", "none", "tuesday-division-c: round")
+        self.assertTrue(note.startswith(
+            "tuesday-division-c: round 3 accounts for none of Eastwood Bears and "
+            "Lakeside Spinners, of the 6 teams the cards name. Two or more teams "
+            "unaccounted for is missing scorecards, not a bye, so no bye was "
+            "credited — find the cards"), note)
+        self.assertNotIn("uncomment", note)
+
+
+class TestACardFiledUnderAnotherNightIsNamedWhereItsRoundsGapIsTold(SixTuesdaysCase):
+    """4.444: a gap a card read into another competition fits says what was read.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p444/before-*/out.txt): the six-team
+    Tuesday season with round 3's third card, Lakeside Spinners v Eastwood Bears,
+    dated the Thursday after (a catch-up played on another night) and sitting in
+    round 3's folder, is read into a Thursday competition of one card and two teams,
+    exits 0 under every config, and prints the card's path nowhere. The Tuesday gap
+    was told three ways, each sending the club to find a card that was read: with no
+    config ``has 2 cards where the fullest round has 3 ... if the missing card is
+    really a team resting``; with the teams declared ``Two or more teams unaccounted
+    for is missing scorecards ... find the cards``; with the draw declared ``that is
+    a card to find, not a team resting`` and card-missing's ``Export it from Match
+    Centre into this round's folder — or if the file is already there, run
+    tools/doctor.py on it``. With the teams declared and round 3 declared as its two
+    Tuesday cards show it, no gap message at all, only F10, since the declared round
+    was never asked which teams it left out.
+
+    Now discovery, once every competition is built, looks for each gap's teams among
+    the cards filed under the other competitions of the season and round: the gap
+    names the card, its path, where it was filed and why (``filing_day``'s, read
+    through one helper), and that it sits in the round's folder where it does;
+    card-missing names the competition and why, with no path (``season.json`` lists
+    only its own competition's cards by path) and no export or doctor advice; and a
+    declared round leaving two teams with neither fixture nor rest is told them.
+
+    Rejected: refiling the card into the gap's competition, a guess about the night
+    routing refuses to make; the folder as the test, since a folder is not a result;
+    the division alone, since one division runs on more than one night; saying the
+    card is the missing one, which two nights fielding teams of one name would make
+    false; a new rule, since the gap is already told once.
+    """
+
+    CASES = (("thu", "none"), ("thu", "teams"), ("thu", "draw"), ("thu", "seen"),
+             ("apart", "teams"), ("otherdiv", "teams"), ("complete", "draw"),
+             ("gone", "teams"), ("gone", "draw"))
+
+    def assertTellsTheCard(self, note, case, config, folder="Round3"):
+        self.assertIn(f"A card of Lakeside Spinners v Eastwood Bears for round 3 was "
+                      f"read from {self.path_of(case, config, folder)}", note)
+        self.assertIn("and filed under thursday-division-c, as it is dated "
+                      "2026-04-23, a Thursday.", note)
+        self.assertNotIn("find the card", note)
+        self.assertNotIn("resting.", note)
+
+    def test_with_no_config_the_gap_names_the_card_and_where_it_was_filed(self):
+        note, = self.notes("thu", "none", "tuesday-division-c: round")
+        self.assertTrue(note.startswith(
+            "tuesday-division-c: round 3 accounts for none of Eastwood Bears and "
+            "Lakeside Spinners, of the 6 teams the cards name."), note)
+        self.assertTellsTheCard(note, "thu", "none")
+        self.assertIn("Lakeside-Eastwood.pdf, in the folder of this round's other "
+                      "cards, and filed under", note)
+        self.assertEqual(self.runs["thu", "none"][1], 0)
+
+    def test_with_the_teams_declared_the_gap_names_the_card_and_where_it_was_filed(
+            self):
+        note, = self.notes("thu", "teams", "tue-c: round")
+        self.assertEqual(note, (
+            "tue-c: round 3 accounts for none of Eastwood Bears and Lakeside "
+            "Spinners. A card of Lakeside Spinners v Eastwood Bears for round 3 was "
+            f"read from {self.path_of('thu', 'teams')}, in the folder of this "
+            "round's other cards, and filed under thursday-division-c, as it is "
+            "dated 2026-04-23, a Thursday. A card counts only where it is filed, so "
+            "that one is not counted here, and no bye was credited."))
+
+    def test_with_the_draw_declared_the_gap_names_the_card_and_card_missing_no_file(
+            self):
+        note, = self.notes("thu", "draw", "tue-c: round")
+        self.assertTrue(note.startswith(
+            "tue-c: round 3 has cards for 2 of its 3 declared fixtures — Lakeside "
+            "Spinners v Eastwood Bears is missing."), note)
+        self.assertTellsTheCard(note, "thu", "draw")
+        flat = self.flat("thu", "draw")
+        self.assertIn(
+            "tue-c: round 3: no scorecard of Lakeside Spinners v Eastwood Bears, "
+            "which the declared draw lists, was filed under this competition, and 2 "
+            "of the 3 fixtures the draw lists for that round do have one. A card of "
+            "Lakeside Spinners v Eastwood Bears for round 3 was read and filed under "
+            "thursday-division-c, as it is dated 2026-04-23, a Thursday. A card "
+            "counts only where it is filed, so that one is not counted here.", flat)
+        self.assertNotIn("Export it from Match Centre", flat)
+        self.assertNotIn("tools/doctor.py", flat)
+        self.assertEqual(self.runs["thu", "draw"][1], 0,
+                         "card-missing is still a warning")
+
+    def test_a_round_declared_as_its_cards_show_it_is_told_the_two_teams_left_off(
+            self):
+        note, = self.notes("thu", "seen", "tue-c: round")
+        self.assertTrue(note.startswith(
+            "tue-c: round 3 accounts for none of Eastwood Bears and Lakeside "
+            "Spinners."), note)
+        self.assertTellsTheCard(note, "thu", "seen")
+
+    def test_a_card_in_a_folder_of_its_own_is_named_without_the_round_folder(self):
+        note, = self.notes("apart", "teams", "tue-c: round")
+        self.assertTellsTheCard(note, "apart", "teams", folder="Thursday")
+        self.assertNotIn("in the folder of this round's other cards", note)
+
+    def test_a_thursday_card_of_other_teams_in_the_same_round_is_no_stray(self):
+        # Beside the round's gap: the Thursday card is of round 3 and prints
+        # division C, and is of neither team the gap leaves off, so the gap is
+        # still a card to find.
+        note, = self.notes("otherdiv", "teams", "tue-c: round")
+        self.assertTrue(note.endswith(
+            "Two or more teams unaccounted for is missing scorecards, not a bye, so "
+            "no bye was credited — find the cards, or declare the round's fixtures "
+            "under [[competitions.tue-c.rounds]]."), note)
+        self.assertNotIn("filed under thursday-division-c",
+                         self.flat("otherdiv", "teams"))
+
+    def test_the_complete_season_is_told_no_gap(self):
+        self.assertEqual(self.notes("complete", "draw", "tue-c: round"), [])
+
+    def test_a_card_never_exported_is_still_a_card_to_find(self):
+        note, = self.notes("gone", "teams", "tue-c: round")
+        self.assertTrue(note.endswith(
+            "Two or more teams unaccounted for is missing scorecards, not a bye, so "
+            "no bye was credited — find the cards, or declare the round's fixtures "
+            "under [[competitions.tue-c.rounds]]."), note)
+        flat = self.flat("gone", "draw")
+        self.assertIn("that is a card to find, not a team resting.", flat)
+        self.assertIn("Export it from Match Centre into this round's folder", flat)
+
+
+class TestAGapThatACardFiledElsewhereFitsIsToldWhatWasRead(unittest.TestCase):
+    """4.444, in the notes themselves: which gaps a card filed elsewhere fits.
+
+    A card fits a gap when both its teams are ones the round leaves off, either way
+    round, and its round is the gap's; a declared fixture is fitted by a card of its
+    two teams. What does not fit leaves the gap told as before. Rejected: matching
+    one team, which would tell a card of another night's fixture against every gap
+    one of its teams is in.
+    """
+
+    TEAMS = {slug: Team(slug=slug, name=slug.title())
+             for slug in ("aces", "bears", "hawks", "nets", "rockets", "spinners")}
+    PATH = "data/Round2/Nets-Spinners.pdf"
+
+    def stray(self, home="nets", away="spinners", number="2", beside=True):
+        return discover_mod.FiledElsewhere(
+            round=number, home=home, away=away, source=self.PATH,
+            filed_under="thursday-c", why="it is dated 2026-04-23, a Thursday",
+            beside=beside)
+
+    def derived(self, strays, *, declared=True, teams=None):
+        from types import SimpleNamespace
+        teams = teams or self.TEAMS
+        rounds = {"1": Round(number="1", source=DRAW_FROM_CARDS, fixtures=(
+                      ("aces", "bears"), ("hawks", "nets"), ("rockets", "spinners"))),
+                  "2": Round(number="2", source=DRAW_FROM_CARDS, fixtures=(
+                      ("aces", "hawks"), ("bears", "rockets")))}
+        matches = [SimpleNamespace(round=number, home=home, away=away)
+                   for number, rnd in rounds.items() for home, away in rnd.fixtures]
+        return discover_mod._shortfall_notes("c", rounds, matches, dict(teams),
+                                             declared, strays)
+
+    def test_two_teams_off_and_a_card_of_them_filed_elsewhere_is_told_it(self):
+        self.assertEqual(self.derived((self.stray(),)), [
+            "c: round 2 accounts for none of Nets and Spinners. A card of Nets v "
+            "Spinners for round 2 was read from data/Round2/Nets-Spinners.pdf, in "
+            "the folder of this round's other cards, and filed under thursday-c, as "
+            "it is dated 2026-04-23, a Thursday. A card counts only where it is "
+            "filed, so that one is not counted here, and no bye was credited."])
+
+    def test_with_the_list_undeclared_the_card_is_told_after_the_teams_named(self):
+        note, = self.derived((self.stray(),), declared=False)
+        self.assertTrue(note.startswith(
+            "c: round 2 accounts for none of Nets and Spinners, of the 6 teams the "
+            "cards name. A card of Nets v Spinners for round 2 was read from"), note)
+
+    def test_the_card_fits_either_way_round(self):
+        note, = self.derived((self.stray(home="spinners", away="nets"),))
+        self.assertIn("A card of Spinners v Nets for round 2 was read", note)
+        self.assertNotIn("find the cards", note)
+
+    def test_a_card_of_another_round_or_of_a_team_the_round_has_does_not_fit(self):
+        for stray in (self.stray(number="3"), self.stray(home="aces")):
+            with self.subTest(stray=stray):
+                note, = self.derived((stray,))
+                self.assertTrue(note.endswith(
+                    "find the cards, or declare the round's fixtures under "
+                    "[[competitions.c.rounds]]."), note)
+                self.assertNotIn("filed under", note)
+
+    def test_a_card_of_two_of_three_teams_off_leaves_the_third_as_a_rest_to_state(
+            self):
+        # Seven teams, one resting a week, and a card filed elsewhere: the shape of
+        # every odd division's round whose card went to another night. The card
+        # counts where it is filed, so the round keeps three teams off and F1
+        # credits nobody; the rest is the club's to state. With the list read from
+        # the cards the byes line alone would close it to Owls, and the six other
+        # teams would each be an F8 error (/tmp/mcf/scratch/ROUNDS/fix/
+        # pre-seven-none/out-byes.txt: exit 1, 6 errors), so the list comes first.
+        teams = {**self.TEAMS, "owls": Team(slug="owls", name="Owls")}
+        for declared, of, once in (
+                (True, "", ""),
+                (False, ", of the 7 teams the cards name",
+                 " once you have checked the team list and declared it")):
+            with self.subTest(teams_declared=declared):
+                note, = self.derived((self.stray(),), teams=teams, declared=declared)
+                self.assertTrue(note.startswith(
+                    f"c: round 2 accounts for none of Nets, Owls and Spinners{of}. A "
+                    f"card of Nets v Spinners"), note)
+                self.assertTrue(note.endswith(
+                    "A card counts only where it is filed, so that one is not counted "
+                    "here, and no bye was credited to Owls, the one team it leaves on "
+                    "no card. If Owls was resting, its line under "
+                    f"[competitions.c.byes] credits it{once}."), note)
+
+    def test_a_card_of_two_of_four_teams_off_leaves_the_other_two_to_find(self):
+        teams = {**self.TEAMS, "owls": Team(slug="owls", name="Owls"),
+                 "wrens": Team(slug="wrens", name="Wrens")}
+        note, = [note for note in self.derived((self.stray(),), teams=teams)
+                 if note.startswith("c: round 2 ")]
+        self.assertTrue(note.startswith(
+            "c: round 2 accounts for none of Nets, Owls, Spinners and Wrens. A card "
+            "of Nets v Spinners"), note)
+        self.assertTrue(note.endswith(
+            "Two or more teams unaccounted for is missing scorecards, not a bye, so "
+            "no bye was credited — find the other cards, or declare the round's "
+            "fixtures under [[competitions.c.rounds]]."), note)
+
+    def test_a_card_in_a_folder_of_its_own_is_not_said_to_sit_in_the_rounds(self):
+        note, = self.derived((self.stray(beside=False),))
+        self.assertIn("read from data/Round2/Nets-Spinners.pdf and filed under "
+                      "thursday-c", note)
+
+    def test_two_cards_filed_elsewhere_that_cover_the_round_are_told_both(self):
+        teams = {**self.TEAMS, "owls": Team(slug="owls", name="Owls"),
+                 "wrens": Team(slug="wrens", name="Wrens")}
+        note, = [note for note in self.derived(
+                     (self.stray(), self.stray(home="owls", away="wrens")), teams=teams)
+                 if note.startswith("c: round 2 ")]
+        self.assertIn("A card of Nets v Spinners for round 2 was read", note)
+        self.assertIn("A card of Owls v Wrens for round 2 was read", note)
+        self.assertTrue(note.endswith(
+            "A card counts only where it is filed, so those are not counted here, "
+            "and no bye was credited."), note)
+
+    def test_a_round_only_the_byes_table_names_is_told_the_card_filed_elsewhere(
+            self):
+        # Round 2 exists because the byes table rests Owls in it, and has no card of
+        # its own and none after it; a card of two of its teams was read for it
+        # elsewhere, so it is no round still to come.
+        from types import SimpleNamespace
+        teams = {**self.TEAMS, "owls": Team(slug="owls", name="Owls")}
+        rounds = {"1": Round(number="1", source=DRAW_FROM_CARDS, byes=("owls",),
+                             fixtures=(("aces", "bears"), ("hawks", "nets"),
+                                       ("rockets", "spinners"))),
+                  "2": Round(number="2", source=DRAW_FROM_CARDS, byes=("owls",))}
+        matches = [SimpleNamespace(round="1", home=home, away=away)
+                   for home, away in rounds["1"].fixtures]
+        note, = discover_mod._shortfall_notes("c", rounds, matches, teams, True,
+                                              (self.stray(),))
+        self.assertTrue(note.startswith(
+            "c: round 2 accounts for none of Aces, Bears, Hawks, Nets, Rockets and "
+            "Spinners. A card of Nets v Spinners for round 2 was read from"), note)
+        self.assertTrue(note.endswith("find the other cards, or declare the round's "
+                                      "fixtures under [[competitions.c.rounds]]."),
+                        note)
+
+    def declared(self, rounds, strays, cards=(), finals=(), teams_declared=True):
+        from types import SimpleNamespace
+        built = {number: Round(number=number, fixtures=tuple(pairs),
+                               source=DRAW_DECLARED, is_finals=number in finals)
+                 for number, pairs in rounds.items()}
+        matches = [SimpleNamespace(round=number, home=home, away=away, is_bye=False)
+                   for number, home, away in cards]
+        return discover_mod._shortfall_notes("c", built, matches, dict(self.TEAMS),
+                                             teams_declared, strays)
+
+    FULL = {"1": (("aces", "bears"), ("hawks", "nets"), ("rockets", "spinners")),
+            "2": (("aces", "hawks"), ("bears", "rockets"), ("nets", "spinners"))}
+    ROUND_ONE = (("1", "aces", "bears"), ("1", "hawks", "nets"),
+                 ("1", "rockets", "spinners"))
+
+    def test_a_declared_fixture_a_card_filed_elsewhere_fits_is_told_it(self):
+        self.assertEqual(self.declared(
+            self.FULL, (self.stray(),),
+            self.ROUND_ONE + (("2", "aces", "hawks"), ("2", "bears", "rockets"))), [
+            "c: round 2 has cards for 2 of its 3 declared fixtures — Nets v Spinners "
+            "is missing. A card of Nets v Spinners for round 2 was read from "
+            "data/Round2/Nets-Spinners.pdf, in the folder of this round's other "
+            "cards, and filed under thursday-c, as it is dated 2026-04-23, a "
+            "Thursday. A card counts only where it is filed, so that one is not "
+            "counted here."])
+
+    def test_a_declared_fixture_no_card_fits_is_still_a_card_to_find(self):
+        note, = self.declared(
+            self.FULL, (self.stray(),),
+            self.ROUND_ONE + (("2", "aces", "hawks"), ("2", "nets", "spinners")))
+        self.assertTrue(note.endswith(
+            "Bears v Rockets is missing. The draw says the fixture exists, so that "
+            "is a card to find, not a team resting."), note)
+
+    def test_a_declared_round_whose_only_card_was_filed_elsewhere_is_told_alone(self):
+        # Round 2 has no card of its own, and round 3 has: the season went past it.
+        # The one card read for it is told in its own note, not as one of the
+        # rounds nothing was read for.
+        third = (("aces", "nets"), ("bears", "hawks"), ("rockets", "spinners"))
+        rounds = {**self.FULL, "3": third}
+        notes = self.declared(rounds, (self.stray(),), self.ROUND_ONE + tuple(
+            ("3", home, away) for home, away in third))
+        self.assertEqual(len(notes), 1, notes)
+        self.assertTrue(notes[0].startswith(
+            "c: round 2 has cards for 0 of its 3 declared fixtures — Aces v Hawks, "
+            "Bears v Rockets and Nets v Spinners are missing. A card of Nets v "
+            "Spinners for round 2 was read from"), notes[0])
+        self.assertTrue(notes[0].endswith(
+            "The draw says the other fixtures exist, so those are cards to find, not "
+            "a team resting."), notes[0])
+        self.assertNotIn("no cards at all", notes[0])
+
+    def test_a_declared_fixture_filed_elsewhere_beside_one_not_leaves_that_one(self):
+        note, = self.declared(self.FULL, (self.stray(),),
+                              self.ROUND_ONE + (("2", "aces", "hawks"),))
+        self.assertTrue(note.startswith(
+            "c: round 2 has cards for 1 of its 3 declared fixtures — Bears v Rockets "
+            "and Nets v Spinners are missing. A card of Nets v Spinners"), note)
+        self.assertTrue(note.endswith(
+            "The draw says the other fixture exists, so that is a card to find, not "
+            "a team resting."), note)
+
+    def test_two_declared_fixtures_filed_elsewhere_are_told_both(self):
+        note, = self.declared(
+            self.FULL, (self.stray(), self.stray(home="bears", away="rockets")),
+            self.ROUND_ONE + (("2", "aces", "hawks"),))
+        self.assertIn("A card of Bears v Rockets for round 2 was read", note)
+        self.assertTrue(note.endswith(
+            "A card counts only where it is filed, so those are not counted here."),
+            note)
+
+    def test_a_declared_round_leaving_two_teams_with_neither_fixture_nor_rest_is_told(
+            self):
+        notes = self.declared(
+            {"1": self.FULL["1"], "2": self.FULL["2"][:2]}, (),
+            self.ROUND_ONE + (("2", "aces", "hawks"), ("2", "bears", "rockets")))
+        self.assertEqual(notes, [
+            "c: round 2 accounts for none of Nets and Spinners. Two or more teams "
+            "unaccounted for is missing scorecards, not a bye, so no bye was "
+            "credited — find the cards, or add the fixtures it leaves out to the "
+            "round under [[competitions.c.rounds]]."])
+
+    def test_with_the_list_undeclared_a_declared_round_is_held_to_its_fixtures_alone(
+            self):
+        # A list read from the cards is no list of the division's teams: a misspelt
+        # banner is a team of its own, which every round but its card's leaves off.
+        self.assertEqual(self.declared(
+            {"1": self.FULL["1"], "2": self.FULL["2"][:2]}, (),
+            self.ROUND_ONE + (("2", "aces", "hawks"), ("2", "bears", "rockets")),
+            teams_declared=False), [])
+
+    def test_a_declared_round_still_to_come_is_not_held_to_the_team_list(self):
+        # No card of its own and none after it: one note says it is still to come,
+        # and the two teams its fixtures leave out are not missing cards yet.
+        self.assertEqual(self.declared(
+            {"1": self.FULL["1"], "2": self.FULL["2"][:2]}, (), self.ROUND_ONE), [
+            "c: round 2 is in the declared draw with no cards at all, which is what "
+            "a round nobody has played yet looks like. Nothing was scored for it."])
+
+    def test_a_declared_rounds_card_of_a_fixture_it_does_not_list_accounts_for_both(
+            self):
+        # The card is of the two teams the declared round leaves out, so neither is
+        # missing: an unlisted fixture is the card's own finding, not a gap.
+        self.assertEqual(self.declared(
+            {"1": self.FULL["1"], "2": self.FULL["2"][:2]}, (),
+            self.ROUND_ONE + (("2", "aces", "hawks"), ("2", "bears", "rockets"),
+                              ("2", "spinners", "nets"))), [])
+
+    def test_a_declared_final_is_not_held_to_the_team_list(self):
+        notes = self.declared(
+            {"1": self.FULL["1"], "SF": (("aces", "hawks"), ("bears", "rockets"))},
+            (), self.ROUND_ONE + (("SF", "aces", "hawks"), ("SF", "bears", "rockets")),
+            finals=("SF",))
+        self.assertEqual(notes, [])
+
+
+class TestACardFiledElsewhereIsFoundByItsTeamsAndRoundAndToldWhy(unittest.TestCase):
+    """4.444: which cards are another competition's strays, and the reason given.
+
+    A stray is a card of the same season, of a round the competition has and of
+    two of its teams, filed under another competition; its reason is what routing
+    filed it by, the weekday :func:`~matchcentre.discover.filing_day` gives it or
+    the division it prints, asked once. Rejected: another season's card, which is
+    no card of this season's under any filing; the folder as the test.
+    """
+
+    TUESDAY = Card(source="data/Round3/Hilltop-Westfield.pdf", round="3",
+                   date="2026-04-21", division="C")
+
+    @staticmethod
+    def competition(comp_id, season_key="", rounds=("3",),
+                    teams=("aces", "bears", "hawks")):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=comp_id, season_key=season_key, day="Tuesday",
+                               division="C", rounds=dict.fromkeys(rounds),
+                               teams=dict.fromkeys(teams))
+
+    def strays(self, other, card, home="aces", away="bears", number="3"):
+        from types import SimpleNamespace
+        tue = self.competition("tue-c")
+        match = SimpleNamespace(round=number, home=home, away=away,
+                                source=discover_mod.where(card))
+        mine = SimpleNamespace(round="3", home="hawks", away="owls",
+                               source=self.TUESDAY.source)
+        return discover_mod._filed_elsewhere(
+            (tue, other), {"tue-c": [mine], other.id: [match]},
+            {"tue-c": [self.TUESDAY], other.id: [card]})
+
+    THURSDAY = Card(source="data/Round3/Aces-Bears.pdf", round="3",
+                    date="2026-04-23", division="C")
+
+    def test_a_card_of_two_of_its_teams_in_one_of_its_rounds_is_a_stray(self):
+        self.assertEqual(self.strays(self.competition("thu-c"), self.THURSDAY), {
+            "tue-c": (discover_mod.FiledElsewhere(
+                round="3", home="aces", away="bears",
+                source="data/Round3/Aces-Bears.pdf", filed_under="thu-c",
+                why="it is dated 2026-04-23, a Thursday", beside=True),)})
+
+    def test_a_card_in_another_folder_is_a_stray_not_beside_the_round(self):
+        card = dataclasses.replace(self.THURSDAY, source="data/Thu/Aces-Bears.pdf")
+        stray, = self.strays(self.competition("thu-c"), card)["tue-c"]
+        self.assertFalse(stray.beside)
+
+    def test_a_card_in_another_rounds_folder_is_not_beside_its_own_round(self):
+        # The folder said is the one the round's own cards sit in, and no other of
+        # the competition's: a round-3 card saved among round 2's is not "in the
+        # folder of this round's other cards" (/tmp/mcf/scratch/ROUNDS/fix/
+        # pre-prev-none/out.txt, the stray saved in data/Round2, omits it).
+        from types import SimpleNamespace
+        tue = self.competition("tue-c", rounds=("2", "3"))
+        earlier = Card(source="data/Round2/Hilltop-Bears.pdf", round="2",
+                      date="2026-04-14", division="C")
+        card = dataclasses.replace(self.THURSDAY, source="data/Round2/Aces-Bears.pdf")
+        mine = [SimpleNamespace(round="2", home="aces", away="hawks",
+                                source=earlier.source),
+                SimpleNamespace(round="3", home="hawks", away="owls",
+                                source=self.TUESDAY.source)]
+        match = SimpleNamespace(round="3", home="aces", away="bears",
+                                source=discover_mod.where(card))
+        stray, = discover_mod._filed_elsewhere(
+            (tue, self.competition("thu-c")),
+            {"tue-c": mine, "thu-c": [match]},
+            {"tue-c": [earlier, self.TUESDAY], "thu-c": [card]})["tue-c"]
+        self.assertEqual((stray.round, stray.beside), ("3", False))
+
+    def test_another_seasons_card_another_round_or_another_team_is_no_stray(self):
+        for other, home, away, number in (
+                (self.competition("thu-c", "2025"), "aces", "bears", "3"),
+                (self.competition("thu-c"), "aces", "bears", "4"),
+                (self.competition("thu-c"), "owls", "bears", "3"),
+                (self.competition("thu-c"), "aces", "owls", "3")):
+            with self.subTest(season=other.season_key, home=home, away=away,
+                              round=number):
+                self.assertEqual(self.strays(other, self.THURSDAY, home=home,
+                                             away=away, number=number), {})
+
+    def test_a_competitions_own_cards_are_never_its_strays(self):
+        from types import SimpleNamespace
+        tue = self.competition("tue-c")
+        mine = SimpleNamespace(round="3", home="aces", away="bears",
+                               source=self.TUESDAY.source)
+        self.assertEqual(discover_mod._filed_elsewhere(
+            (tue,), {"tue-c": [mine]}, {"tue-c": [self.TUESDAY]}), {})
+
+    def why(self, **card):
+        return discover_mod._why_filed_there(Card(**card),
+                                             self.competition("tue-c"))
+
+    def test_the_reason_is_the_date_the_printed_weekday_or_the_division(self):
+        for card, said in (
+                ({"date": "2026-04-23", "division": "C"},
+                 "it is dated 2026-04-23, a Thursday"),
+                ({"weekday": "Thursday", "division": "C"},
+                 "it is filed by the Thursday it prints"),
+                ({"division": "C"}, "no weekday reads on it"),
+                ({"date": "2026-04-21", "division": "D"}, "it prints division D"),
+                ({"date": "2026-04-21"}, "it prints no division"),
+                ({"date": "2026-04-23", "division": "D"},
+                 "it is dated 2026-04-23, a Thursday and it prints division D"),
+                ({"date": "2026-04-21", "division": "c"}, "")):
+            with self.subTest(**card):
+                self.assertEqual(self.why(**card), said)
+
+    def test_a_date_that_does_not_file_the_card_is_not_given_as_the_reason(self):
+        # A card whose date did not read is filed by the weekday it prints; one the
+        # reader dated is filed by its date's weekday, whatever it prints. The
+        # sentence asks filing_day which of the two it was, once.
+        with mock.patch.object(discover_mod, "filing_day", return_value="Friday"):
+            self.assertEqual(self.why(date="2026-04-23", division="C"),
+                             "it is filed by the Friday it prints")
+
+    def test_discovery_hands_the_gaps_competition_its_strays_and_no_other(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for case, strays in (("thu", 1), ("complete", 0), ("otherdiv", 0)):
+            with self.subTest(case=case):
+                write_six_tuesdays(root / case, case, "none")
+                cards, rejected = scorecard.read_tree(root / case / "data")
+                found = discover_mod.discover(
+                    cards, rejected, root=root / case / "data",
+                    config=config_mod.Config(path=root / case / "c.toml"))
+                self.assertEqual(
+                    {key: len(value) for key, value in found.strays.items()},
+                    {"tuesday-division-c": 1} if strays else {})
+
+
+class TestARoundsGapIsToldWhereItWasAmongItsCompetitionsNotes(unittest.TestCase):
+    """4.444: the gaps, worded once every competition is built, keep their place.
+
+    Taking the gaps out of the draw's own notes, so that they can see the cards
+    filed under the other competitions, could have moved them in the report.
+    Measured (/tmp/mcf/scratch/ROUNDS/order/gone-repeat-base.txt against
+    gone-repeat-ROUNDS.txt): the six-team season with round 3's third card never
+    exported, and round 1 declared with a fixture written twice, tells the repeat,
+    then round 3's gap, then the team list's note, before as now, and its notes are
+    identical. Rejected: appending the gaps to the competition's notes, which puts
+    them after its assumptions and changes every report that has a gap.
+    """
+
+    def test_the_gap_follows_the_draws_own_notes_and_precedes_the_assumptions(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        write_six_tuesdays(root, "gone", "draw")
+        path = root / "config.toml"
+        twice = '["Hilltop Aces", "Riverside Rockets"], '
+        path.write_text(path.read_text().replace(twice, twice * 2, 1))
+        cards, rejected = scorecard.read_tree(root / "data")
+        found = discover_mod.discover(cards, rejected, root=root / "data",
+                                      config=config_mod.load(path))
+        notes = [note for note in found.notes if note.startswith("tue-c: ")]
+        self.assertGreater(len(notes), 3, notes)
+        for note, opening in zip(notes, (
+                "tue-c: round 1 of the declared draw lists Hilltop Aces v Riverside "
+                "Rockets more than once.",
+                "tue-c: round 3 has cards for 2 of its 3 declared fixtures",
+                "tue-c: the team list is declared (6 teams)")):
+            self.assertTrue(note.startswith(opening), notes)
+
+
+class TestCardMissingOnAFixtureACardFiledElsewhereFitsSaysWhereItWent(
+        unittest.TestCase):
+    """4.444, in card-missing: a fixture a card filed elsewhere fits is not a file to export.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p444/before-thu-draw/out.txt): the
+    fixture whose card was read into the Thursday competition was told ``no scorecard
+    was read for`` it, then ``Export it from Match Centre into this round's folder —
+    or if the file is already there, run tools/doctor.py on it to see why it was not
+    read``: false of a card that was read, and the club, following it, finds the file
+    in the folder and a doctor that names no competition. Now the finding says the
+    card was read and filed under the other competition, and why, and keeps its
+    evidence and its severity. Rejected: the card's path in the finding, which
+    reaches ``season.json``, where only a competition's own cards are listed by
+    path; a new field of the document for it.
+    """
+
+    # The season of the card-missing class above, borrowed rather than inherited so
+    # that its tests are not run twice.
+    _past = TestAFixtureTheSeasonWentPastWithNoCardIsReported
+    RULES, FMT, SLUGS, DRAW = _past.RULES, _past.FMT, _past.SLUGS, _past.DRAW
+    competition, card = _past.competition, _past.card
+
+    def stray(self, home="bolts", away="comets", number="1"):
+        return discover_mod.FiledElsewhere(
+            round=number, home=home, away=away, source="/abs/data/Round1/x.pdf",
+            filed_under="thursday-division-c",
+            why="it is dated 2026-01-08, a Thursday", beside=True)
+
+    def filed(self, strays):
+        report = validate.validate([self.card("1", "rockets", "aces")],
+                                   self.competition(), strays=strays)
+        return [i for i in report.issues if i.rule == "card-missing"]
+
+    def test_the_finding_says_where_the_card_went_and_gives_no_file_step(self):
+        found, = self.filed((self.stray(home="comets", away="bolts"),))
+        self.assertEqual(found.severity, validate.WARNING)
+        self.assertEqual(found.message, (
+            "round 1: no scorecard of BOLTS v COMETS, which the declared draw lists, "
+            "was filed under this competition, and 1 of the 2 fixtures the draw "
+            "lists for that round do have one. A card of COMETS v BOLTS for round 1 "
+            "was read and filed under thursday-division-c, as it is dated "
+            "2026-01-08, a Thursday. A card counts only where it is filed, so that "
+            "one is not counted here."))
+        self.assertTrue(found.detail.endswith(
+            "; a card of it is filed under thursday-division-c"), found.detail)
+        self.assertNotIn("x.pdf", found.message + found.detail)
+
+    def test_two_cards_of_the_fixture_filed_elsewhere_are_told_both(self):
+        found, = self.filed((self.stray(), self.stray(away="bolts", home="comets")))
+        self.assertIn("A card of BOLTS v COMETS for round 1 was read", found.message)
+        self.assertIn("A card of COMETS v BOLTS for round 1 was read", found.message)
+        self.assertTrue(found.message.endswith(
+            "A card counts only where it is filed, so those are not counted here."),
+            found.message)
+
+    def test_a_card_of_another_fixture_leaves_the_finding_as_it_was(self):
+        for stray in (self.stray(home="rockets"), self.stray(number="2")):
+            with self.subTest(stray=stray):
+                found, = self.filed((stray,))
+                self.assertIn("no scorecard was read for BOLTS v COMETS", found.message)
+                self.assertIn("Export it from Match Centre", found.message)
+
+
+class FiveMondaysCase(unittest.TestCase):
+    """A five-team Monday division, one team resting a week, ten rounds of byes typed.
+
+    Every team's byes are declared for all ten rounds, as a club copies them off
+    the association's sheet in August, with ``rounds_total = 10``; cards are written
+    for the rounds in ``CARDED`` only, and the second card of a round in
+    ``THURSDAY`` is dated that Thursday, so routing files it under a second
+    competition. Fictional, from cardwriter.
+    """
+
+    CARDED: tuple[str, ...] = ("1", "2", "3")
+    THURSDAY: tuple[str, ...] = ()
+    UNPLAYED = ""
+    TEAMS = {
+        "HILLTOP ACES": ("Ada Quill", "Bea Rook", "Cy Moss"),
+        "RIVERSIDE ROCKETS": ("Dee Fane", "Eli Gorse", "Fay Holt"),
+        "LAKESIDE SPINNERS": ("Gus Ivey", "Hal Jett", "Ida Kerr"),
+        "WESTFIELD HAWKS": ("Jo Lyle", "Kit Marr", "Lou Nash"),
+        "EASTWOOD BEARS": ("Max Orme", "Ned Pike", "Ona Rusk"),
+    }
+
+    @classmethod
+    def draw(cls, number: int):
+        """Round *number*'s two fixtures and its resting team, round robin."""
+        names = list(cls.TEAMS)
+        rest = (number - 1) % 5
+        others = [names[(rest + k) % 5] for k in range(1, 5)]
+        return ((others[0], others[3]), (others[1], others[2])), names[rest]
+
+    @classmethod
+    def setUpClass(cls):
+        import datetime
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        data = root / "data"
+        start = datetime.date(2026, 4, 6)       # a Monday
+        index = 0
+        for number in cls.CARDED:
+            pairs, _ = cls.draw(int(number))
+            for home, away in pairs:
+                index += 1
+                folder = data / f"Round{number}"
+                folder.mkdir(parents=True, exist_ok=True)
+                hp, ap = cls.TEAMS[home], cls.TEAMS[away]
+                late = number in cls.THURSDAY and (home, away) == pairs[1]
+                cw.write_card_file(folder / f"{index}.pdf", cw.CardSpec(
+                    date=(start + datetime.timedelta(weeks=int(number) - 1,
+                                                     days=3 if late else 0)
+                          ).isoformat(),
+                    round_label=number, division="C", court=f"{index:02d}",
+                    match_id=f"500{index:04d}", home_name=home, away_name=away,
+                    rows=rows_for(((6, 2), (6, 3), (2, 6), (6, 4)), hp, ap),
+                    home_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                                      for i, n in enumerate(hp)),
+                    away_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                                      for i, n in enumerate(ap))))
+        byes = {name: tuple(str(n) for n in range(1, 11) if cls.draw(n)[1] == name)
+                for name in cls.TEAMS}
+        declared = config_mod.CompetitionConfig(
+            id="monday-c", day="Monday", division="C", teams=tuple(cls.TEAMS),
+            byes=byes, rounds_total=10)
+        cards, rejected = scorecard.read_tree(data)
+        cls.found = discover_mod.discover(
+            cards, rejected, root=data,
+            config=config_mod.Config(path=root / "config.toml",
+                                     unplayed=cls.UNPLAYED,
+                                     competitions={declared.id: declared}))
+        cls.competition, = [comp for comp in cls.found.club.competitions
+                            if comp.id == "monday-c"]
+        cls.season = export.build_season(
+            cls.found.matches["monday-c"], competition=cls.competition,
+            source_dir=data, generated="2026-06-01T00:00:00", club=cls.found.club,
+            cards=cards, rejected=rejected)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def told(self):
+        """The rounds a round note is about, by number."""
+        return [note.split()[2].rstrip(".") for note in self.found.notes
+                if note.startswith("monday-c: round ")]
+
+
+class TestARoundTheSeasonHasNotReachedIsNotToldAsMissingCards(FiveMondaysCase):
+    """4.433: byes declared for rounds still to come do not make them missing cards.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p433b/r3/out.txt): this season, cards
+    for rounds 1-3, got seven notes, one for each of rounds 4-10, ``accounts for
+    none of <four teams>. Two or more teams unaccounted for is missing scorecards,
+    not a bye, so no bye was credited — find the cards``, for rounds nobody has
+    played (the same seven without rounds_total, r3-nototal). On the owner's cards,
+    6 such notes.
+
+    A round after the last round the competition's own cards reach, with none of its
+    own, is a round still to come: no note, its declared byes kept for the night it
+    is played, nothing credited for them. Told apart by later cards and never by the
+    clock, by the function card-missing asks (``stats.later_round_with_cards``).
+    Rejected: the last round reached across the competitions of one night, since a
+    division's round numbers need not line up with another's, card-missing asks per
+    competition, and two nights a day apart would be told different things; a
+    declared draw's dates, since its rounds are told by later cards already and the
+    draw's dates are typing; a note listing the rounds to come, which the report's
+    ``rounds 3 of 10 played`` already says, on every build.
+    """
+
+    def test_no_round_after_the_last_with_cards_is_told_as_missing_cards(self):
+        self.assertEqual(self.told(), [])
+
+    def test_its_declared_byes_are_kept_for_the_night_it_is_played(self):
+        self.assertEqual(
+            {number: self.competition.byes_for(number) for number in ("9", "10")},
+            {"9": ("westfield-hawks",), "10": ("eastwood-bears",)})
+
+
+class TestARoundInsideThePlayedSpanWithNoCardsIsStillTold(FiveMondaysCase):
+    """4.433: round 4 has no card and round 5 has, so round 4 is not still to come.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p433b/gap4/out.txt): round 4 was told
+    with rounds 6-10. It keeps its note, and they go. Rejected: judging a round to
+    come by its byes alone, which would silence the one round here a card is
+    missing from.
+    """
+
+    CARDED = ("1", "2", "3", "5")
+
+    def test_only_the_round_the_season_went_past_is_told(self):
+        self.assertEqual(self.told(), ["4"])
+        note, = [n for n in self.found.notes if n.startswith("monday-c: round 4")]
+        self.assertIn("find the cards", note)
+
+
+class TestACardFiledOnAnotherNightLeavesTheRoundsStillToComeUntold(FiveMondaysCase):
+    """4.433 with 4.444: a stray of a round played does not make the rest to come.
+
+    A round to come is still told when a card filed elsewhere fits its gap, since
+    that card says the round was played. Measured
+    (/tmp/mcf/scratch/ROUNDS/fix/after-433thu/out.txt): with round 2's Westfield v
+    Eastwood card dated the Thursday, round 2 alone is told, naming the card filed
+    under thursday-division-c; base-433thu told round 2 and rounds 4-10, and so
+    does the tree with the fit dropped for any stray at all (m3-433thu). Rejected:
+    telling every round once the competition has a stray, which brings back the
+    seven notes 4.433 took away for a card one round has.
+    """
+
+    THURSDAY = ("2",)
+
+    def test_only_the_round_the_card_was_played_in_is_told(self):
+        self.assertEqual(self.told(), ["2"])
+        note, = [n for n in self.found.notes if n.startswith("monday-c: round 2")]
+        self.assertIn("filed under thursday-division-c, as it is dated 2026-04-16, "
+                      "a Thursday", " ".join(note.split()))
+
+
+class TestAByeDeclaredForARoundStillToComeIsNotCreditedUnderAverage(FiveMondaysCase):
+    """4.433: under ``unplayed = "average"`` a bye in a round to come counts for nothing.
+
+    Measured before (/tmp/mcf/scratch/ROUNDS/p433b/r3-average): it was not credited
+    already, as ``stats.with_byes`` credits a rest only in a round with cards; every
+    team counted 3, the two that played three and the three that played two and
+    rested once. Pinned here, because a ladder whose counted column ran ahead of the
+    season would read every team as having played ten; and the notes go here as
+    they do under the default.
+    """
+
+    UNPLAYED = "average"
+
+    def test_every_team_is_counted_for_the_three_rounds_played_and_no_more(self):
+        self.assertEqual({team["slug"]: team["counted"] for team in self.season["teams"]},
+                         dict.fromkeys(("eastwood-bears", "hilltop-aces",
+                                        "lakeside-spinners", "riverside-rockets",
+                                        "westfield-hawks"), 3))
+        self.assertEqual(
+            sorted(m.round for m in stats.with_byes(self.found.matches["monday-c"],
+                                                     self.competition) if m.is_bye),
+            ["1", "2", "3"])
+        self.assertEqual(self.told(), [])
 
 
 class TestF11NamesARoundLabelledAtLengthByItsStartAndItsLength(unittest.TestCase):
@@ -7065,9 +10395,13 @@ class TestAPlayerWhoDecidedNoSetHasNoWinRateRatherThanANought(SeasonCase):
                       home_players=(ana,), away_players=(dev,)),
             cw.SetRow(home_games=6, away_games=1, doubles=False,
                       home_players=(bo,), away_players=(fay,)),
+            # 4.422 moved this: ticked Retired against both sides, where it was
+            # the away side, which now gives home the set raised to 6 games; who
+            # retired cannot be read, so this is still a set played and not
+            # decided.
             cw.SetRow(home_games=4, away_games=3, doubles=True,
                       home_players=(bo, cass), away_players=(elin, fay),
-                      status=SetStatus.RETIRED, status_side="away"),
+                      status=SetStatus.RETIRED, status_side="both"),
         )
         folder = cls.data / f"Round{cls.ROUND}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -7381,10 +10715,12 @@ class TestAFillInsAppearancesAreCountedInMatchesNotSets(SeasonCase):
         """
         rockets = {t["slug"]: t for t in self.season["teams"]}[self.HOME]
         self.assertEqual(rockets["games_won"], 94)
+        # 4.421 moved this: the record counts the rubbers nobody played too.
         self.assertEqual(rockets["contribution_gap"],
                          {"games": 9.0, "team_games_won": 94, "share_pct": 9.6,
                           "rubbers_with_outsiders": 2, "rubbers_short_a_name": 0,
-                          "rubbers_overfull": 0, "nights_not_credited": 0})
+                          "rubbers_overfull": 0, "nights_not_credited": 0,
+                          "rubbers_nobody_played": 0})
         # And their opponents' column is whole: a loan is one side's shortfall, and a
         # figure that appeared on both would be a walk crediting by the card rather
         # than by the side of it.
@@ -7392,19 +10728,629 @@ class TestAFillInsAppearancesAreCountedInMatchesNotSets(SeasonCase):
         self.assertEqual(aces["contribution_gap"]["games"], 0.0)
         self.assertEqual(aces["contribution_gap"]["rubbers_with_outsiders"], 0)
 
-    def test_the_report_names_the_loan_once_per_rubber_not_once_per_night(self):
+    def test_the_report_names_the_loan_once_for_the_night_with_each_rubber_in_it(self):
         # The report and the player page count different things on purpose, and
-        # this pins the difference: the report is a list of rows for a human to
-        # look at, so a row is its unit, while the page is describing a person's
-        # season. Two counts of the same event, both correct, differently worded.
+        # this pins the difference: the report says the loan once and names each
+        # rubber in it, since a row is what a human goes to look at, while the page
+        # counts the nights of a person's season. Named until 4.432
+        # ..._once_per_rubber_not_once_per_night, when the report said it once a
+        # rubber, the same fact for each row: now one finding, its subject the
+        # card and the RUBBERS_FILLED_IN rows.
         named = [i for i in self.report.issues
                  if i.rule == "fill-in" and self.BORROWED in i.message]
-        self.assertEqual(len(named), self.RUBBERS_FILLED_IN)
-        for issue in named:
-            with self.subTest(subject=issue.subject):
-                self.assertTrue(issue.subject.startswith(f"R{self.ROUND} "),
-                                f"a fill-in warning that does not name its "
-                                f"rubber: {issue.subject!r}")
+        self.assertEqual(len(named), 1, [i.message for i in named])
+        self.assertEqual(named[0].subject,
+                         f"R{self.ROUND} {self.HOME} v {self.AWAY} d1 and s1")
+
+
+class OffTheRosterCase(unittest.TestCase):
+    """The six-card season, two more rounds of it, and one Monday night.
+
+    Every card prints both roster blocks, as a Match Centre export does, so
+    whatever the build says about a name it says with the block read. Two places
+    on court are changed on each card of rounds 4 and 5, and the Monday card
+    registers players in another competition of the same club, Quoy Darrow on
+    Monday nights alone and Bo Nakamura on a line of the hawks' block as well:
+
+    * R4 rockets v aces: Zed Quill, on no roster, in the home second place, which
+      ``rows_for`` puts in d1, s2 and d2; and Wren Ashby, on none either, in s1.
+    * R4 spinners v wanderers: Bo Nakamura, a rocket, lent to the wanderers'
+      second place.
+    * R5 aces v wanderers: Elin Sotto in the aces' second place, left off their
+      roster block; the wanderers' block prints Jo Calder, their captain, who
+      plays, and Lena Ordoy, who does not, with no rating.
+    * R5 rockets v spinners: Quoy Darrow, registered on Monday nights, lent to the
+      spinners' second place.
+
+    Nothing here mutates the season, so it is built once for each class.
+    """
+
+    TUESDAY = "tuesday-division-b"
+    MONDAY = "monday-division-b"
+    CARDS = {
+        "R4 riverside-rockets v hilltop-aces":
+            ("4", "2026-09-08", "riverside-rockets", "hilltop-aces", "10",
+             ((6, 2), (6, 3), (6, 4), (6, 1))),
+        "R4 lakeside-spinners v parkview-wanderers":
+            ("4", "2026-09-08", "lakeside-spinners", "parkview-wanderers", "11",
+             ((6, 4), (3, 6), (6, 3), (6, 2))),
+        "R5 hilltop-aces v parkview-wanderers":
+            ("5", "2026-09-15", "hilltop-aces", "parkview-wanderers", "12",
+             ((6, 3), (6, 2), (2, 6), (6, 4))),
+        "R5 riverside-rockets v lakeside-spinners":
+            ("5", "2026-09-15", "riverside-rockets", "lakeside-spinners", "13",
+             ((6, 1), (6, 2), (6, 3), (6, 4))),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
+        cls.data = Path(cls._tmp.name) / "data"
+        write_season_cards(cls.data)
+        cls.write("R4 riverside-rockets v hilltop-aces",
+                  home={1: "Zed Quill"}, home_s1="Wren Ashby")
+        cls.write("R4 lakeside-spinners v parkview-wanderers", away={1: "Bo Nakamura"})
+        cls.write("R5 hilltop-aces v parkview-wanderers",
+                  home_off=("Elin Sotto",), away_unrated=("Jo Calder", "Lena Ordoy"))
+        cls.write("R5 riverside-rockets v lakeside-spinners", away={1: "Quoy Darrow"})
+        hawks = ("Quoy Darrow", "Ros Pell", "Sam Tiller")
+        bears = ("Tam Ord", "Uma Fenn", "Vic Lowe")
+        monday = cls.data / "Monday"
+        monday.mkdir()
+        cw.write_card_file(monday / "hawks-bears.pdf", cw.CardSpec(
+            date="2026-08-17", round_label="1", division="B", court="20",
+            match_id="5000001", home_name="WESTFIELD HAWKS",
+            home_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(hawks + ("Bo Nakamura",))),
+            away_name="EASTWOOD BEARS",
+            away_roster=tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                           captain=(i == 0))
+                              for i, n in enumerate(bears)),
+            rows=rows_for(((6, 1), (6, 2), (6, 0), (6, 3)), hawks, bears)))
+        cls.cards, cls.rejected = scorecard.read_tree(cls.data)
+        config = config_mod.Config(path=Path(cls._tmp.name) / "config.toml")
+        cls.discovery = discover_mod.discover(cls.cards, cls.rejected, config=config,
+                                              root=cls.data)
+        cls.competition = next(c for c in cls.discovery.club.competitions
+                               if c.id == cls.TUESDAY)
+        cls.matches = cls.discovery.matches[cls.TUESDAY]
+        cls.report = validate.validate(cls.matches, cls.competition,
+                                       club=cls.discovery.club, cards=cls.cards,
+                                       rejected=cls.rejected)
+        cls.season = export.build_season(
+            cls.matches, competition=cls.competition, source_dir=cls.data,
+            generated="2026-09-10T12:00:00", club=cls.discovery.club,
+            cards=cls.cards, rejected=cls.rejected)
+
+    @classmethod
+    def write(cls, label, *, home=None, away=None, home_s1=None, home_off=(),
+              away_unrated=()):
+        """One card of :attr:`CARDS`, with the places on court *home* and *away*
+        change, *home_s1* alone in the first singles, *home_off* left off the home
+        roster block and *away_unrated* printed in the away one with no rating."""
+        rnd, date, home_team, away_team, court, scores = cls.CARDS[label]
+        home_name, home_players = TEAMS[home_team]
+        away_name, away_players = TEAMS[away_team]
+        on_court = {side: [(changed or {}).get(i, name) for i, name in enumerate(players)]
+                    for side, players, changed in (("home", home_players, home),
+                                                   ("away", away_players, away))}
+        rows = list(rows_for(scores, on_court["home"], on_court["away"]))
+        if home_s1:
+            rows[1] = dataclasses.replace(rows[1], home_players=(home_s1,))
+
+        def block(players, off, unrated):
+            return tuple(cw.RosterRow(name=n, singles=None if n in unrated else 2.5,
+                                      doubles=None if n in unrated else 2.5,
+                                      captain=(i == 0))
+                         for i, n in enumerate(players) if n not in off)
+
+        folder = cls.data / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        cw.write_card_file(folder / f"{home_team}-{away_team}.pdf", cw.CardSpec(
+            date=date, round_label=rnd, division="B", court=court,
+            match_id=f"50000{court}", home_name=home_name, away_name=away_name,
+            rows=tuple(rows), home_roster=block(home_players, home_off, ()),
+            away_roster=block(away_players, (), away_unrated)))
+
+    def said(self, rule: str) -> list[str]:
+        """Every message *rule* gave, in the order the report prints them."""
+        return [issue.message for issue in self.report.issues if issue.rule == rule]
+
+    def match(self, label: str) -> dict:
+        """The season document's match *label* names."""
+        rnd, _, home, away, _, _ = self.CARDS[label]
+        found, = [m for m in self.season["matches"]
+                  if (m["round"], m["home"], m["away"]) == (rnd, home, away)]
+        return found
+
+    def player(self, slug: str) -> dict:
+        found, = [p for p in self.season["players"] if p["slug"] == slug]
+        return found
+
+
+class TestANameOffTheRosterIsOneFindingThatNamesEveryRowItIsOn(OffTheRosterCase):
+    """One person off a card's roster block is one finding, naming each row.
+
+    ``_check_set_players`` read a card a row at a time and asked each name of each
+    row the five per-name questions there and then: fill-in-other-competition,
+    unknown-player, player-no-team, fill-in and off-roster. So a name on three
+    rows was three findings that said one thing, with the rubber as the only word
+    that differed. On this season, before (``/tmp/mcf/scratch/PNOISE/probe.py`` on
+    the same cards): Zed Quill three unknown-player, Bo Nakamura three fill-in,
+    Elin Sotto three off-roster and Quoy Darrow three fill-in-other-competition,
+    twelve findings for four facts. The demo's one fill-in, on two rows, was two
+    of its six warnings. On the club's own season, 87 of 267 warnings said 29
+    things. A card whose roster was not read already folded its strangers into
+    one finding for the side (4.16(a)), so the same stranger was one finding on
+    one card and three on the next.
+
+    Now each side's names off the block are collected with the rows they are on,
+    and asked once after the rows, since which of the five a name is depends on
+    the side, its block and the squads, never on the row. The subject and the
+    sentence's opening are the card and its rows in words, ``R4 ... d1, s2 and
+    d2``, so a name on one row reads byte for byte as it did, and the report still
+    finds the subject said and prints it once. Every row is still named: a row is
+    what a human is asked to go and look at, and the decision that kept the report
+    in rows kept it for that.
+
+    Rejected: folding unknown-player alone, which leaves the other four repeating
+    in the same loop under a second rule for when to fold; one finding per side for
+    every name, as the unread-roster fold words it, since each name is its own
+    alias line and each fill-in names its own registered team; and the card's
+    label alone as the subject with the rows in the sentence, which rewrites every
+    one-row finding for nothing gained on it.
+    """
+
+    def test_a_stranger_on_three_rows_is_one_unknown_player_that_names_the_three(self):
+        self.assertEqual(
+            [m for m in self.said("unknown-player") if "zed-quill" in m],
+            ["R4 riverside-rockets v hilltop-aces d1, s2 and d2: zed-quill is on "
+             "neither the home roster nor any registered squad, so this is either a "
+             "fill-in or a spelling that needs an alias."])
+
+    def test_a_player_another_team_lent_for_three_rows_is_one_fill_in(self):
+        found = [i for i in self.report.issues if i.rule == "fill-in"]
+        self.assertEqual(
+            [(i.message, i.detail) for i in found],
+            [("R4 lakeside-spinners v parkview-wanderers d1, s2 and d2: Bo Nakamura "
+              "is registered to riverside-rockets but played away for "
+              "parkview-wanderers — counted as a fill-in.",
+              "registered to riverside-rockets")])
+
+    def test_a_player_their_own_card_leaves_off_for_three_rows_is_one_off_roster(self):
+        self.assertEqual(
+            self.said("off-roster"),
+            ["R5 hilltop-aces v parkview-wanderers d1, s2 and d2: Elin Sotto plays for "
+             "hilltop-aces but is not in this card's roster block."])
+
+    def test_a_player_from_another_night_for_three_rows_is_one_finding(self):
+        self.assertEqual(
+            self.said("fill-in-other-competition"),
+            [f"R5 riverside-rockets v lakeside-spinners d1, s2 and d2: quoy-darrow is "
+             f"registered in {self.MONDAY}, not in {self.TUESDAY}, and played away for "
+             f"lakeside-spinners — counted as a fill-in."])
+
+    def test_a_name_on_one_row_reads_byte_for_byte_as_it_did(self):
+        found, = [i for i in self.report.issues
+                  if i.rule == "unknown-player" and "wren-ashby" in i.message]
+        self.assertEqual(found.subject, "R4 riverside-rockets v hilltop-aces s1")
+        self.assertEqual(found.message,
+                         "R4 riverside-rockets v hilltop-aces s1: wren-ashby is on "
+                         "neither the home roster nor any registered squad, so this "
+                         "is either a fill-in or a spelling that needs an alias.")
+        self.assertEqual(Path(found.detail).name, "riverside-rockets-hilltop-aces.pdf")
+
+    def test_two_names_on_one_side_are_two_findings_in_the_order_the_rows_reach_them(self):
+        # Zed Quill is reached first, in d1, and Wren Ashby in s1, so the order is
+        # the card's and owes nothing to a set or a dictionary of names.
+        self.assertEqual([m.split(":")[0] for m in self.said("unknown-player")],
+                         ["R4 riverside-rockets v hilltop-aces d1, s2 and d2",
+                          "R4 riverside-rockets v hilltop-aces s1"])
+
+    def test_each_subject_is_the_card_and_its_rows_and_the_message_says_it(self):
+        rules = ("unknown-player", "fill-in", "off-roster",
+                 "fill-in-other-competition")
+        found = [i for i in self.report.issues if i.rule in rules]
+        self.assertEqual(len(found), 5)
+        for issue in found:
+            with self.subTest(rule=issue.rule, subject=issue.subject):
+                self.assertTrue(issue.message.startswith(f"{issue.subject}: "))
+                self.assertTrue(export.subject_said(
+                    {"subject": issue.subject, "message": issue.message}))
+
+    def registered_to_no_team(self, rows: tuple[str, ...]) -> list[str]:
+        """What player-no-team says of Elin Sotto, registered to the aces' squad with
+        no team, on *rows* of a night their roster block leaves her out of.
+
+        No card can make such a player, since discovery gives everybody it
+        registers the team whose block printed them, so the night and the squad are
+        made by hand, as :class:`TestARowIsReadForMistakesExactlyWhereItsNumbersCount`
+        makes its matches.
+        """
+        aces = self.competition.teams["hilltop-aces"]
+        unteamed = dataclasses.replace(aces, players=tuple(
+            dataclasses.replace(p, team=None) if p.slug == "elin-sotto" else p
+            for p in aces.players))
+        competition = dataclasses.replace(
+            self.competition, teams={**self.competition.teams, "hilltop-aces": unteamed})
+        fmt = competition.fmt
+
+        def home(slot):
+            names = ["elin-sotto"] if slot.key in rows else []
+            names += [p for p in ("dev-raman", "fay-bramwell") if p not in names]
+            return tuple(names[:slot.players])
+
+        sets = tuple(SetResult(slot=slot, home_games=6, away_games=2, rule=fmt.set_rule,
+                               home_players=home(slot),
+                               away_players=("jo-calder", "kit-vasse")[:slot.players])
+                     for slot in fmt.slots)
+        match = Match(competition=competition.id, round="9", home="hilltop-aces",
+                      away="parkview-wanderers", fmt=fmt, rules=competition.rules,
+                      sets=sets, status=MatchStatus.PLAYED,
+                      home_roster=("dev-raman", "fay-bramwell"),
+                      away_roster=("jo-calder", "kit-vasse", "lena-ordoy"),
+                      source="r9.pdf")
+        report = validate.validate([match], competition)
+        return [i.message for i in report.issues if i.rule == "player-no-team"]
+
+    def test_a_player_registered_to_no_team_is_one_finding_for_the_sets_they_played(self):
+        self.assertEqual(
+            self.registered_to_no_team(("d1", "s2", "d2")),
+            [f"R9 hilltop-aces v parkview-wanderers d1, s2 and d2: Elin Sotto is "
+             f"registered in {self.TUESDAY} without a team, so these sets cannot be "
+             f"checked against a roster."])
+
+    def test_and_on_one_row_is_told_that_set_as_before(self):
+        self.assertEqual(
+            self.registered_to_no_team(("s2",)),
+            [f"R9 hilltop-aces v parkview-wanderers s2: Elin Sotto is registered in "
+             f"{self.TUESDAY} without a team, so this set cannot be checked against a "
+             f"roster."])
+
+
+class TestARatingIsAskedOfAPlayerOnlyWhereTheirRosterBlockPrintsThem(OffTheRosterCase):
+    """``ratings-missing`` names a player only where their side's block could rate them.
+
+    Ratings are read from the roster blocks and nowhere else, so a player on no line
+    of their side's block has no rating on that card to read. The check asked only
+    that the side's block was read, and named everybody on court missing a rating:
+    on this season, before, Zed Quill and Wren Ashby, Bo Nakamura, Elin Sotto and
+    Quoy Darrow were each told ``no rating was read for`` them, on the card where
+    ``_check_set_players`` had already named each off the block, and Bo and Elin
+    carry a rating from their own team's cards. The demo's one fill-in was two
+    fill-in warnings and this third. And the rostered player whose line was read
+    and holds no rating, the one case the sentence is for, was told it as a reading
+    failure. On the club's own season, ratings-missing was 32 warnings, one a card.
+
+    Now only a player on their side's block is asked, and told what the block gave:
+    ``the roster block gives no rating for jo-calder, who played``. Somebody on the
+    block who sat the card out is not asked, since they have no set on it to rate.
+
+    Rejected: ``stats.is_fill_in`` as the filter, whose registration test would also
+    drop a lent player printed with a line in the borrowing side's block, where a
+    rating can be printed and lost; and ``the card prints no rating``, which the
+    build cannot know when a rating is printed and not read.
+    """
+
+    OFF_THE_BLOCK = ("zed-quill", "wren-ashby", "bo-nakamura", "elin-sotto",
+                     "quoy-darrow")
+
+    def test_a_player_on_no_line_of_their_side_s_block_is_not_told_of_a_rating(self):
+        for slug in self.OFF_THE_BLOCK:
+            with self.subTest(player=slug):
+                self.assertEqual([m for m in self.said("ratings-missing") if slug in m],
+                                 [])
+
+    def test_a_rostered_player_with_no_rating_who_played_is_told_what_the_block_gave(self):
+        self.assertEqual(
+            self.said("ratings-missing"),
+            ["R5 hilltop-aces v parkview-wanderers: the roster block gives no rating "
+             "for jo-calder, who played, so jo-calder shows none for this round."])
+
+    def test_one_who_sat_the_card_out_is_not_told_it(self):
+        # Lena Ordoy's line prints no rating either, on the same card, and she has
+        # no set on it to rate.
+        night, = [m for m in self.matches
+                  if (m.round, m.home) == ("5", "hilltop-aces")]
+        self.assertIn("lena-ordoy", night.roster_for("away"))
+        self.assertNotIn("lena-ordoy", night.players_on("away"))
+        self.assertNotIn("lena-ordoy", " ".join(self.said("ratings-missing")))
+
+
+class TestAFillInIsAPlayerOnAnotherTeamOrOnNone(OffTheRosterCase):
+    """A fill-in is somebody lent by another team, or somebody on no team's roster.
+
+    ``stats.is_fill_in`` took either of two signals: a player registered to another
+    team, or a name off this card's roster block. So a player who belongs to the
+    side, on a night their own card left them off its block, was a fill-in too:
+    on this season, before, Elin Sotto's round 5 for the aces was in that match's
+    ``fill_ins`` and her ``fill_in_appearances`` was 1, so the match card and her
+    page said she ``played outside their registered roster``, and the Share left out
+    her 8 games of that night: 22.0 of the aces' 67 (32.8%), the column 8 games
+    short (11.9%) with 3 rubbers ``played by somebody with no row in this table``,
+    which she played from her own row of it. The build's report calls the same
+    night off-roster, a card's omission, and :func:`stats._earns_share` says a
+    share belongs to a row in the side's own table, which hers is.
+
+    Now the squad that registers a player decides which side they belong to, and
+    the card's block is asked only about a player no squad registers. And the two
+    Fill-in notes branch on who the player is: Zed Quill, on no team's roster, is
+    told so, and Bo Nakamura, lent by the rockets, keeps the sentence that fits
+    him. So does Quoy Darrow, who has no team on this competition's page and is on
+    the Monday hawks' roster, which the page can only know from Python: his record
+    says ``registered_elsewhere``, the competition the report's
+    fill-in-other-competition names, and it is null for everybody this
+    competition registers and everybody no squad does.
+
+    Rejected: a third wording for the off-roster night that keeps it a fill-in,
+    which leaves the Share and the caption false; naming the side a stranger
+    played for as their team, which invents a membership no card printed; and
+    saying ``on no team’s roster`` of every player with no team on this page. The
+    first version of this fix did, and Quoy Darrow's match card and page told him
+    so, under the Data health line that says he is ``registered in
+    monday-division-b`` (``/tmp/mcf/scratch/PNOISE/fixup/quin-first.txt``), where
+    the base had said he ``played outside their registered roster``, which is true.
+    """
+
+    def test_a_stranger_is_a_fill_in_on_no_team(self):
+        self.assertEqual(self.match("R4 riverside-rockets v hilltop-aces")["fill_ins"],
+                         ["wren-ashby", "zed-quill"])
+        self.assertIsNone(self.player("zed-quill")["team"])
+        self.assertEqual(self.player("zed-quill")["fill_in_appearances"], 1)
+
+    def test_a_player_lent_by_their_team_is_a_fill_in_on_their_team(self):
+        self.assertEqual(
+            self.match("R4 lakeside-spinners v parkview-wanderers")["fill_ins"],
+            ["bo-nakamura"])
+        self.assertEqual(self.player("bo-nakamura")["team"], "riverside-rockets")
+        self.assertEqual(self.player("bo-nakamura")["fill_in_appearances"], 1)
+
+    def test_a_player_their_own_card_leaves_off_is_no_fill_in(self):
+        self.assertEqual(self.match("R5 hilltop-aces v parkview-wanderers")["fill_ins"],
+                         [])
+        self.assertEqual(self.player("elin-sotto")["fill_in_appearances"], 0)
+
+    def test_and_their_games_that_night_are_in_their_own_row_s_share(self):
+        # Worked out on paper, from her place second on the aces' card, half of a
+        # doubles rubber's games and all of a singles': rounds 1 to 4 give her
+        # 0.5 + 0 + 1.5, 3 + 6 + 2, 1 + 1 + 1.5 and 1 + 4 + 0.5, 22 games; round 5
+        # gives her 3 of d1, 2 of s2 and 3 of d2, 8 more. The aces' column is then
+        # whole.
+        aces = {t["slug"]: t for t in self.season["teams"]}["hilltop-aces"]
+        self.assertEqual(self.player("elin-sotto")["contribution"]["games_won"], 30.0)
+        self.assertEqual(aces["contribution_gap"]["games"], 0.0)
+        self.assertEqual(aces["contribution_gap"]["rubbers_with_outsiders"], 0)
+
+    def test_a_player_registered_on_another_night_is_said_to_be_registered_there(self):
+        # Quoy Darrow has no team on this page, as Zed Quill has none, and the
+        # competition that registers him is what tells the page's two notes apart.
+        self.assertEqual(
+            self.match("R5 riverside-rockets v lakeside-spinners")["fill_ins"],
+            ["quoy-darrow"])
+        self.assertIsNone(self.player("quoy-darrow")["team"])
+        self.assertEqual(self.player("quoy-darrow").get("registered_elsewhere"),
+                         self.MONDAY)
+
+    def test_nobody_registered_here_or_nowhere_is_said_to_be_registered_elsewhere(self):
+        # Zed Quill and Wren Ashby are on no squad at all. Bo Nakamura is on the
+        # Monday hawks' block too, and this competition registers him to the
+        # rockets, so the page names his team here, as the report does. The key is
+        # asked for first, so that a record without it fails here rather than
+        # erroring.
+        for slug in ("zed-quill", "wren-ashby", "bo-nakamura", "elin-sotto"):
+            with self.subTest(player=slug):
+                record = self.player(slug)
+                self.assertIn("registered_elsewhere", sorted(record))
+                self.assertIsNone(record["registered_elsewhere"])
+
+
+class LentPlayersSeasonCase(SeasonCase):
+    """The three-round season and two rounds more, in which players cross sides.
+
+    Round 4 is the Riverside Rockets v the Hilltop Aces, the only card of its round.
+    The Rockets borrow Jo Calder of the Parkview Wanderers, whose round it is not,
+    and the Aces Lena Ordoy, also of Parkview, and Zed Quill, whom no roster block
+    prints. Round 5 is the Lakeside Spinners v Parkview, Lena's one night for her
+    own side, beside Jo, with Kit Vasse sitting it out; the Spinners' roster block
+    leaves out Hana Wex, who plays for them. Every Fill-ins section is empty, as on
+    the real cards. So Jo plays all four Parkview nights and one more, Lena one of
+    the four and one for another side, Zed one night on no roster, Kit three of the
+    four, and Hana all four Spinners nights, one of them off that card's roster.
+    The same cards as /tmp/mcf/scratch/ROSTER/probe.py, which built them into a
+    dashboard and read its pages in headless Chrome.
+    """
+
+    LENT_ROUND, OWN_ROUND = "4", "5"
+    DATES = {"4": "2026-09-08", "5": "2026-09-15"}
+
+    @classmethod
+    def extra_cards(cls):
+        def squad(team, leave_out=()):
+            return tuple(cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                      captain=(i == 0))
+                         for i, n in enumerate(TEAMS[team][1]) if n not in leave_out)
+
+        S = cw.SetRow
+        cards = (
+            (cls.LENT_ROUND, "riverside-rockets", "hilltop-aces", "4490001", (), (
+                S(6, 3, True, ("Jo Calder", "Ana Fernandez"), ("Dev Raman", "Zed Quill")),
+                S(6, 2, False, ("Jo Calder",), ("Zed Quill",)),
+                S(4, 6, False, ("Bo Nakamura",), ("Lena Ordoy",)),
+                S(6, 1, True, ("Ana Fernandez", "Bo Nakamura"),
+                  ("Dev Raman", "Lena Ordoy")))),
+            (cls.OWN_ROUND, "lakeside-spinners", "parkview-wanderers", "4490002",
+             ("Hana Wex",), (
+                S(6, 4, True, ("Gil Ahearn", "Hana Wex"), ("Jo Calder", "Lena Ordoy")),
+                S(3, 6, False, ("Gil Ahearn",), ("Jo Calder",)),
+                S(6, 2, False, ("Hana Wex",), ("Lena Ordoy",)),
+                S(6, 3, True, ("Gil Ahearn", "Hana Wex"),
+                  ("Jo Calder", "Lena Ordoy")))),
+        )
+        for court, (rnd, home, away, match_id, leave_out, rows) in enumerate(
+                cards, start=10):
+            folder = cls.data / f"Round{rnd}"
+            folder.mkdir(parents=True, exist_ok=True)
+            cw.write_card_file(folder / f"{home}-{away}.pdf", cw.CardSpec(
+                date=cls.DATES[rnd], round_label=rnd, division="B",
+                court=str(court), match_id=match_id, home_name=TEAMS[home][0],
+                away_name=TEAMS[away][0], rows=rows,
+                home_roster=squad(home, leave_out),
+                away_roster=squad(away, leave_out)))
+
+    def players(self) -> dict:
+        return {p["slug"]: p for p in self.season["players"]}
+
+
+class TestAPlayersMatchesSayHowManyWereForTheTeamThatRegistersThem(
+        LentPlayersSeasonCase):
+    """``team_matches`` is the nights a player played for their own team (4.449).
+
+    The player page's Matches tile put every night the player was on court, lent
+    nights included, over the nights their team played, and ``available`` was the
+    player's own count where there was no team. Measured on these cards
+    (/tmp/mcf/scratch/ROSTER/before/measure.txt): in season.json Jo has matches 5
+    and available 4, Lena 2 and 4, and Zed, with team null, 1 and 1; the pages read
+    ``Matches 5 / of 4 the team has played``, ``2 / of 4`` and ``1 / of 1 the team
+    has played``, the last beside ``Team share — on no team’s roster``.
+
+    stats.player_stats now counts, beside every night, the ones on the side of the
+    team that registers the player, and publishes that as ``team_matches``; it and
+    ``available`` are null for a player on no team, who has no team's nights to be
+    out of. Rejected: ``matches`` less ``fill_in_appearances``, which Hana's round 5
+    showed was another count. Her card's roster block leaves her out, and the build
+    took that for a fill-in night (fill_in_appearances 1, measured), though she
+    played every night for the Spinners. Since 4.443 a registered player's fill-in
+    is asked of their squad alone, and the two agree but for a name on both sides
+    of one card, which validate calls player-two-teams: the difference moves
+    whenever the rule for a fill-in moves, as it did. Rejected too: keeping a
+    stranger's own count in ``available``, a team's figure for no team.
+    """
+
+    def figures(self, slug: str) -> tuple:
+        """(matches, team_matches, available) for one player."""
+        player = self.players()[slug]
+        return player["matches"], player["team_matches"], player["available"]
+
+    def test_a_player_lent_on_their_own_side_s_bye_played_all_its_nights(self):
+        self.assertEqual(self.figures("jo-calder"), (5, 4, 4))
+
+    def test_a_player_lent_once_beside_one_night_of_their_own_played_one(self):
+        self.assertEqual(self.figures("lena-ordoy"), (2, 1, 4))
+
+    def test_a_name_on_no_roster_has_no_team_s_nights_to_be_out_of(self):
+        zed = self.players()["zed-quill"]
+        self.assertIsNone(zed["team"])
+        self.assertEqual(self.figures("zed-quill"), (1, None, None))
+
+    def test_a_player_nobody_lent_played_every_match_of_theirs_for_their_team(self):
+        # Kit sat out Parkview's round 5, and Cass, registered, never played: the
+        # control, whose tile reads as it did.
+        self.assertEqual(self.figures("kit-vasse"), (3, 3, 4))
+        self.assertEqual(self.figures("cass-ellery"), (0, 0, 4))
+
+    def test_a_night_for_their_own_side_off_that_card_s_roster_is_the_team_s(self):
+        # Whatever the rule for a fill-in makes of the night: she was on the side of
+        # the team that registers her.
+        self.assertEqual(self.figures("hana-wex"), (4, 4, 4))
+
+    def test_every_row_carries_both_and_they_are_null_together_off_every_roster(self):
+        for slug, player in self.players().items():
+            with self.subTest(player=slug):
+                self.assertIn("team_matches", player)
+                self.assertEqual(
+                    (player["team_matches"] is None, player["available"] is None),
+                    (player["team"] is None,) * 2)
+                if player["team"] is not None:
+                    self.assertLessEqual(player["team_matches"],
+                                         min(player["matches"], player["available"]))
+
+
+class TestARowHasATeamExactlyWhenARosterBlockRegistersItsPlayer(
+        LentPlayersSeasonCase):
+    """What the page counts as registered: the rows with a team (4.450).
+
+    The overview header, the Players used tile and the Players view counted every
+    row of ``players``, which holds one for every name a counted set row prints.
+    Measured on these cards (/tmp/mcf/scratch/ROSTER/before/measure.txt): ``8
+    scorecards read · 4 teams · 13 registered players``, ``Players used 10 of 13``
+    and ``13 registered players.``, where the roster blocks register 12 and Zed
+    Quill is the thirteenth. The page now counts the rows with a team
+    (TestARegisteredPlayerIsOneARosterBlockPrints), which holds only while stats
+    gives a team to every player Competition.player_index registers and to nobody
+    else. Rejected: counting off the rows with fill_in_appearances above 0, which
+    Jo and Lena, registered and lent, have as well, so the 12 would read 10. It
+    read 9 before 4.443, when Hana Wex's night off one card's roster block was a
+    fill-in too.
+    """
+
+    def test_the_rows_with_a_team_are_the_players_the_roster_blocks_register(self):
+        with_team = sorted(slug for slug, p in self.players().items() if p["team"])
+        self.assertEqual(with_team, sorted(self.competition.player_index()))
+        self.assertEqual(len(with_team), 12)
+
+    def test_the_rest_are_the_names_only_a_set_row_prints(self):
+        self.assertEqual([slug for slug, p in self.players().items()
+                          if not p["team"]], ["zed-quill"])
+
+    def test_a_registered_player_lent_out_keeps_their_team(self):
+        for slug in ("jo-calder", "lena-ordoy"):
+            with self.subTest(player=slug):
+                self.assertEqual(self.players()[slug]["team"], "parkview-wanderers")
+                self.assertEqual(self.players()[slug]["fill_in_appearances"], 1)
+
+
+class TestANightPlayedAgainstTheirOwnTeamIsNotOneOfItsNights(SeasonCase):
+    """A night is the team's by the side the player was on, not by who played (4.449).
+
+    ``team_matches`` counts a night as the team's when the player was on the side
+    of the team that registers them. Asked instead whether that team played in the
+    match at all, whichever side, a night lent to its opponent is one of its own.
+    Measured on these cards (/tmp/mcf/scratch/ROSTER/against/), the suite's three
+    rounds and a round-4 card on which the Hilltop Aces field Lena Ordoy of the
+    Parkview Wanderers against Parkview, whose roster block prints her: her tile
+    reads ``Matches 1 / 0 of 4 the team has played, 1 for another side`` and her
+    Played cell ``0 of 4, 1 for another side``; with ``match.involves(own.team)``
+    in the count they read ``1 / of 4 the team has played`` and ``1 of 4``, as
+    0.1.0's did. Its own season, so that LentPlayersSeasonCase's figures stay.
+
+    Not held: a name in two teams' roster blocks, which validate's
+    player-two-rosters warning reports. It is one row, of whichever team the index
+    wrote last, and a night it played for the other, whose block printed it on that
+    card, counts as lent (``0 of 4 the team has played, 1 for another side``,
+    measured the same way with Lena in the Aces' block instead of Parkview's). The
+    warning leaves to the club which of the two registrations is the row's, so no
+    test pins which team the night is for.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        S = cw.SetRow
+        folder = cls.data / "Round4"
+        folder.mkdir(parents=True, exist_ok=True)
+        cw.write_card_file(folder / "hilltop-aces-parkview-wanderers.pdf", cw.CardSpec(
+            date="2026-09-08", round_label="4", division="B", court="12",
+            match_id="4490003", home_name=TEAMS["hilltop-aces"][0],
+            away_name=TEAMS["parkview-wanderers"][0], rows=(
+                S(6, 4, True, ("Dev Raman", "Lena Ordoy"), ("Jo Calder", "Kit Vasse")),
+                S(3, 6, False, ("Dev Raman",), ("Jo Calder",)),
+                S(6, 2, False, ("Lena Ordoy",), ("Kit Vasse",)),
+                S(4, 6, True, ("Dev Raman", "Lena Ordoy"),
+                  ("Jo Calder", "Kit Vasse"))),
+            home_roster=squad_for("hilltop-aces", TEAMS["hilltop-aces"][1])[0],
+            away_roster=squad_for("parkview-wanderers",
+                                  TEAMS["parkview-wanderers"][1])[0]))
+
+    def test_a_night_for_their_own_team_s_opponent_is_not_one_of_its_nights(self):
+        # Lena's one night was for the Aces, against Parkview; Jo's, across the
+        # net, was one of Parkview's four.
+        players = {p["slug"]: p for p in self.season["players"]}
+        self.assertEqual(
+            {slug: (players[slug]["matches"], players[slug]["team_matches"],
+                    players[slug]["available"])
+             for slug in ("lena-ordoy", "jo-calder")},
+            {"lena-ordoy": (1, 0, 4), "jo-calder": (4, 4, 4)})
 
 
 class TestTheShareOfATeamsGamesIsAPartitionOfThem(SeasonCase):
@@ -10372,11 +14318,12 @@ class TestARubberWithMoreNamesThanPlacesPaysOutTwiceOver(SeasonCase):
         the away side of this card is one name in one place throughout.
         """
         self.assertEqual(self.row(self.HOME)["games_won"], self.TEAM_GAMES)
+        # 4.421 moved this: the record counts the rubbers nobody played too.
         self.assertEqual(self.row(self.HOME)["contribution_gap"],
                          {"games": -self.OVERPAID, "team_games_won": self.TEAM_GAMES,
                           "share_pct": self.SHARE_PCT, "rubbers_with_outsiders": 0,
                           "rubbers_short_a_name": 0, "rubbers_overfull": 1,
-                          "nights_not_credited": 0})
+                          "nights_not_credited": 0, "rubbers_nobody_played": 0})
 
     def test_the_opponents_column_is_whole(self):
         gap = self.row(self.AWAY)["contribution_gap"]
@@ -11205,7 +15152,8 @@ class TestABlankCardInventsNobody(SeasonCase):
     cancelled card skips the roster checks that would have.
 
     So: no phantom, and one line in the report per card saying how much of it was
-    never filled in.
+    never filled in. (4.424 moved this: a card called off with nobody on it
+    records nothing, and its one line is its ``no-result``.)
     """
 
     ROUND = "4"
@@ -11267,27 +15215,41 @@ class TestABlankCardInventsNobody(SeasonCase):
 
     # --- and the loss is reported ------------------------------------------
 
-    def test_one_finding_per_card_says_how_much_was_never_filled_in(self):
-        issue, = self.unrecorded()
-        self.assertEqual(issue.severity, validate.WARNING)
-        self.assertIn(str(self.blank_card), issue.subject)
-        self.assertIn("12 name cell", issue.message)
-        self.assertIn("4 of 4 rubber", issue.message)
-        self.assertIn("Unspecified player", issue.message)
+    def test_one_finding_per_card_says_it_was_called_off(self):
+        # 4.424 moved this: the one finding was players-unrecorded, saying how
+        # much was never filled in, beside no-result. A card called off with
+        # nobody on it records nothing, so no-result is its one finding.
+        label = f"R{self.ROUND} {self.HOME} v {self.AWAY}"
+        self.assertEqual(
+            [i for i in self.report.issues
+             if str(self.blank_card) in (i.subject, i.detail) or i.subject == label],
+            [validate.Issue(
+                rule="no-result", severity=validate.WARNING,
+                message=f"{label}: recorded as cancelled, so it is not counted in "
+                        "the ladder.",
+                subject=label, detail=str(self.blank_card))])
 
-    def test_it_says_the_match_was_called_off_so_nothing_needs_doing(self):
-        # The distinction that decides whether a club acts: a card called off
-        # before the names went in needs nothing, a played card printing the
-        # placeholder needs re-exporting.
-        issue, = self.unrecorded()
-        self.assertIn("called off", issue.message)
+    def test_it_is_not_told_its_names_were_never_entered_as_well(self):
+        # 4.424 moved this: it pinned players-unrecorded saying the match was
+        # called off, so nothing needs doing, which no-result says by itself.
+        # The clause is pinned on a washout with games on it, in
+        # TestAMatchForfeitedWholeSaysItsBlankNamesAreAForfeitsWhicheverBoxItTicks.
+        self.assertEqual(self.unrecorded(), [])
 
     def test_the_clean_cards_produce_no_such_finding(self):
         # Six cards with real names on them. Without this the check could fire on
-        # everything and still pass above.
-        for issue in self.unrecorded():
-            with self.subTest(subject=issue.subject):
-                self.assertIn(str(self.blank_card), issue.subject)
+        # everything and still pass above. 4.424 moved this: the blank card now
+        # records nothing and is told no players-unrecorded (above), which left
+        # this asking nothing. So the check is asked with that stand-down off, and
+        # it names the blank card alone.
+        with mock.patch.object(validate, "records_nothing", return_value=False):
+            report = validate.validate(
+                self.matches, self.competition, club=self.discovery.club,
+                cards=self.cards, rejected=self.rejected,
+                seasons_mode=self.config.seasons_mode)
+        named = [i.subject for i in report.issues if i.rule == "players-unrecorded"]
+        self.assertEqual(len(named), 1, named)
+        self.assertIn(str(self.blank_card), named[0])
 
     def test_the_card_is_still_read_and_counted_as_a_card(self):
         self.assertEqual(self.rejected, [])
@@ -11374,6 +15336,311 @@ class TestAPlayedCardMissingOneRowsNamesSaysWhatToDo(SeasonCase):
         for slug in slugs:
             with self.subTest(player=slug):
                 self.assertNotIn("unspecified", slug)
+
+
+class TestAPlayedCardsPlaceholderIsToldOnceByTheRuleWhoseCauseItIs(
+        CardsBesideTheSeasonCase):
+    """Played cards beside the season printing 'Unspecified player' on one side.
+
+    Match Centre prints its placeholder in a name cell nobody filled. The reader
+    summed the two sides' placeholder cells into one count a row and the model
+    carried none, so ``set-player-count`` held a pair naming one player above the
+    placeholder to its two places, and ``set-players-missing`` took a singles
+    cell printing the placeholder alone for a name that failed to read, each
+    sending the club to Match Centre for a name the card says was never entered;
+    and ``players-unrecorded`` said of every rubber printing it that it has
+    games but nobody to credit them to, of rubbers credited to the one name, its
+    detail naming the rubbers and not the side. In round 4 Riverside Rockets v
+    Hilltop Aces played 6-1, 6-2, 6-3, 6-4, the away pairs naming one player
+    above the placeholder and the s2 away cell the placeholder alone; in round 5
+    its home mirror, the Lakeside Spinners v the Parkview Wanderers; and in round
+    6 the first card with those cells left blank. In round 4 too, a card whose s1
+    away cell prints its one player above the placeholder; in round 6, a card
+    printing it in both s2 cells; and in round 5, a card whose home side prints
+    it below d1's one name and in s2, its away side leaving those cells blank.
+
+    Measured on the tree before this (/tmp/mcf/scratch/UNSPEC/probe/probe.py,
+    cases played-away-placeholder, played-home-placeholder, played-away-blank
+    and played-singles-beside, each beside the season through build.py): 4
+    findings on the first, ``players-unrecorded`` with "those rubbers have games
+    but nobody to credit them to" and "3 placeholder cell(s) in rubber(s) 1, 3,
+    4", two ``set-player-count`` that the away side has 1 player(s) named, on d1
+    and d2, and ``set-players-missing`` that no away player was read for s2; the
+    mirror the same of home; the blank card the three without
+    ``players-unrecorded``; and the singles card the same clause, of a rubber
+    whose one place is credited. Now the placeholder is told once, by
+    ``players-unrecorded``, naming the side and which rubbers have nobody to
+    credit and which half, the singles card with neither, and the blank card
+    keeps its three. Rejected: a placeholder clause on ``set-player-count`` and
+    ``set-players-missing``, which keeps three findings for one cell; telling the
+    side from which list is short, which cannot place the placeholder on a row
+    short on both sides, one of them by a blank cell; and one count a row, as
+    before, which cannot say which side to fix.
+    """
+
+    PLACE = "Unspecified player"
+    PLAYED = ((6, 1), (6, 2), (6, 3), (6, 4))
+    SHAPE = {2, 4, 6}
+
+    @classmethod
+    def extra_cards(cls):
+        def shaped(home, away, side, to=cls.PLACE):
+            return cut_cells(rows_for(cls.PLAYED, TEAMS[home][1], TEAMS[away][1]),
+                             side, cls.SHAPE, to)
+        cls.away = cls.card("away", "4", "riverside-rockets", "hilltop-aces", None,
+                            rows=shaped("riverside-rockets", "hilltop-aces", "away"))
+        cls.home = cls.card("home", "5", "lakeside-spinners", "parkview-wanderers",
+                            None, rows=shaped("lakeside-spinners",
+                                              "parkview-wanderers", "home"))
+        cls.blank = cls.card("blank", "6", "riverside-rockets", "hilltop-aces", None,
+                             rows=shaped("riverside-rockets", "hilltop-aces", "away",
+                                         None))
+        both = rows_for(cls.PLAYED, TEAMS["lakeside-spinners"][1],
+                        TEAMS["parkview-wanderers"][1])
+        cls.both = cls.card("both", "6", "lakeside-spinners", "parkview-wanderers",
+                            None, rows=cut_cells(cut_cells(both, "home", {4},
+                                                           cls.PLACE),
+                                                 "away", {4}, cls.PLACE))
+        mixed = rows_for(cls.PLAYED, TEAMS["hilltop-aces"][1],
+                         TEAMS["riverside-rockets"][1])
+        cls.mixed = cls.card("mixed", "5", "hilltop-aces", "riverside-rockets", None,
+                             rows=cut_cells(cut_cells(mixed, "home", {2, 4},
+                                                      cls.PLACE), "away", {2, 4}))
+        beside = rows_for(cls.PLAYED, TEAMS["lakeside-spinners"][1],
+                          TEAMS["parkview-wanderers"][1])
+        cls.beside = cls.card(
+            "beside", "4", "lakeside-spinners", "parkview-wanderers", None,
+            rows=tuple(dataclasses.replace(row, away_players=row.away_players
+                                           + (cls.PLACE,)) if index == 1
+                       else row for index, row in enumerate(beside)))
+
+    def match_of(self, where):
+        match, = [m for m in self.matches if m.source == str(where)]
+        return match
+
+    def told(self, where, side):
+        return validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{where}: 3 name cell(s) across 3 of 4 rubber(s) print Match "
+                    "Centre's 'Unspecified player' placeholder rather than a "
+                    "person, so no name was recorded for them; those rubbers have "
+                    f"games but nobody to credit them to on the {side} side of "
+                    f"rubber(s) 3, and only one player of the pair to credit on "
+                    f"the {side} side of rubber(s) 1 and 4, so half of those games "
+                    "are credited to nobody.",
+            subject=str(where),
+            detail=f"3 placeholder cell(s): {side} in rubber(s) 1, 3, 4")
+
+    def test_each_side_s_placeholder_cells_reach_the_match(self):
+        for where, side, other in ((self.away, "away", "home"),
+                                   (self.home, "home", "away")):
+            with self.subTest(side=side):
+                sets = self.match_of(where).sets
+                self.assertEqual([s.unnamed_for(side) for s in sets], [1, 0, 1, 1])
+                self.assertEqual([s.unnamed_for(other) for s in sets], [0, 0, 0, 0])
+                # The games all count; the one name on each pair is credited.
+                self.assertEqual([len(s.players_for(side)) for s in sets],
+                                 [1, 1, 0, 1])
+        self.assertEqual([s.unnamed_for("away")
+                          for s in self.match_of(self.blank).sets], [0, 0, 0, 0])
+
+    def test_the_placeholder_is_told_once_naming_its_side(self):
+        for where, side in ((self.away, "away"), (self.home, "home")):
+            with self.subTest(side=side):
+                self.assertEqual(self.about(where), [self.told(where, side)])
+
+    def test_the_same_cells_left_blank_are_still_told_as_names_unread(self):
+        label = "R6 riverside-rockets v hilltop-aces"
+        found = self.about(self.blank)
+        self.assertEqual([(i.rule, i.subject) for i in found],
+                         [("set-player-count", f"{label} d1"),
+                          ("set-player-count", f"{label} d2"),
+                          ("set-players-missing", label)])
+        self.assertEqual(found[0].message,
+                         f"{label} d1: the away side has 1 player(s) named "
+                         "(dev-raman), and Doubles 1 is a doubles set.")
+        self.assertEqual(found[2].message,
+                         f"{label}: no away player was read for s2, so those games "
+                         "are counted for hilltop-aces but for nobody in it.")
+
+    def test_a_rubber_naming_nobody_on_both_sides_names_both(self):
+        # TestAPlayedCardMissingOneRowsNamesSaysWhatToDo's shape: s2 printing the
+        # placeholder on both sides, so neither is told of names unread.
+        self.assertEqual(self.about(self.both), [validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{self.both}: 2 name cell(s) across 1 of 4 rubber(s) print "
+                    "Match Centre's 'Unspecified player' placeholder rather than "
+                    "a person, so no name was recorded for them; those rubbers "
+                    "have games but nobody to credit them to on the home side of "
+                    "rubber(s) 3 and the away side of rubber(s) 3.",
+            subject=str(self.both),
+            detail="2 placeholder cell(s): home in rubber(s) 3; away in "
+                   "rubber(s) 3")])
+
+    def test_a_row_short_on_both_sides_tells_each_side_by_its_own_cells(self):
+        # d1's home pair names one player above the placeholder and its away pair
+        # leaves the second cell blank; s2's home cell prints the placeholder and
+        # its away cell is blank. One count a row could not say which side is which.
+        label = "R5 hilltop-aces v riverside-rockets"
+        self.assertCountEqual(self.about(self.mixed), [
+            validate.Issue(
+                rule="players-unrecorded", severity=validate.WARNING,
+                message=f"{self.mixed}: 2 name cell(s) across 2 of 4 rubber(s) "
+                        "print Match Centre's 'Unspecified player' placeholder "
+                        "rather than a person, so no name was recorded for them; "
+                        "those rubbers have games but nobody to credit them to on "
+                        "the home side of rubber(s) 3, and only one player of the "
+                        "pair to credit on the home side of rubber(s) 1, so half "
+                        "of those games are credited to nobody.",
+                subject=str(self.mixed),
+                detail="2 placeholder cell(s): home in rubber(s) 1, 3"),
+            validate.Issue(
+                rule="set-player-count", severity=validate.WARNING,
+                message=f"{label} d1: the away side has 1 player(s) named "
+                        "(ana-fernandez), and Doubles 1 is a doubles set.",
+                subject=f"{label} d1", detail=str(self.mixed)),
+            validate.Issue(
+                rule="set-players-missing", severity=validate.WARNING,
+                message=f"{label}: no away player was read for s2, so those games "
+                        "are counted for riverside-rockets but for nobody in it.",
+                subject=label, detail=str(self.mixed))])
+
+    def test_a_singles_cell_naming_its_player_beside_it_has_nobody_uncredited(self):
+        # Every place on the card is credited, so nothing has games but nobody to
+        # credit them to; the cell is still told, as every placeholder is.
+        self.assertEqual([len(s.away_players)
+                          for s in self.match_of(self.beside).sets], [2, 1, 1, 2])
+        self.assertEqual(self.about(self.beside), [validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{self.beside}: 1 name cell(s) across 1 of 4 rubber(s) print "
+                    "Match Centre's 'Unspecified player' placeholder rather than "
+                    "a person, so no name was recorded for them.",
+            subject=str(self.beside),
+            detail="1 placeholder cell(s): away in rubber(s) 2")])
+
+
+class TestAPairPrintingThePlaceholderBesideABlankCellIsStillToldOfTheBlank(
+        CardsBesideTheSeasonCase):
+    """Played cards whose d1 away pair prints the placeholder in one cell or both.
+
+    ``set-players-missing`` tells a row with no name read on a side, since the
+    names may be there and unread. A side's 'Unspecified player' cells are places
+    nobody filled, which ``players-unrecorded`` tells, and the first version of
+    4.448 passed a side by once any of its cells printed the placeholder. In
+    round 4 Riverside Rockets v Hilltop Aces played 6-1, 6-2, 6-3, 6-4, the d1
+    away pair printing the placeholder in its first cell and leaving the second
+    blank; and the Lakeside Spinners v the Parkview Wanderers the same, the pair
+    printing it in both.
+
+    Measured on that first version (/tmp/mcf/scratch/UNSPEC/fixup/probe.py,
+    cases pair-place-and-blank and pair-place-twice, each beside the season
+    through build.py): ``players-unrecorded`` alone on each, the blank cell
+    untold; and on the tree before 4.448 each beside ``set-players-missing`` for
+    d1. Now ``set-players-missing`` passes a side by only where its placeholder
+    cells fill its places, so the blank cell is still told, as the same pair with
+    one name above a blank is by ``set-player-count``, and the pair printing it
+    twice is told once. Rejected: passing by any side printing the placeholder,
+    which takes a cell that may hold a name unread for a place nobody filled; and
+    a clause on ``players-unrecorded`` for the blank cell, which would tell a
+    name unread in the rule for places nobody filled.
+    """
+
+    PLACE = "Unspecified player"
+    PLAYED = ((6, 1), (6, 2), (6, 3), (6, 4))
+
+    @classmethod
+    def extra_cards(cls):
+        def printed(home, away, cells):
+            rows = rows_for(cls.PLAYED, TEAMS[home][1], TEAMS[away][1])
+            return (dataclasses.replace(rows[0], away_players=cells),) + rows[1:]
+        cls.blank = cls.card(
+            "blank", "4", "riverside-rockets", "hilltop-aces", None,
+            rows=printed("riverside-rockets", "hilltop-aces", (cls.PLACE,)))
+        cls.twice = cls.card(
+            "twice", "4", "lakeside-spinners", "parkview-wanderers", None,
+            rows=printed("lakeside-spinners", "parkview-wanderers",
+                         (cls.PLACE, cls.PLACE)))
+
+    def told(self, where, cells):
+        return validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{where}: {cells} name cell(s) across 1 of 4 rubber(s) print "
+                    "Match Centre's 'Unspecified player' placeholder rather than "
+                    "a person, so no name was recorded for them; those rubbers "
+                    "have games but nobody to credit them to on the away side of "
+                    "rubber(s) 1.",
+            subject=str(where),
+            detail=f"{cells} placeholder cell(s): away in rubber(s) 1")
+
+    def test_the_blank_cell_beside_the_placeholder_is_told_as_a_name_unread(self):
+        label = "R4 riverside-rockets v hilltop-aces"
+        self.assertCountEqual(self.about(self.blank), [
+            self.told(self.blank, 1),
+            validate.Issue(
+                rule="set-players-missing", severity=validate.WARNING,
+                message=f"{label}: no away player was read for d1, so those games "
+                        "are counted for hilltop-aces but for nobody in it.",
+                subject=label, detail=str(self.blank))])
+
+    def test_a_pair_printing_the_placeholder_twice_is_told_once(self):
+        self.assertEqual(self.about(self.twice), [self.told(self.twice, 2)])
+
+
+class TestAPlaceholderOnARubberWithNoGamesIsNotSaidToHaveGames(
+        CardsBesideTheSeasonCase):
+    """A played card stopped with its last rubber at love, printing the placeholder.
+
+    Riverside Rockets v Hilltop Aces in round 4, d1, s1 and s2 played 6-1, 6-2
+    and 6-3 and d2 left 0-0, as a night stopped before its last rubber leaves it;
+    the away side prints Match Centre's 'Unspecified player' in its s2 cell and in
+    both of d2's. ``players-unrecorded`` chose its played clause when any rubber
+    printing the placeholder had games, and began it "those rubbers have games
+    but", of every rubber printing it. Measured on the tree before this
+    (/tmp/mcf/scratch/UNSPEC/probe/probe.py, case played-last-love, beside the
+    season through build.py): "3 name cell(s) across 2 of 4 rubber(s) ...; those
+    rubbers have games but nobody to credit them to", of d2 too, which has none,
+    beside ``set-no-games`` on d2 and ``set-players-missing`` for s2 and d2; and
+    once the clause was worded by side (after3.txt), still "those rubbers have
+    games but nobody to credit them to on the away side of rubber(s) 3", of the
+    same two rubbers. Now the clause says "those rubbers with games have" where
+    a rubber printing the placeholder has none, as a forfeit given up after the
+    rubbers it played does too. Rejected: a third clause naming the rubbers with
+    no games, which ``set-no-games`` already tells of a played card's row, and
+    the forfeit of a forfeit's; and leaving the rubbers with no games out of the
+    count of rubbers before it, which would then disagree with the detail's
+    list of the cells.
+    """
+
+    PLACE = "Unspecified player"
+
+    @classmethod
+    def extra_cards(cls):
+        cls.stopped = cls.card(
+            "stopped", "4", "riverside-rockets", "hilltop-aces", None,
+            rows=cut_cells(rows_for(((6, 1), (6, 2), (6, 3), (0, 0)),
+                                    TEAMS["riverside-rockets"][1],
+                                    TEAMS["hilltop-aces"][1]),
+                           "away", {4, 5, 6}, cls.PLACE))
+
+    def test_the_clause_speaks_of_the_rubbers_with_games_alone(self):
+        told, = [i for i in self.about(self.stopped)
+                 if i.rule == "players-unrecorded"]
+        self.assertEqual(told, validate.Issue(
+            rule="players-unrecorded", severity=validate.WARNING,
+            message=f"{self.stopped}: 3 name cell(s) across 2 of 4 rubber(s) print "
+                    "Match Centre's 'Unspecified player' placeholder rather than "
+                    "a person, so no name was recorded for them; those rubbers "
+                    "with games have nobody to credit them to on the away side of "
+                    "rubber(s) 3.",
+            subject=str(self.stopped),
+            detail="3 placeholder cell(s): away in rubber(s) 3, 4"))
+
+    def test_the_rubber_left_at_love_is_told_once_and_as_a_rubber_with_no_games(self):
+        label = "R4 riverside-rockets v hilltop-aces"
+        self.assertEqual(sorted((i.rule, i.subject)
+                                for i in self.about(self.stopped)),
+                         [("players-unrecorded", str(self.stopped)),
+                          ("set-no-games", f"{label} d2")])
 
 
 # --- one player, two spellings ------------------------------------------------
@@ -11562,7 +15829,9 @@ class TestOnePlayerRecordedTwice(unittest.TestCase):
         # The two facts the dashboard's rule rests on: somebody has had enough
         # matches available for one appearance to stand out, and exactly one
         # player is down at one or two.
-        scale = max(max(p["available"], p["matches"])
+        # 4.449 moved this: `available` is null for a player on no team, who has
+        # no team's nights to be out of, and the page reads the null as 0.
+        scale = max(max(p["available"] or 0, p["matches"])
                     for p in self.split["players"])
         self.assertGreaterEqual(scale, 4)
         sparse = sorted(p["slug"] for p in self.split["players"]
@@ -13309,9 +17578,10 @@ class TestOneNameInTwoGradesIsAlreadyTwoPlayers(unittest.TestCase):
 
     Two builds of the same cards, one plain and one with the cross-grade entry
     declared, because "the declaration did nothing" is a statement about the
-    difference between them and not about either alone. And the run says so, which
-    is the part a club can act on: an entry no one competition holds all the teams
-    of is a note of its own.
+    difference between them and not about either alone. And the run said so, which
+    was the part a club could act on: an entry no one competition held all the
+    teams of was a note of its own, until 4.430 wrote the careers page in
+    single-season mode, the one page that puts both grades' rows together.
     """
 
     SHARED = "Ada Renn"          # grade A's opening player, reprinted in grade B
@@ -13418,17 +17688,19 @@ class TestOneNameInTwoGradesIsAlreadyTwoPlayers(unittest.TestCase):
                 self.assertEqual(self.standing(self.declared[grade]),
                                  self.standing(self.plain[grade]))
 
-    def test_the_run_says_no_one_competition_has_all_those_teams(self):
-        # Without this the club's only evidence is a slug in a URL. The warning
-        # names both teams, because which pair cannot be acted on is the whole
-        # message, and it is a warning, which --quiet prints, and not a note too.
-        found = [n for n in self.declared["_said"] if "[namesakes]" in n]
-        self.assertEqual(len(found), 1, self.declared["_said"])
-        self.assertEqual([n for n in self.declared["_notes"] if "[namesakes]" in n],
-                         [])
-        for team in ("marina-magpies", "station-starlings"):
-            self.assertIn(team, found[0])
-        self.assertIn(self.MERGED, found[0])
+    def test_the_run_no_longer_says_the_entry_separated_nobody(self):
+        # Moved by 4.430: was test_the_run_says_no_one_competition_has_all_those_
+        # teams, a warning naming both teams. Every build printing names now
+        # writes the careers page, the season's players in single-season mode,
+        # where the two grades' rows are one player's until this entry parts them,
+        # so it separates somebody and nothing is said, as in multi-season mode.
+        self.assertEqual([n for n in (*self.declared["_said"],
+                                      *self.declared["_notes"])
+                          if "[namesakes]" in n], [])
+        self.assertIn(f"{self.MERGED}-marina-magpies",
+                      self.slugs_of(self.declared["A"]))
+        self.assertIn(f"{self.MERGED}-station-starlings",
+                      self.slugs_of(self.declared["B"]))
 
     def test_the_same_name_merged_in_both_grades_is_not_that_mistake(self):
         # The boundary of the note, and the reason it asks whether any one
@@ -13928,7 +18200,8 @@ class TestACorrectionThatReachesNobodyIsSaidOnceWithTheKeyToUse(unittest.TestCas
         warning twice or in the wrong place is visible. ``names`` is every player's
         display name, as :func:`stats.player_names` gives it to the season document,
         and ``shown`` the same by competition, for a player in two of them.
-        ``unknown`` is the set rows ``unknown-player`` names ``bo-nakamora`` in.
+        ``unknown`` is the ``unknown-player`` findings that name ``bo-nakamora``,
+        one a card, naming its set rows (4.432; it was one a set row).
         """
         data, cards_read, rejected = self.read[cards]
         type(self).configs += 1
@@ -14095,7 +18368,8 @@ class TestACorrectionThatReachesNobodyIsSaidOnceWithTheKeyToUse(unittest.TestCas
     def test_a_fill_in_no_roster_prints_takes_the_correction_written_for_them(self):
         # The decision. Before: the name the set row gave her, with this line in
         # the file. The misspelling of a registered player is corrected the same way
-        # and is still said by unknown-player, once a set row, as it was before. A
+        # and is still said by unknown-player, in one finding naming its set rows
+        # (4.432 moved it from one a set row), as it was before. A
         # fill-in for the visitors too, since a set row names both sides, and one
         # from another grade, who takes the line in both.
         cases = {
@@ -14119,7 +18393,7 @@ class TestACorrectionThatReachesNobodyIsSaidOnceWithTheKeyToUse(unittest.TestCas
                 self.assertEqual([names[slug] for names in run["shown"].values()
                                   if slug in names], [written] * grades)
                 self.assertEqual(run["unknown"], before["unknown"])
-        self.assertEqual(self.run_with("four", "")["unknown"], 3)
+        self.assertEqual(self.run_with("four", "")["unknown"], 1)   # 4.432: was 3
 
     def test_a_line_that_reaches_somebody_is_quiet(self):
         # Somebody in a roster block who never takes a court is still a player the
@@ -14737,8 +19011,9 @@ class TestACorrectionThatGivesOnePlayerAnothersNameIsSaidWithTheAliasThatJoinsTh
     set row the misspelling is in, as a fill-in or a spelling that needs an alias,
     and offers no line: it is about the card, and this is about the line.
 
-    Judged a page at a time, each competition's and a multi-season build's careers
-    page, and said once for what the lines did on all of them. Measured with the
+    Judged a page at a time, each competition's and the careers page (a
+    multi-season build's until 4.430, and every build's printing names since), and
+    said once for what the lines did on all of them. Measured with the
     review's probes on the tree before this pass: one pair on the pages of two
     grades was said twice, offered the alias once and told once that the cards give
     none; two seasons' fill-ins spelt two ways and given one name made two careers
@@ -14821,10 +19096,11 @@ class TestACorrectionThatGivesOnePlayerAnothersNameIsSaidWithTheAliasThatJoinsTh
                     'people, give each a name of their own.')
                 self.assertEqual(offered_corrections(self.one(run)),
                                  [("bo-nakamora", "bo-nakamura")])
-                # The card's misspelling is still said where it is printed, set row
-                # by set row, as a fill-in or a spelling wanting an alias, and with
-                # no line: that warning is about the card.
-                self.assertEqual(run["unknown"], 3)
+                # The card's misspelling is still said where it is printed, in one
+                # finding naming each set row (4.432 moved it from one a row), as a
+                # fill-in or a spelling wanting an alias, and with no line: that
+                # warning is about the card.
+                self.assertEqual(run["unknown"], 1)
         self.assertEqual(self.run_with("four", "")["said"], [])
 
     def test_the_alias_pasted_and_the_line_deleted_is_one_record_and_nothing_said(self):
@@ -14948,13 +19224,17 @@ class TestACorrectionThatGivesOnePlayerAnothersNameIsSaidWithTheAliasThatJoinsTh
 
     def test_a_pair_no_one_page_shows_is_said_once_the_careers_page_shows_it(self):
         # Grade B alone prints Ros DArcy: each grade's page shows one of them, and
-        # a multi-season build's careers page puts both on one.
-        self.assertEqual(self.run_with("lent", self.ROS_LINE)["said"], [])
-        multi = '[build]\nseasons = "multi"\n\n'
-        run = self.run_with("lent", multi + self.ROS_LINE)
-        self.assertEqual(len(run["shown"]), 2)
-        self.assertEqual(self.one(run), self.ROS_SAID)
-        self.assertEqual(self.run_with("lent", multi)["said"], [])
+        # the careers page puts both on one.
+        # Moved by 4.430: the single-season run said nothing, since no
+        # single-season build wrote the careers page. Every build printing names
+        # writes it now, the season's players in single-season mode, so the pair
+        # is on one page in either mode and said in both.
+        for config in ("", '[build]\nseasons = "multi"\n\n'):
+            with self.subTest(config=config):
+                run = self.run_with("lent", config + self.ROS_LINE)
+                self.assertEqual(len(run["shown"]), 2)
+                self.assertEqual(self.one(run), self.ROS_SAID)
+                self.assertEqual(self.run_with("lent", config)["said"], [])
 
     def test_two_seasons_holding_the_same_pair_are_told_once(self):
         path = self.root / "two" / "config.toml"
@@ -16160,12 +20440,17 @@ class TestANamesakesEntryWithATeamMissedSaysWhetherItSeparatedAnybody(
         # Ada Renn opens for grade A's Magpies and grade B's Starlings. Each grade's
         # page holds one record of the name whatever the entry says, but the careers
         # page joins grades by name, and there the entry is two careers or one.
+        # Moved by 4.430: the first half was this single-season config as it is,
+        # and the second the decider patched to say yes. A single-season build
+        # printing names writes the careers page since 4.430, so the config as it
+        # is now gives the second sentence, and a build without the page is the
+        # decider patched to say no.
         entry = '[namesakes]\nada-renn = ["marina-magpies", "quarry-quollz"]\n'
-        self.assertIn("quarry-quollz, so the entry separated nobody.",
-                      self.one(self.run_with("grades", entry)))
         with mock.patch.object(discover_mod.careers, "writes_careers",
-                               return_value=True):
-            flat = self.one(self.run_with("grades", entry))
+                               return_value=False):
+            self.assertIn("quarry-quollz, so the entry separated nobody.",
+                          self.one(self.run_with("grades", entry)))
+        flat = self.one(self.run_with("grades", entry))
         self.assertIn("quarry-quollz. The rest were still separated;", flat)
 
 
@@ -17395,8 +21680,9 @@ class TestALadderThatCannotBeComputedIsNotComparedEither(SheetSeasonCase):
 
     def test_a_ledger_that_refuses_gives_the_ladder_error_and_no_sheet_finding(self):
         refusal = scoring.ScoringError("games-bonus has no value for a draw")
-        with mock.patch.object(stats, "points_ledger", side_effect=refusal), \
-                mock.patch.object(validate, "points_ledger", side_effect=refusal):
+        # Once also patched in validate, which since 4.428 asks stats for the counts
+        # and holds no ledger of its own to patch.
+        with mock.patch.object(stats, "points_ledger", side_effect=refusal):
             comparison, report = self.checked("3", *AGREEING_SHEET)
         self.assertEqual(comparison.status, sheet_mod.NO_LADDER)
         self.assertEqual(self.sheet_issues(report), [])
@@ -17817,6 +22103,1300 @@ class TestTwoWeeksOffAreThoseWeeks(SheetSeasonCase):
         self.assertTrue(self.only_finding(report).message.endswith(
             " It had rounds 1 and 3 off: check those weeks against the sheet's byes "
             "first, then its matches."))
+
+
+# --- 4.428, 4.438, 4.440: a ladder in one of three states, and who leads it ------
+
+
+def write_fixture_card(data: Path, rnd: str, home: str, away: str, scores, *,
+                       index: int, date: str | None = None, **spec) -> Path:
+    """One card of the suite's competition, for a season a class puts together itself.
+
+    What :func:`write_season_cards` cannot give these classes: that writes the six
+    fixtures whole, and each class below is about a season holding only some of them,
+    or a night that was never played. Anything else a card can say goes through
+    ``spec`` to :class:`cardwriter.CardSpec`, as the washout below does.
+    """
+    home_name, home_players = TEAMS[home]
+    away_name, away_players = TEAMS[away]
+    home_rows, home_on_court = squad_for(home, home_players)
+    away_rows, away_on_court = squad_for(away, away_players)
+    folder = data / f"Round{rnd}"
+    folder.mkdir(parents=True, exist_ok=True)
+    return cw.write_card_file(folder / f"{home}-{away}-r{rnd}.pdf", cw.CardSpec(
+        date=date or DATES[rnd], round_label=rnd, division="B",
+        court=f"{index:02d}", match_id=f"428{index:04d}", home_name=home_name,
+        away_name=away_name, rows=rows_for(scores, home_on_court, away_on_court),
+        home_roster=home_rows, away_roster=away_rows, **spec))
+
+
+def write_washout(data: Path, rnd: str, home: str, away: str, *, index: int,
+                  date: str | None = None) -> Path:
+    """A night rained off before a set was finished: Match Cancelled, 0-0 throughout."""
+    return write_fixture_card(data, rnd, home, away, ((0, 0),) * 4, index=index,
+                              date=date, cancelled=True, verb="VS",
+                              winner=cw.NO_TICK)
+
+
+def write_washed_out_round(data: Path) -> list[Path]:
+    """Round 1 rained off on both courts, the suite's two round-1 fixtures."""
+    return [write_washout(data, "1", "riverside-rockets", "hilltop-aces", index=1),
+            write_washout(data, "1", "lakeside-spinners", "parkview-wanderers",
+                          index=2)]
+
+
+class CardsAloneCase(SeasonCase):
+    """A competition of the cards a class writes, and none of the season's six.
+
+    Built by :class:`SeasonCase`'s own steps, so the classes below are told what every
+    other class is told; only the folder differs.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        shutil.rmtree(cls.data)
+        cls.data.mkdir()
+        cls.write_cards(cls.data)
+
+    @classmethod
+    def write_cards(cls, data: Path) -> None:
+        raise NotImplementedError
+
+    def f10(self) -> list[tuple[str, str, str]]:
+        return [(issue.severity, issue.message, issue.detail)
+                for issue in self.report.issues if issue.rule == "F10"]
+
+    def positions(self) -> dict[str, int | None]:
+        return {row["slug"]: row["position"] for row in self.season["teams"]}
+
+
+NOT_STARTED = ("no regular-season match has been counted yet, so there is no "
+               "ladder to present.")
+
+
+class TestALadderWithNothingCountedHasNotStartedAndPlacesNobody(CardsAloneCase):
+    """Nothing counted is a ladder that has not started, not one in progress.
+
+    ``stats.ladder_complete`` put three states in one boolean, so a competition whose
+    every card was a washout read as a ladder in progress, and ``_ranked`` placed its
+    teams 1 to 4 by name. Measured on the base with round 1 rained off on both courts
+    (/tmp/mcf/scratch/EMPTY/before.txt, wash1): ``meta.ladder_complete`` false, the
+    teams placed 1 to 4 alphabetically on 0 matches, one round-1 point each on the
+    history chart, and the report's ``ladder in progress: teams have played unequal
+    numbers of matches`` above its own F10 ``no team has a counted match yet``. Now
+    ``stats.ladder_state`` says ``empty``, by the one rule F10 and the document read,
+    no team has a place and no round that counted nothing is a point on the chart.
+
+    Rejected: wording alone, which leaves the places, the chart's points and the false
+    moves of the next build (4.428's other classes); calling an empty ladder complete,
+    which crowns a leader on nothing; and the page working the state out itself, a
+    second copy of the rule in the language the suite cannot run (4.112).
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_washed_out_round(data)
+
+    def test_every_team_has_counted_nothing_and_the_state_says_so(self):
+        self.assertEqual(stats.ladder_counts(self.matches, self.competition),
+                         dict.fromkeys(TEAMS, 0))
+        self.assertEqual(stats.ladder_state(self.matches, self.competition), "empty")
+        self.assertFalse(stats.ladder_complete(self.matches, self.competition))
+
+    def test_no_team_is_given_a_place(self):
+        table = stats.team_stats(self.matches, self.competition)
+        self.assertEqual({slug: row.position for slug, row in table.items()},
+                         dict.fromkeys(TEAMS))
+        self.assertEqual(self.positions(), dict.fromkeys(TEAMS))
+
+    def test_a_round_that_counted_nothing_is_no_point_on_the_history(self):
+        self.assertEqual(stats.ladder_history(self.matches, self.competition), {})
+        self.assertEqual({row["slug"]: row["ladder_history"]
+                          for row in self.season["teams"]},
+                         dict.fromkeys(TEAMS, []))
+
+    def test_the_document_says_it_has_not_started(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["ladder_complete"]),
+                         ("empty", False))
+
+    def test_f10_says_no_regular_season_match_has_been_counted(self):
+        self.assertEqual(self.f10(),
+                         [(validate.WARNING, NOT_STARTED, "0 counted matches")])
+
+
+class TestTheLadderIsInOneOfThreeStatesByOneRule(unittest.TestCase):
+    """``stats.ladder_state_of``: one answer from the teams' counted matches.
+
+    Stated over counts rather than cards, so the document, F10 and a document an
+    earlier build left (``changes``) all ask it the same question. No teams is empty
+    too: there is nobody to place.
+    """
+
+    def test_nothing_counted_by_anybody_is_empty(self):
+        for counts in ({}, {"a": 0}, {"a": 0, "b": 0}):
+            with self.subTest(counts=counts):
+                self.assertEqual(stats.ladder_state_of(counts), "empty")
+
+    def test_the_same_count_for_everybody_is_complete(self):
+        for counts in ({"a": 1}, {"a": 3, "b": 3, "c": 3}):
+            with self.subTest(counts=counts):
+                self.assertEqual(stats.ladder_state_of(counts), "complete")
+
+    def test_any_difference_is_in_progress_even_beside_a_nought(self):
+        for counts in ({"a": 2, "b": 1}, {"a": 1, "b": 0}, {"a": 0, "b": 0, "c": 1}):
+            with self.subTest(counts=counts):
+                self.assertEqual(stats.ladder_state_of(counts), "in-progress")
+
+
+class TestATeamWithNothingCountedBesideTeamsWithSomeIsPlacedLast(SeasonCase):
+    """A ladder in progress still places a team with nothing counted, last, by name.
+
+    Round 1 played on one court and rained off on the other: the Rockets and the Aces
+    have a match counted each, the Spinners and the Wanderers none. That is a ladder
+    in progress, not one that has not started, and its order is the order the
+    tiebreak requires, a team with no average below every team with one and the
+    two of them by name. Rejected: placing a team only once it has a count of its
+    own, which in a five-team division with a bye every round takes the 5th of 5
+    off the team that has rightly earned nothing yet.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        shutil.rmtree(cls.data / "Round2")
+        shutil.rmtree(cls.data / "Round3")
+        (cls.data / "Round1" / "LakesideSpinners-ParkviewWanderers.pdf").unlink()
+        write_washout(cls.data, "1", "lakeside-spinners", "parkview-wanderers",
+                      index=2)
+
+    def test_the_ladder_is_in_progress(self):
+        self.assertEqual(stats.ladder_counts(self.matches, self.competition),
+                         {"riverside-rockets": 1, "hilltop-aces": 1,
+                          "lakeside-spinners": 0, "parkview-wanderers": 0})
+        self.assertEqual(self.season["meta"]["ladder_state"], "in-progress")
+
+    def test_the_teams_with_nothing_counted_are_placed_last_by_name(self):
+        self.assertEqual({row["slug"]: row["position"] for row in self.season["teams"]},
+                         {"riverside-rockets": 1, "hilltop-aces": 2,
+                          "lakeside-spinners": 3, "parkview-wanderers": 4})
+
+    def test_the_round_is_a_point_on_everybody_s_history(self):
+        self.assertEqual({row["slug"]: [(h["round"], h["position"])
+                                        for h in row["ladder_history"]]
+                          for row in self.season["teams"]},
+                         {"riverside-rockets": [("1", 1)], "hilltop-aces": [("1", 2)],
+                          "lakeside-spinners": [("1", 3)],
+                          "parkview-wanderers": [("1", 4)]})
+
+
+class TestAFinalAloneHasNotStartedTheLadder(CardsAloneCase):
+    """A semi-final's card and nothing else is a ladder nobody has a place on.
+
+    A final is out of the ladder (F11), so its two teams have counted nothing, and
+    the base placed them by name all the same: measured (/tmp/mcf/scratch/EMPTY/
+    before.txt, final), the Spinners 1st and the Rockets 2nd, the final's loser over
+    its winner, and the overview crowned the Spinners on 0 matches. The words are
+    about the regular season, because a final was played and has been counted, just
+    not in this table. Rejected: "no team has a counted match yet", which is false
+    of the final's two teams.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_semi_final(data)
+
+    def test_the_ladder_has_not_started_and_nobody_is_placed(self):
+        # The card is read, and as a final: what follows is about a final alone.
+        self.assertEqual([m.round for m in self.matches], ["SF"])
+        self.assertTrue(self.competition.is_finals_round("SF"))
+        self.assertEqual(self.season["meta"]["ladder_state"], "empty")
+        self.assertEqual(self.positions(), {"lakeside-spinners": None,
+                                            "riverside-rockets": None})
+
+    def test_f10_says_it_of_the_regular_season(self):
+        self.assertEqual(self.f10(),
+                         [(validate.WARNING, NOT_STARTED, "0 counted matches")])
+
+
+class TestTheLeaderIsTheTopOfASettledLadderAndNobodyElse(SeasonCase):
+    """``meta.leader``: the one answer to who leads, for the front page and overview.
+
+    The front page's card named a leader only on a settled ladder (``site._leader``,
+    4.209) and the overview's hero took the top row of whatever order it was given
+    (``ladder[0]``), so the two pages disagreed about the same season (4.438). The
+    rule is now ``stats.ladder_leader``, exported, and both pages read it. On the
+    suite's three complete rounds the leader is the Rockets on their average.
+    """
+
+    def test_a_settled_ladder_is_led_by_the_team_placed_first_on_its_average(self):
+        rockets = next(row for row in self.season["teams"]
+                       if row["slug"] == "riverside-rockets")
+        self.assertEqual(self.season["meta"]["leader"],
+                         {"slug": "riverside-rockets",
+                          "value": rockets["points_average"]})
+        self.assertAlmostEqual(rockets["points_average"],
+                               EXPECTED_POINTS["riverside-rockets"] / 3, places=6)
+
+    def test_the_rule_names_the_top_only_of_a_ladder_that_is_complete(self):
+        table = stats.team_stats(self.matches, self.competition)
+        self.assertIs(stats.ladder_leader(table, "complete"),
+                      table["riverside-rockets"])
+        for state in ("in-progress", "empty"):
+            with self.subTest(state=state):
+                self.assertIsNone(stats.ladder_leader(table, state))
+
+    def test_and_a_top_row_with_no_average_leads_nobody(self):
+        # No complete ladder has one, every team on it having counted the same number
+        # and more than none, so it is asked of the rule directly. The front page
+        # prints a leader's figure, and a leader with none to print is nobody.
+        table = stats.team_stats(self.matches, self.competition)
+        table["riverside-rockets"] = dataclasses.replace(table["riverside-rockets"],
+                                                         points_average=None)
+        self.assertIsNone(stats.ladder_leader(table, "complete"))
+
+
+class TestALadderWithAMatchStillToComeNamesNoLeader(SeasonCase):
+    """The Rockets top a ladder they have played a match fewer on, and lead nothing.
+
+    The suite's season less round 3's Rockets v Wanderers: the Rockets and the
+    Wanderers have 2 counted, the others 3. Measured on the base (/tmp/mcf/scratch/
+    EMPTY/before.txt, prog): the front page's card said the ladder was in progress
+    and its entry named no leader, and the overview's hero said ``6.30 | Riverside
+    Rockets · 12.6 points from 2 matches``. Now there is one answer, nobody, and the
+    Rockets keep the place the table gives them.
+
+    The cost, recorded: a division with a bye every round names no leader for most of
+    its season, as its front-page card already did. Rejected: crowning an
+    in-progress ladder on both pages, a 2-match team over 3-match ones, which is what
+    F10 is there to stop.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        (cls.data / "Round3" / "RiversideRockets-ParkviewWanderers.pdf").unlink()
+
+    def test_the_ladder_is_in_progress_with_the_rockets_on_top(self):
+        self.assertEqual(self.season["meta"]["ladder_state"], "in-progress")
+        top = next(row for row in self.season["teams"] if row["position"] == 1)
+        self.assertEqual((top["slug"], top["counted"]), ("riverside-rockets", 2))
+
+    def test_and_names_no_leader(self):
+        self.assertIsNone(self.season["meta"]["leader"])
+
+
+class TestTheNightsPlayedAreTheOnesEveryTotalCountsFinalsIn(SeasonCase):
+    """``meta.matches_played``: the nights played, once each, the final among them.
+
+    The front page called a competition "with results" when it had a document, and a
+    document is written for a folder of washouts (4.440). The count it now reads is
+    the one the overview's Matches played tile makes of the rows, a match that was
+    played and that no total sets aside; the tile still makes it for itself, and the
+    second test below holds the two to the same rows. Here the suite's six, a
+    semi-final, a round-4 washout, and round 1's first card exported a second time:
+    9 cards, 7 played.
+    Rejected: ``regular_fixtures.played``, which leaves the final out, so a
+    competition of finals reads as having no results; and ``matches_total`` or
+    ``cards_scored``, which count the washout and the copy.
+    """
+
+    @classmethod
+    def extra_cards(cls):
+        write_semi_final(cls.data)
+        write_washout(cls.data, "4", "riverside-rockets", "lakeside-spinners",
+                      index=7, date="2026-09-08")
+        first = cls.data / "Round1" / "RiversideRockets-HilltopAces.pdf"
+        shutil.copyfile(first, cls.data / "Round1" / "copy-of-the-first.pdf")
+
+    def test_every_card_is_a_match_and_seven_were_played(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["matches_total"], meta["matches_played"]), (9, 7))
+
+    def test_the_count_is_the_matches_no_total_sets_aside(self):
+        rows = self.season["matches"]
+        self.assertEqual(self.season["meta"]["matches_played"],
+                         sum(1 for row in rows
+                             if row["counts_as_played"] and not row["not_totalled"]))
+
+
+class TestAWashoutAloneIsNoNightPlayed(CardsAloneCase):
+    """Two cards, both rained off: a document, and no night played (4.440).
+
+    Measured on the base (/tmp/mcf/scratch/EMPTY/before.txt, wash1): ``cards_scored``
+    2, ``matches_total`` 2, ``rounds_played`` 1, and the front page's ``1 of 1
+    competition with results``.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_washed_out_round(data)
+
+    def test_two_matches_and_none_played(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["matches_total"], meta["matches_played"]), (2, 0))
+
+
+class TestAFinalAloneIsANightPlayed(CardsAloneCase):
+    """A semi-final's card alone: no regular fixture played, and one night (4.440)."""
+
+    @classmethod
+    def write_cards(cls, data):
+        write_semi_final(data)
+
+    def test_one_night_played_and_no_regular_fixture(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["matches_played"], meta["regular_fixtures"]["played"]),
+                         (1, 0))
+
+
+class TestANightCutShortOfAResultIsANightPlayed(CardsAloneCase):
+    """Two sets finished, two stopped at the hour, and no winner ticked (4.440).
+
+    The one card on which ``counts_as_played`` and ``decided`` part: the night was
+    played and its games are in every total, so the overview's Matches played tile
+    counts it, though it decided nothing and so starts no ladder. Measured
+    (/tmp/mcf/scratch/EMPTY/fixup/short2.py): ``matches_played`` 1 and the front
+    page's ``1 of 1 with results``. Rejected: counting the decided nights, which
+    makes it none, and the competition one with no results beneath a tile saying a
+    match was played.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_short_card(data, "1", DATES["1"], "riverside-rockets", "hilltop-aces",
+                         marked=False, verb="VS", winner=cw.NO_TICK)
+
+    def test_one_night_played_that_decided_nothing(self):
+        match, = self.matches
+        self.assertEqual((match.counts_as_played, match.decided), (True, False))
+        self.assertEqual(self.season["meta"]["matches_played"], 1)
+
+
+
+# --- 4.458, 4.460: a ladder counted on more rounds than its P column ---------------
+
+
+def write_washout_beside_a_card_not_in(data: Path) -> None:
+    """Round 1 played on both courts; round 2's Rockets v Spinners rained off, and
+    its Aces v Wanderers not yet in."""
+    write_fixture_card(data, "1", "riverside-rockets", "hilltop-aces",
+                       ((6, 1), (6, 2), (6, 0), (6, 3)), index=1)        # 24-6
+    write_fixture_card(data, "1", "lakeside-spinners", "parkview-wanderers",
+                       ((6, 4), (6, 3), (3, 6), (6, 2)), index=2)        # 21-15
+    write_washout(data, "2", "riverside-rockets", "lakeside-spinners", index=3)
+
+
+CREDITED_COMPLETE = ("every team has 4 matches counted, byes and washouts credited "
+                     "their average")
+CREDITED_IN_PROGRESS = ("teams have unequal numbers of matches counted, byes and "
+                        "washouts included")
+
+
+class TestTheLaddersSentenceSaysPlayedUntilARoundIsCreditedAndCountedAfter(
+        unittest.TestCase):
+    """One function words F10's three states, for the report, F10 and the pages (4.458).
+
+    ``stats.ladder_state_of`` decides on counted matches, as F10 is defined, and each
+    sentence that stated its answer said played: ``every team has played the same
+    number``, and ``teams have played unequal numbers of matches`` in four places.
+    Under ``unplayed = "average"`` with the byes known, counted is P plus the rounds
+    credited the team's average. Measured on the base
+    (/tmp/mcf/scratch/LADDER/before2.txt): a three-team season said the first over P
+    2, 3 and 3 with counted 4 apiece, and a four-team one the second over P 1 for
+    every team with counted 2, 2, 1 and 1. ``stats.ladder_detail`` keeps the words
+    where every team's counted is its P, and names counted matches where any team's
+    is above it, the test the page's Counted column is shown by; with nothing counted
+    it says what F10 says. Rejected: always saying counted, which under the default
+    names a figure that neither the page nor the report prints a column for.
+    """
+
+    def test_counts_that_are_the_played_column_keep_the_played_words(self):
+        self.assertEqual(stats.ladder_detail({"a": 3, "b": 3}, {"a": 3, "b": 3}),
+                         "every team has played the same number")
+        self.assertEqual(stats.ladder_detail({"a": 3, "b": 2}, {"a": 3, "b": 2}),
+                         "teams have played unequal numbers of matches")
+
+    def test_a_round_credited_anywhere_names_counted_matches(self):
+        self.assertEqual(stats.ladder_detail({"a": 4, "b": 4, "c": 4},
+                                             {"a": 2, "b": 3, "c": 3}),
+                         CREDITED_COMPLETE)
+        self.assertEqual(stats.ladder_detail({"a": 2, "b": 1}, {"a": 1, "b": 1}),
+                         CREDITED_IN_PROGRESS)
+
+    def test_one_team_credited_is_enough_to_name_the_count(self):
+        self.assertEqual(stats.ladder_detail({"a": 4, "b": 4}, {"a": 4, "b": 3}),
+                         CREDITED_COMPLETE)
+
+    def test_nothing_counted_says_what_f10_says_whatever_was_played(self):
+        for counts, played in (({}, {}), ({"a": 0, "b": 0}, {"a": 0, "b": 0})):
+            with self.subTest(counts=counts):
+                self.assertEqual(stats.ladder_detail(counts, played),
+                                 "no regular-season match has been counted yet")
+
+    def test_a_round_is_credited_only_where_counted_is_above_played(self):
+        self.assertFalse(stats.rounds_credited({}, {}))
+        self.assertFalse(stats.rounds_credited({"a": 3, "b": 2}, {"a": 3, "b": 2}))
+        self.assertTrue(stats.rounds_credited({"a": 3, "b": 2}, {"a": 3, "b": 1}))
+
+
+class TestAByeCreditedEveryRoundIsAnEqualCountOverUnequalPlayed(ByeSeasonCase):
+    """The Larks rest in rounds 3 and 4, under ``unplayed = "average"`` (4.458).
+
+    Measured on the base (/tmp/mcf/scratch/LADDER/before2.txt, byefour-average):
+    ``ladder       complete: every team has played the same number`` over P 2, 3 and
+    3, with counted 4 apiece in ``season.json``, no F10, and the Larks named the
+    leader. The flag was right and the sentence was not. It now says ``every team
+    has 4 matches counted, byes and washouts credited their average``. Rejected:
+    basing F10 on P, which holds this ladder in progress though every team has a
+    figure for every round, and names no leader all season in a division with a bye
+    every round.
+    """
+
+    UNPLAYED = "average"
+
+    @classmethod
+    def write_cards(cls, data):
+        write_bye_season_cards(data)
+        with mock.patch.dict(BYE_DATES, {"4": "2026-09-07"}):
+            write_bye_card(data, 4, "4", "tollgate-moths", "verge-newts",
+                           ((6, 4), (6, 3), (3, 6), (6, 2)))
+
+    def test_the_teams_played_unequal_numbers_and_counted_the_same(self):
+        self.assertEqual({slug: (row["played"], row["counted"])
+                          for slug, row in self.team.items()},
+                         {"sundown-larks": (2, 4), "tollgate-moths": (3, 4),
+                          "verge-newts": (3, 4)})
+
+    def test_the_document_says_the_count_it_compared(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["ladder_detail"]),
+                         ("complete", CREDITED_COMPLETE))
+
+    def test_the_ladder_is_settled_and_led_on_the_counted_matches(self):
+        self.assertEqual([w for w in self.season["validation"]["warnings"]
+                          if w["rule"] == "F10"], [])
+        self.assertEqual(self.season["meta"]["leader"]["slug"], "sundown-larks")
+
+
+class TestAWashoutBesideACardNotYetInIsUnequalCountsOverEqualPlayed(CardsAloneCase):
+    """Round 2's Rockets v Spinners rained off and its other card not in (4.458).
+
+    Under ``unplayed = "average"`` the washed-out pair are credited the round and the
+    other two are not, a card not yet in being no round anybody missed. Measured on
+    the base (/tmp/mcf/scratch/LADDER/before2.txt, mirror-average): ``in progress:
+    teams have played unequal numbers of matches`` over P 1 for every team, with
+    counted 2, 2, 1 and 1, in the report, in F10's warning and on the front page.
+    Rejected: rewording the report's complete line alone, as first proposed, which
+    leaves this sentence false in F10, on the front page and in the ladder's note.
+    """
+
+    @classmethod
+    def make_config(cls):
+        return config_mod.Config(path=cls.root / "config.toml", unplayed="average")
+
+    @classmethod
+    def write_cards(cls, data):
+        write_washout_beside_a_card_not_in(data)
+
+    def test_every_team_played_one_and_the_washed_out_pair_counted_two(self):
+        self.assertEqual({row["slug"]: (row["played"], row["counted"])
+                          for row in self.season["teams"]},
+                         {"riverside-rockets": (1, 2), "lakeside-spinners": (1, 2),
+                          "hilltop-aces": (1, 1), "parkview-wanderers": (1, 1)})
+
+    def test_f10_says_the_counts_are_unequal_and_not_the_matches_played(self):
+        self.assertEqual(self.f10(), [(
+            validate.WARNING,
+            f"the ladder is in progress — {CREDITED_IN_PROGRESS}, so the order is "
+            f"not settled. hilltop-aces and parkview-wanderers have fewer than the 2 "
+            f"counted by the rest.",
+            "hilltop-aces 1; lakeside-spinners 2; parkview-wanderers 1; "
+            "riverside-rockets 2")])
+
+    def test_the_document_says_it_for_the_pages(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["ladder_detail"]),
+                         ("in-progress", CREDITED_IN_PROGRESS))
+
+
+class TestTheSameNightsUnderZeroAreASettledLadderOfMatchesPlayed(CardsAloneCase):
+    """The same three cards under the default, where counted is P (4.458).
+
+    Every team has played one and counted one, so the ladder is complete and its
+    sentence is the one it always was. Rejected: always saying counted, which names
+    the figure here though the page and the report print no column for it.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_washout_beside_a_card_not_in(data)
+
+    def test_every_team_played_one_and_counted_one(self):
+        self.assertEqual({row["slug"]: (row["played"], row["counted"])
+                          for row in self.season["teams"]},
+                         dict.fromkeys(TEAMS, (1, 1)))
+        self.assertEqual(self.f10(), [])
+
+    def test_the_document_says_every_team_has_played_the_same_number(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["ladder_detail"]),
+                         ("complete", "every team has played the same number"))
+
+
+class TestTheSentencesPLeavesOutAFinalAndACardExportedTwice(CardsAloneCase):
+    """The washout beside a card not yet in, a semi-final and a re-export (4.458).
+
+    ``stats.ladder_played`` is the ``P`` the sentence holds the counts against, so
+    it is asked of the matches the counts are, ``ladder_matches``: no final (F11)
+    and one card per fixture (F9). The semi-final is between the two teams the
+    washout credited, and the second export is of round 1's Rockets v Aces.
+    Measured on this unit's tree (/tmp/mcf/scratch/LADDER/fixup/finals-before.txt):
+    ``P`` 1 for every team and counts 2, 2, 1 and 1, so ``teams have unequal
+    numbers of matches counted``. Over every card handed in, the Rockets have
+    played 3, the Spinners and the Aces 2 and the Wanderers 1; over the finals
+    alone the semi-finalists have played 2, which is their count. Either way the
+    sentence would say ``teams have played unequal numbers of matches`` over a
+    ``P`` column of 1s. Over the second export alone the Rockets and the Aces have
+    played 2, which leaves the sentence as it is and ``P`` wrong. Every test passed
+    with ``ladder_played`` over every card. Rejected: taking ``P`` from the cards as
+    they came, the trap ``ladder_counts`` was built to keep out of F10.
+    """
+
+    @classmethod
+    def make_config(cls):
+        return config_mod.Config(path=cls.root / "config.toml", unplayed="average")
+
+    @classmethod
+    def write_cards(cls, data):
+        write_washout_beside_a_card_not_in(data)
+        write_fixture_card(data, "SF", "riverside-rockets", "lakeside-spinners",
+                           ((6, 2), (6, 3), (3, 6), (6, 4)), index=4,
+                           date="2026-09-08")
+        first = data / "Round1" / "riverside-rockets-hilltop-aces-r1.pdf"
+        first.with_name(f"{first.stem} (1).pdf").write_bytes(first.read_bytes())
+
+    def test_p_leaves_the_final_and_the_second_export_out(self):
+        self.assertEqual(sorted((m["round"], m["not_counted"])
+                                for m in self.season["matches"] if m["not_counted"]),
+                         [("1", "duplicate"), ("SF", "finals")])
+        played = stats.ladder_played(self.matches, self.competition)
+        self.assertEqual(played, {row["slug"]: row["played"]
+                                  for row in self.season["teams"]})
+        self.assertEqual(played, dict.fromkeys(TEAMS, 1))
+
+    def test_the_semi_finalists_are_still_said_to_be_counted_on_a_credited_round(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["ladder_detail"]),
+                         ("in-progress", CREDITED_IN_PROGRESS))
+        self.assertEqual([message for _, message, _ in self.f10()], [
+            f"the ladder is in progress — {CREDITED_IN_PROGRESS}, so the order is "
+            f"not settled. hilltop-aces and parkview-wanderers have fewer than the 2 "
+            f"counted by the rest."])
+
+
+# The Spinners beat the Rockets in the one match they play, and rest twice.
+POINTS_FIRST = (
+    ("1", "riverside-rockets", "hilltop-aces", ((6, 3),) * 4),            # 24-12
+    ("2", "riverside-rockets", "lakeside-spinners",
+     ((6, 2), (2, 6), (2, 6), (2, 6))),                                   # 12-20
+    ("3", "riverside-rockets", "hilltop-aces", ((6, 3),) * 4),            # 24-12
+)
+# The Aces and the Spinners lose every match with 12 games, 3.2 points a night.
+LEVEL_ON_AVERAGE = (
+    ("1", "riverside-rockets", "hilltop-aces", ((6, 3),) * 4),            # 24-12
+    ("2", "riverside-rockets", "lakeside-spinners",
+     ((6, 3), (6, 3), (6, 3), (4, 3))),                                   # 22-12
+    ("3", "riverside-rockets", "hilltop-aces", ((6, 3),) * 4),            # 24-12
+)
+
+
+class TestAveragingCanReorderALadderRankedOnPointsFirst(unittest.TestCase):
+    """What ``unplayed = "average"`` does to the order, preset by preset (4.460).
+
+    The README, config.example.toml, the first-run config.toml and the 0.1.0 entry
+    said it never changes the ladder order, since crediting a team its own average
+    cannot move that average. Only games-bonus orders on the average; sets-first,
+    rubbers and simple order on points first, and the credits are in the points.
+    Measured on the base (/tmp/mcf/scratch/LADDER/before.txt), three declared teams,
+    the Spinners resting twice: under simple the Rockets lead the Spinners 6.0 to
+    3.0 under zero and the Spinners lead 9.0 to 6.0 under average, and sets-first the
+    same. rubbers is not pinned: there the same nights bring the Spinners level on
+    9.0, and wins, its next key, keep the Rockets first, so these two do not swap
+    under it, though a rest can pass a team there too. Under games-bonus the Aces
+    and the Spinners, level on 3.20, are 2nd and 3rd on 6.4 and 3.2 points under
+    zero and 3rd and 2nd on 9.6 apiece under average, games deciding. These tests
+    pin what the docs now say. Rejected: ranking the points-first presets on the
+    points earned before the credits, where an association that credits a rest
+    does so to set the team's total beside the others'; and dropping points as
+    games-bonus's second key so that the old sentence held there, which changes the
+    preset's tiebreak to save a sentence.
+    """
+
+    TEAMS_DECLARED = ("Riverside Rockets", "Hilltop Aces", "Lakeside Spinners")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.read = {}
+        for name, fixtures in (("points-first", POINTS_FIRST),
+                               ("level", LEVEL_ON_AVERAGE)):
+            data = Path(cls._tmp.name) / name
+            for index, (rnd, home, away, scores) in enumerate(fixtures, start=1):
+                write_fixture_card(data, rnd, home, away, scores, index=index)
+            cls.read[name] = (data, *scorecard.read_tree(data))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def order(self, season: str, *, scoring: str, unplayed: str) -> list[str]:
+        data, cards, rejected = self.read[season]
+        declared = config_mod.CompetitionConfig(
+            id="tuesday-division-b", day="Tuesday", division="B",
+            teams=self.TEAMS_DECLARED)
+        found = discover_mod.discover(cards, rejected, config=config_mod.Config(
+            path=data.parent / "config.toml", scoring=scoring, unplayed=unplayed,
+            competitions={declared.id: declared}), root=data)
+        (comp_id, matches), = found.matches.items()
+        competition = next(c for c in found.club.competitions if c.id == comp_id)
+        return stats.ladder(matches, competition)
+
+    def test_a_preset_ranked_on_points_puts_the_rested_team_on_top(self):
+        for preset in ("simple", "sets-first"):
+            with self.subTest(preset=preset):
+                self.assertEqual(
+                    self.order("points-first", scoring=preset, unplayed="zero"),
+                    ["riverside-rockets", "lakeside-spinners", "hilltop-aces"])
+                self.assertEqual(
+                    self.order("points-first", scoring=preset, unplayed="average"),
+                    ["lakeside-spinners", "riverside-rockets", "hilltop-aces"])
+
+    def test_games_bonus_ranked_on_the_average_keeps_that_order(self):
+        for unplayed in ("zero", "average"):
+            with self.subTest(unplayed=unplayed):
+                self.assertEqual(
+                    self.order("points-first", scoring="games-bonus",
+                               unplayed=unplayed),
+                    ["lakeside-spinners", "riverside-rockets", "hilltop-aces"])
+
+    def test_games_bonus_moves_only_the_teams_level_on_average(self):
+        self.assertEqual(
+            self.order("level", scoring="games-bonus", unplayed="zero"),
+            ["riverside-rockets", "hilltop-aces", "lakeside-spinners"])
+        self.assertEqual(
+            self.order("level", scoring="games-bonus", unplayed="average"),
+            ["riverside-rockets", "lakeside-spinners", "hilltop-aces"])
+
+
+# --- a card that records no result and no play is told so once (4.424) ---------
+
+
+class TestACardThatRecordsNoResultAndNoPlayIsToldItsNoResultAlone(
+        CardsBesideTheSeasonCase):
+    """A night nobody played and the ladder does not count is one finding.
+
+    Row 4.424. Six cards beside the season, every row 0-0, none ticking a Match
+    Winner box or printing a verb that names a result. Two are the owner's shapes:
+    Match Cancelled ticked over ``VS`` with Match Centre's ``Unspecified player``
+    in all 12 name cells, of which the owner's export has 9; and no box ticked
+    over ``VS``, no TOTAL row and no names, of which it has 6. Then the second
+    with the placeholder in every cell, the second with a TOTAL row of noughts,
+    the second printing no verb, and a card called off that names its players.
+
+    Measured on the tree before this (/tmp/mcf/scratch/NORESULT/probe/probe.py, each
+    card beside the season through build.py, cases cx-place-vs, blank-vs,
+    blank-vs-place, blank-vs-total and blank-noverb, before.txt): the first drew
+    ``no-result`` and ``players-unrecorded``; the second ``no-result``, F6's warning
+    that nothing confirms its rows and ``totals-missing``; the third those three and
+    ``players-unrecorded``; the fourth ``no-result`` alone; the fifth the second's
+    three. Every finding beside ``no-result`` said in its own words that nothing on
+    the card was played or confirmed, of a card nothing is counted from. Now each
+    asks :func:`~matchcentre.validate.records_nothing`, the one question of whether
+    a card records anything at all, and stands down where it does not. ``no-result``
+    is the one finding, and of a card not called off it says what its rows read and
+    what to do if the match was played: the one thing a club could act on that the
+    findings it replaces left it to work out. A card called off is told nothing to
+    do, as before, since there is nothing to do.
+
+    Rejected: folding them into ``players-unrecorded``, which a card naming its
+    players never draws; and dropping ``no-result``, the line that says why the
+    two teams are a match short in the ladder's P column.
+    """
+
+    PLACE = "Unspecified player"
+    BLANK = ((0, 0),) * 4
+    CLAUSE = (" Every set row reads 0-0: if the match was played, enter its "
+              "result in Match Centre and export the card again.")
+
+    @classmethod
+    def rows(cls, home, away, names):
+        """0-0 rows naming the players, the placeholder, or nobody."""
+        rows = rows_for(cls.BLANK, TEAMS[home][1], TEAMS[away][1])
+        if names == "players":
+            return rows
+        return tuple(dataclasses.replace(
+            row, home_players=(cls.PLACE,) * len(row.home_players)
+            if names == "placeholder" else (),
+            away_players=(cls.PLACE,) * len(row.away_players)
+            if names == "placeholder" else ())
+            for row in rows)
+
+    @classmethod
+    def blank(cls, name, rnd, home, away, names, **flags):
+        return cls.card(name, rnd, home, away, None,
+                        rows=cls.rows(home, away, names), winner=cw.NO_TICK,
+                        **flags)
+
+    @classmethod
+    def extra_cards(cls):
+        cls.called_off = cls.blank("called-off", "4", "riverside-rockets",
+                                   "hilltop-aces", "placeholder", cancelled=True,
+                                   verb="VS")
+        cls.unentered = cls.blank("unentered", "4", "lakeside-spinners",
+                                  "parkview-wanderers", "nobody", verb="VS",
+                                  omit_totals=True)
+        cls.placeholders = cls.blank("placeholders", "5", "riverside-rockets",
+                                     "lakeside-spinners", "placeholder", verb="VS",
+                                     omit_totals=True)
+        cls.noughts = cls.blank("noughts", "5", "hilltop-aces",
+                                "parkview-wanderers", "players", verb="VS")
+        cls.no_verb = cls.blank("no-verb", "6", "riverside-rockets",
+                                "parkview-wanderers", "nobody", omit_verb=True,
+                                omit_totals=True)
+        cls.named = cls.blank("named", "6", "lakeside-spinners", "hilltop-aces",
+                              "players", cancelled=True, verb="VS",
+                              omit_totals=True)
+
+    def told(self, where, label):
+        """The one finding a card left blank and not called off is told."""
+        issue = self.no_result(where, label, "unplayed")
+        return [dataclasses.replace(issue, message=issue.message + self.CLAUSE)]
+
+    def test_a_night_called_off_before_anybody_was_entered_is_told_only_that(self):
+        self.assertEqual(self.about(self.called_off), [self.no_result(
+            self.called_off, "R4 riverside-rockets v hilltop-aces", "cancelled")])
+
+    def test_a_night_nobody_entered_a_result_for_is_told_once_what_to_do(self):
+        self.assertEqual(self.about(self.unentered), self.told(
+            self.unentered, "R4 lakeside-spinners v parkview-wanderers"))
+
+    def test_its_placeholders_are_not_told_beside_it(self):
+        self.assertEqual(self.about(self.placeholders), self.told(
+            self.placeholders, "R5 riverside-rockets v lakeside-spinners"))
+
+    def test_a_total_row_of_noughts_is_told_what_to_do_too(self):
+        # Its one finding before this was no-result as it stood, with nothing to
+        # say the rows were read blank, which is what a club would check.
+        self.assertEqual(self.about(self.noughts), self.told(
+            self.noughts, "R5 hilltop-aces v parkview-wanderers"))
+
+    def test_a_card_printing_no_verb_is_told_the_same(self):
+        self.assertEqual(self.about(self.no_verb), self.told(
+            self.no_verb, "R6 riverside-rockets v parkview-wanderers"))
+
+    def test_a_night_called_off_is_not_told_to_enter_a_result(self):
+        self.assertEqual(self.about(self.named), [self.no_result(
+            self.named, "R6 lakeside-spinners v hilltop-aces", "cancelled")])
+
+    def test_each_is_still_recorded_as_it_was(self):
+        # The blank test the build records a night unplayed by is the one the
+        # findings ask: moved, not copied, so its answer is unchanged.
+        for where, status in ((self.called_off, MatchStatus.CANCELLED),
+                              (self.unentered, MatchStatus.UNPLAYED),
+                              (self.placeholders, MatchStatus.UNPLAYED),
+                              (self.noughts, MatchStatus.UNPLAYED),
+                              (self.no_verb, MatchStatus.UNPLAYED),
+                              (self.named, MatchStatus.CANCELLED)):
+            with self.subTest(card=where.name):
+                match, = [m for m in self.matches if m.source == str(where)]
+                self.assertIs(match.status, status)
+
+
+class TestACardWithPlayOrAClaimOnItKeepsEveryFinding(CardsBesideTheSeasonCase):
+    """What :func:`~matchcentre.validate.records_nothing` is not asked to spare.
+
+    Row 4.424 stands the findings beside ``no-result`` down on a card that records
+    nothing: no play, no result and no claim to one. Six cards beside the season
+    that each fall outside it, and keep what they were told before (measured on
+    the tree before this by this class, and by
+    /tmp/mcf/scratch/NORESULT/probe/probe.py, cases cx-two-rubbers, vs-three,
+    wo-blank, zeros-defeats and zeros-trounces).
+
+    A washout with games on two rubbers and the placeholder on the other two,
+    whose games are evidence of a night begun. A ``VS`` card with three rubbers
+    finished, scored from its rows and told ``verb-absent``. A walkover over 0-0
+    rows, which has a result. And three cards whose rows read 0-0 under a banner
+    or tick that names a result: ``DEFEATS`` with the home tick, ``TROUNCES``, a
+    word nobody reads, and ``DRAWS WITH``. Blank rows are what a misread card
+    looks like too, so a card claiming a result over them keeps every finding
+    that says its reading is unconfirmed, and its ``no-result`` is not told to
+    enter a result: one may be on it, misread.
+
+    Built under ``forfeit_award = "as-played"``, the one award that leaves a
+    match given up whole scored as its rows print. Since 4.421 ``full-games``
+    and ``fixed`` make every rubber of such a match a love set to the side that
+    came (:func:`~matchcentre.model.rubber_award`), so under either the
+    walkover's rows are 6-0 to home, ``all_blank`` refuses its card first, and
+    this class no longer saw whether the question asks that ``no-result`` names
+    the match. Measured on the merged tree (/tmp/mcf/scratch/fix7/609/probe/,
+    findings.txt and awards.txt): every card here is told the same under either
+    award, and only under ``as-played`` does a question asking the Cancelled box,
+    which a walkover ticks, take the walkover's ``players-unrecorded``.
+
+    Rejected: asking only whether the rows are blank and the match counts for
+    nothing. Measured on a copy of this change asking only that (the probe's
+    cases zeros-defeats and zeros-trounces), it took the ``DEFEATS`` card's
+    ``totals-missing`` and told it to enter a result the card prints, and took
+    the ``TROUNCES`` card's F6 warning and ``totals-missing``.
+    """
+
+    PLACE = "Unspecified player"
+    BLANK = ((0, 0),) * 4
+    PLAIN = dict(omit_totals=True, winner=cw.NO_TICK)
+
+    @classmethod
+    def make_config(cls):
+        """``as-played``, so the walkover's rows stay the 0-0 it prints."""
+        path = cls.root / "config.toml"
+        path.write_text('[rules]\nforfeit_award = "as-played"\n', encoding="utf-8")
+        return config_mod.load(path)
+
+    @classmethod
+    def extra_cards(cls):
+        rows = rows_for(((6, 2), (3, 6), (0, 0), (0, 0)), TEAMS["riverside-rockets"][1],
+                        TEAMS["hilltop-aces"][1])
+        cls.washout = cls.card("washout", "4", "riverside-rockets", "hilltop-aces",
+                               None, rows=rows[:2] + tuple(dataclasses.replace(
+                                   row, home_players=(cls.PLACE,)
+                                   * len(row.home_players),
+                                   away_players=(cls.PLACE,)
+                                   * len(row.away_players)) for row in rows[2:]),
+                               cancelled=True, verb="VS", winner=cw.NO_TICK)
+        cls.three = cls.card("three", "4", "lakeside-spinners", "parkview-wanderers",
+                             ((6, 2), (3, 6), (6, 4), (0, 0)), verb="VS",
+                             winner=cw.NO_TICK)
+        cls.walkover = cls.card(
+            "walkover", "5", "riverside-rockets", "lakeside-spinners", None,
+            rows=tuple(dataclasses.replace(row, away_players=(cls.PLACE,)
+                                           * len(row.away_players))
+                       for row in rows_for(cls.BLANK,
+                                           TEAMS["riverside-rockets"][1],
+                                           TEAMS["lakeside-spinners"][1])),
+            cancelled=True, winner="home", verb="DEFEATS", totals=(4, 24, 0, 0))
+        cls.zeros = cls.card("zeros", "5", "hilltop-aces", "parkview-wanderers",
+                             cls.BLANK, verb="DEFEATS", winner="home",
+                             omit_totals=True)
+        cls.unknown = cls.card("unknown", "6", "riverside-rockets",
+                               "parkview-wanderers", cls.BLANK, verb="TROUNCES",
+                               **cls.PLAIN)
+        cls.drawn = cls.card("drawn", "6", "lakeside-spinners", "hilltop-aces",
+                             cls.BLANK, verb="DRAWS WITH", **cls.PLAIN)
+
+    def rules(self, where) -> list[str]:
+        return [issue.rule for issue in self.about(where)]
+
+    def plain(self, where, label):
+        """``no-result`` as it was, with nothing after it."""
+        return self.no_result(where, label, "unplayed")
+
+    def test_a_washout_with_games_on_it_is_still_told_of_its_blank_names(self):
+        self.assertEqual(self.about(self.washout), [
+            self.no_result(self.washout, "R4 riverside-rockets v hilltop-aces",
+                           "cancelled"),
+            validate.Issue(
+                rule="players-unrecorded", severity=validate.WARNING,
+                message=f"{self.washout}: 6 name cell(s) across 2 of 4 rubber(s) "
+                        "print Match Centre's 'Unspecified player' placeholder "
+                        "rather than a person, so no name was recorded for them; "
+                        "this match was called off.",
+                subject=str(self.washout),
+                detail="6 placeholder cell(s): home in rubber(s) 3, 4; "
+                       "away in rubber(s) 3, 4")])
+
+    def test_a_vs_card_with_play_is_still_told_it_was_scored_from_its_rows(self):
+        self.assertIn("verb-absent", self.rules(self.three))
+        self.assertNotIn("no-result", self.rules(self.three))
+
+    def test_a_walkover_is_still_told_of_the_names_of_the_side_that_never_came(self):
+        match, = [m for m in self.matches if m.source == str(self.walkover)]
+        self.assertIs(match.status, MatchStatus.FORFEIT)
+        said = [issue.message for issue in self.about(self.walkover)
+                if issue.rule == "players-unrecorded"]
+        self.assertEqual(said, [
+            f"{self.walkover}: 6 name cell(s) across 4 of 4 rubber(s) print Match "
+            "Centre's 'Unspecified player' placeholder rather than a person, so no "
+            "name was recorded for them; this match was forfeited whole, so "
+            "nobody played those rubbers."])
+        self.assertNotIn("no-result", self.rules(self.walkover))
+
+    def test_a_result_claimed_over_blank_rows_keeps_every_finding(self):
+        for where, label, kept in (
+                (self.zeros, "R5 hilltop-aces v parkview-wanderers",
+                 ["F6", "F6", "no-result", "totals-missing"]),
+                (self.unknown, "R6 riverside-rockets v parkview-wanderers",
+                 ["no-result", "F6", "totals-missing", "verb-unknown"]),
+                (self.drawn, "R6 lakeside-spinners v hilltop-aces",
+                 ["no-result", "totals-missing"])):
+            with self.subTest(card=where.name):
+                self.assertEqual(self.rules(where), kept)
+                self.assertIn(self.plain(where, label), self.about(where))
+
+
+class TestACardIsToldItsNoResultAloneOnlyWhenItsOwnMatchRecordsNothing(
+        CardsBesideTheSeasonCase):
+    """Each part of :func:`~matchcentre.validate.records_nothing`, asked of one card.
+
+    Row 4.424. Five cards beside the season, every row 0-0 but the last's. A night
+    called off that ticks home as Match Winner and prints ``DEFEATS`` over the
+    placeholder in every cell: its Match Cancelled tick decides, and its
+    ``no-result`` already says what it claims, so it is told that alone. Then
+    three cards that claim something no ``VS`` banner contradicts: the home tick,
+    a TOTAL row of 4 sets and 24 games to home, and the away Match Forfeited box,
+    a forfeit with a result. And a ``VS`` card played to three rubbers with no
+    TOTAL row or tick, beside the first, so that a card recording nothing spares
+    nobody's findings but its own.
+
+    Measured on the tree before this (/tmp/mcf/scratch/NORESULT/probe/probe.py,
+    cases cx-blank-tick, vs-blank-tick, vs-blank-totals, box-forfeit-vs and
+    vs-three-nototal, before.txt, before2.txt and before3.txt): the first drew
+    ``no-result`` and ``players-unrecorded``, and each of the other four what it
+    draws here. So the first is the one this changes, and the rest are what the
+    change is not to touch.
+
+    Built under ``forfeit_award = "as-played"``, as the walkover beside the
+    season is (:class:`TestACardWithPlayOrAClaimOnItKeepsEveryFinding`): under
+    ``full-games`` or ``fixed`` the forfeit's rows are 6-0 to home since 4.421,
+    and ``all_blank`` refuses its card before the question asks whether
+    ``no-result`` names its match. The other four cards are no forfeit, and are
+    told the same under either award (/tmp/mcf/scratch/fix7/609/probe/,
+    findings.txt and awards.txt).
+
+    Rejected: sparing a card called off its findings only when it claims nothing,
+    which keeps ``players-unrecorded`` on a night its own tick says nobody played,
+    beside a ``no-result`` that already says what the card claims and that the
+    Match Cancelled tick decides.
+    """
+
+    PLACE = "Unspecified player"
+    BLANK = ((0, 0),) * 4
+
+    @classmethod
+    def make_config(cls):
+        """``as-played``, so the forfeit's rows stay the 0-0 it prints."""
+        path = cls.root / "config.toml"
+        path.write_text('[rules]\nforfeit_award = "as-played"\n', encoding="utf-8")
+        return config_mod.load(path)
+
+    @classmethod
+    def placeholders(cls, home, away, sides):
+        """0-0 rows whose cells on *sides* print the placeholder."""
+        return tuple(dataclasses.replace(row, **{
+            f"{side}_players": (cls.PLACE,) * len(getattr(row, f"{side}_players"))
+            for side in sides})
+            for row in rows_for(cls.BLANK, TEAMS[home][1], TEAMS[away][1]))
+
+    @classmethod
+    def extra_cards(cls):
+        cls.claimed = cls.card(
+            "claimed", "4", "riverside-rockets", "hilltop-aces", None,
+            rows=cls.placeholders("riverside-rockets", "hilltop-aces",
+                                  ("home", "away")),
+            cancelled=True, winner="home", verb="DEFEATS")
+        cls.ticked = cls.card("ticked", "4", "lakeside-spinners",
+                              "parkview-wanderers", cls.BLANK, verb="VS",
+                              winner="home", omit_totals=True)
+        cls.totalled = cls.card(
+            "totalled", "5", "riverside-rockets", "lakeside-spinners", None,
+            rows=cls.placeholders("riverside-rockets", "lakeside-spinners",
+                                  ("home", "away")),
+            verb="VS", winner=cw.NO_TICK, totals=(4, 24, 0, 0))
+        cls.forfeited = cls.card(
+            "forfeited", "5", "hilltop-aces", "parkview-wanderers", None,
+            rows=cls.placeholders("hilltop-aces", "parkview-wanderers", ("away",)),
+            forfeited_by="away", verb="VS", winner=cw.NO_TICK, omit_totals=True)
+        cls.played = cls.card("played", "6", "riverside-rockets",
+                              "parkview-wanderers", ((6, 2), (3, 6), (6, 4), (0, 0)),
+                              verb="VS", winner=cw.NO_TICK, omit_totals=True)
+
+    def rules(self, where) -> list[str]:
+        return [issue.rule for issue in self.about(where)]
+
+    def test_a_night_called_off_is_told_once_whatever_it_claims(self):
+        issue = self.no_result(self.claimed, "R4 riverside-rockets v hilltop-aces",
+                               "cancelled")
+        self.assertEqual(self.about(self.claimed), [dataclasses.replace(
+            issue, message=issue.message + " The card also ticks home as Match "
+            "Winner and the verb 'DEFEATS' means home won; the Match Cancelled "
+            "tick decides.")])
+
+    def test_a_tick_over_blank_rows_keeps_every_finding(self):
+        self.assertEqual(self.rules(self.ticked),
+                         ["F6", "no-result", "totals-missing"])
+        self.assertIn(self.no_result(
+            self.ticked, "R4 lakeside-spinners v parkview-wanderers", "unplayed"),
+            self.about(self.ticked))
+
+    def test_a_total_row_over_blank_rows_keeps_every_finding(self):
+        self.assertEqual(self.rules(self.totalled),
+                         ["totals-mismatch", "no-result", "players-unrecorded"])
+        self.assertIn(self.no_result(
+            self.totalled, "R5 riverside-rockets v lakeside-spinners", "unplayed"),
+            self.about(self.totalled))
+
+    def test_a_forfeit_printing_vs_keeps_every_finding(self):
+        match, = [m for m in self.matches if m.source == str(self.forfeited)]
+        self.assertIs(match.status, MatchStatus.FORFEIT)
+        self.assertEqual(sorted(self.rules(self.forfeited)),
+                         ["F6", "players-unrecorded", "totals-missing",
+                          "verb-absent"])
+
+    def test_a_card_with_play_is_not_spared_by_the_blank_card_beside_it(self):
+        self.assertEqual(sorted(self.rules(self.played)),
+                         ["F6", "set-no-games", "totals-missing", "verb-absent"])
+
+
+class TestEveryWayACardPrintsNothingIsToldItsNoResultAlone(CardsBesideTheSeasonCase):
+    """A card recording nothing is told so whichever box or separator it prints.
+
+    Row 4.424, from its review. Five cards beside the season, every row 0-0, with
+    no Match Winner tick, no TOTAL row and no names. One ticks Match Disputed over
+    ``VS``. Two print the other separators read as Match Centre's ``VS``: ``V``
+    and ``Versus``. One ticks its last rubber Retired against the away side, and
+    one ticks every rubber Incomplete for both sides.
+
+    Measured by /tmp/mcf/scratch/NORESULT/fixup2/probe.py (cases disputed-blank,
+    v-blank, versus-blank, retired-blank and incomplete-both). On the tree before
+    4.424 (base.txt) each drew ``no-result``, F6's warning that nothing confirms
+    its rows, and ``totals-missing``. The disputed card also drew ``disputed``,
+    ``verb-absent``, four ``set-no-games`` and two ``set-players-missing``, 13
+    warnings in the run. 4.424's first cut (impl.txt) told the four cards that
+    are not disputed their ``no-result`` alone. The disputed card kept
+    ``verb-absent``, which says of rows with nothing on them that 'what could not
+    run is this one cross-check against them'. No test pinned any of the five.
+    A reviewer's mutants passed every class: one spared only ``VS``, one held the
+    disputed card apart, and one left the clause off its ``no-result``. Now
+    ``verb-absent`` asks :func:`~matchcentre.validate.records_nothing` too, and
+    each card is pinned.
+
+    A row ticked Incomplete over 0-0 records nothing either. It finishes no rubber
+    and awards none (its ``SetResult.winner`` is ``None``), so the build already
+    records the night as unplayed, and nothing on the card states a result for the
+    rows to be held to. Rejected: reading the tick as a claim that the rubber was
+    started. That would keep F6's warning and ``totals-missing`` on a card whose
+    ``no-result`` already tells a club to enter the result if the match was
+    played. Also rejected: holding the disputed card apart, when its box disputes
+    a result the card does not have.
+
+    A row ticked Retired against one side over 0-0 was nobody's too, and is not
+    since 4.422: one side's Retired box gives the other side the set, at the games
+    the set rule takes, as Match Centre's TOTAL row counts a retirement at 0-0. So
+    the card that ticks one records a set, the home side's, and is a night played
+    with too few sets for a result: its ``no-result`` says so, and it keeps the
+    findings of a played card.
+    """
+
+    BLANK = ((0, 0),) * 4
+    CLAUSE = (" Every set row reads 0-0: if the match was played, enter its "
+              "result in Match Centre and export the card again.")
+
+    @classmethod
+    def nobody(cls, home, away, status=None, side="home", only=None):
+        """0-0 rows naming nobody, those at *only* (or all) ticked *status*."""
+        return tuple(dataclasses.replace(
+            row, home_players=(), away_players=(),
+            **({"status": status, "status_side": side}
+               if status is not None and (only is None or at in only) else {}))
+            for at, row in enumerate(
+                rows_for(cls.BLANK, TEAMS[home][1], TEAMS[away][1])))
+
+    @classmethod
+    def blank(cls, name, rnd, home, away, rows=None, verb="VS", **flags):
+        return cls.card(name, rnd, home, away, None,
+                        rows=rows or cls.nobody(home, away), verb=verb,
+                        winner=cw.NO_TICK, omit_totals=True, **flags)
+
+    @classmethod
+    def extra_cards(cls):
+        cls.disputed = cls.blank("disputed", "4", "riverside-rockets",
+                                 "hilltop-aces", disputed=True)
+        cls.v = cls.blank("v", "4", "lakeside-spinners", "parkview-wanderers",
+                          verb="V")
+        cls.versus = cls.blank("versus", "5", "riverside-rockets",
+                               "lakeside-spinners", verb="Versus")
+        cls.retired = cls.blank(
+            "retired", "5", "hilltop-aces", "parkview-wanderers",
+            rows=cls.nobody("hilltop-aces", "parkview-wanderers",
+                            SetStatus.RETIRED, "away", only={3}))
+        cls.incomplete = cls.blank(
+            "incomplete", "6", "riverside-rockets", "parkview-wanderers",
+            rows=cls.nobody("riverside-rockets", "parkview-wanderers",
+                            SetStatus.INCOMPLETE, "both"))
+
+    def told(self, where, label):
+        """The one finding a card left blank and not called off is told."""
+        issue = self.no_result(where, label, "unplayed")
+        return [dataclasses.replace(issue, message=issue.message + self.CLAUSE)]
+
+    def rules(self, where) -> list[str]:
+        return [issue.rule for issue in self.about(where)]
+
+    def test_a_disputed_card_is_not_told_what_nothing_on_it_could_confirm(self):
+        rules = self.rules(self.disputed)
+        for rule in ("F6", "totals-missing", "verb-absent"):
+            with self.subTest(rule=rule):
+                self.assertNotIn(rule, rules)
+
+    def test_a_disputed_card_s_no_result_says_what_its_rows_read(self):
+        label = "R4 riverside-rockets v hilltop-aces"
+        self.assertIn(validate.Issue(
+            rule="no-result", severity=validate.WARNING,
+            message=f"{label}: only 0 of the 3 sets needed for a result are "
+                    "complete, so it is not counted in the ladder." + self.CLAUSE,
+            subject=label, detail=str(self.disputed)), self.about(self.disputed))
+
+    def test_a_disputed_card_is_still_told_its_box_is_ticked(self):
+        # Its box is a claim of its own, and what the review left it: the
+        # per-rubber findings beside it are asked of a match that counts.
+        self.assertIn("disputed", self.rules(self.disputed))
+
+    def test_a_card_printing_v_or_versus_is_told_its_no_result_alone(self):
+        for where, label in (
+                (self.v, "R4 lakeside-spinners v parkview-wanderers"),
+                (self.versus, "R5 riverside-rockets v lakeside-spinners")):
+            with self.subTest(card=where.name):
+                self.assertEqual(self.about(where), self.told(where, label))
+
+    def test_a_rubber_ticked_incomplete_over_0_0_records_nothing(self):
+        match, = [m for m in self.matches if m.source == str(self.incomplete)]
+        self.assertIs(match.status, MatchStatus.UNPLAYED)
+        self.assertEqual(self.about(self.incomplete), self.told(
+            self.incomplete, "R6 riverside-rockets v parkview-wanderers"))
+
+    def test_a_rubber_ticked_retired_over_0_0_is_a_set_to_the_side_that_stayed(self):
+        # 4.422 moved this: the away side's Retired box gives home the set, 6-0,
+        # so the card records one set of the three a result needs.
+        match, = [m for m in self.matches if m.source == str(self.retired)]
+        self.assertIs(match.status, MatchStatus.PLAYED)
+        self.assertEqual([s.winner for s in match.sets], [None, None, None, "home"])
+        label = "R5 hilltop-aces v parkview-wanderers"
+        self.assertIn(validate.Issue(
+            rule="no-result", severity=validate.WARNING,
+            message=f"{label}: only 1 of the 3 sets needed for a result are "
+                    "complete, so it is not counted in the ladder.",
+            subject=label, detail=str(self.retired)), self.about(self.retired))
+
+
+class TestThePageNotesACardThatRecordsNothingNoMoreThanItsReportDoes(
+        CardsBesideTheSeasonCase):
+    """The reader's notes that a cross-check is missing, left off such a card.
+
+    Row 4.424, from its review. The reader warns of a card printing no verb that
+    'one of the three cross-checks on this card is unavailable', and of one that
+    prints no check it can use that 'nothing on it confirms the set rows were read
+    correctly'. Those warnings become the match's notes on the dashboard: a "Parse
+    note" each, and a place in the "matches with parse notes" pill. 4.424 stood
+    F6's no-check warning and ``totals-missing`` down in the report on a card that
+    records nothing. Measured by /tmp/mcf/scratch/NORESULT/fixup2/probe.py on its
+    first cut (impl.txt), the page still gave such a card those two notes. On
+    blank-vs that was the thin-card note, on blank-noverb both, on
+    cx-place-vs-nototal the thin-card note, and on blank-vs-noroster the
+    thin-card note beside its roster note. So the page told a club what the
+    report no longer did. Now the page leaves both notes off a card
+    :func:`~matchcentre.validate.records_nothing` says yes of, and keeps every
+    other note. A card with play on it keeps them all.
+
+    Six cards beside the season: a night nobody entered (``VS``, no TOTAL row,
+    no tick, no names, 0-0 rows); the same printing no verb; a night called off
+    with no TOTAL row; the first with an empty roster block; ``VS`` over three
+    rubbers played and a 0-0 fourth, with no TOTAL row or tick; and a card
+    printing no verb that ticks home over 0-0 rows.
+
+    Rejected: dropping the notes in the reader. The reader cannot know what the
+    match is, and the doctor shows a card as the reader reads it. Also rejected:
+    dropping every note on such a card, which would take what its roster block
+    says. And leaving the page as it was and saying why, which keeps the same
+    fact on the page twice for a card the report tells once.
+    """
+
+    BLANK = ((0, 0),) * 4
+    PLACE = "Unspecified player"
+
+    @classmethod
+    def rows(cls, home, away, placeholder=False):
+        """0-0 rows naming nobody, or printing the placeholder in every cell."""
+        return tuple(dataclasses.replace(
+            row, home_players=(cls.PLACE,) * len(row.home_players)
+            if placeholder else (),
+            away_players=(cls.PLACE,) * len(row.away_players)
+            if placeholder else ())
+            for row in rows_for(cls.BLANK, TEAMS[home][1], TEAMS[away][1]))
+
+    @classmethod
+    def extra_cards(cls):
+        cls.unentered = cls.card(
+            "unentered", "4", "riverside-rockets", "hilltop-aces", None,
+            rows=cls.rows("riverside-rockets", "hilltop-aces"), verb="VS",
+            winner=cw.NO_TICK, omit_totals=True)
+        cls.no_verb = cls.card(
+            "no-verb", "4", "lakeside-spinners", "parkview-wanderers", None,
+            rows=cls.rows("lakeside-spinners", "parkview-wanderers"),
+            omit_verb=True, winner=cw.NO_TICK, omit_totals=True)
+        cls.called_off = cls.card(
+            "called-off", "5", "riverside-rockets", "lakeside-spinners", None,
+            rows=cls.rows("riverside-rockets", "lakeside-spinners", True),
+            cancelled=True, verb="VS", winner=cw.NO_TICK, omit_totals=True)
+        cls.rosterless = cw.write_card_file(
+            cls.data / "Round5" / "rosterless.pdf", dataclasses.replace(
+                cls.spec("5", "hilltop-aces", "parkview-wanderers", None,
+                         rows=cls.rows("hilltop-aces", "parkview-wanderers"),
+                         verb="VS", winner=cw.NO_TICK, omit_totals=True),
+                home_roster=(), away_roster=()))
+        cls.played = cls.card("played", "6", "riverside-rockets",
+                              "parkview-wanderers", ((6, 2), (3, 6), (6, 4), (0, 0)),
+                              verb="VS", winner=cw.NO_TICK, omit_totals=True)
+        cls.ticked = cls.card(
+            "ticked", "6", "lakeside-spinners", "hilltop-aces", None,
+            rows=cls.rows("lakeside-spinners", "hilltop-aces"),
+            omit_verb=True, winner="home", omit_totals=True)
+
+    def notes(self, where) -> list[str]:
+        """The match's notes on the page, as season.json gives them."""
+        match, = [m for m in self.season["matches"] if m["source"] == str(where)]
+        return match["warnings"]
+
+    def read(self, where) -> Card:
+        card, = [c for c in self.cards if c.source == str(where)]
+        return card
+
+    def test_a_night_nobody_entered_has_no_note_that_nothing_confirms_it(self):
+        self.assertEqual(self.notes(self.unentered), [])
+
+    def test_nor_one_printing_no_verb_that_a_cross_check_is_unavailable(self):
+        self.assertEqual(self.notes(self.no_verb), [])
+
+    def test_nor_a_night_called_off(self):
+        self.assertEqual(self.notes(self.called_off), [])
+
+    def test_a_note_on_its_roster_block_is_kept(self):
+        self.assertEqual(self.notes(self.rosterless),
+                         ["read 0 home and 0 away roster entries, so one side's "
+                          "registered squad is missing from this card"])
+
+    def test_a_card_with_play_on_it_keeps_the_note(self):
+        self.assertEqual(self.notes(self.played),
+                         [scorecard.thin_card_note(self.read(self.played).checks)])
+
+    def test_a_card_ticking_a_winner_over_such_rows_keeps_its_note(self):
+        # A tick over 0-0 rows is the evidence of a misread card, so this card
+        # does not record nothing, though its match is as blank as the others':
+        # the notes are left off for what a match's own card records.
+        self.assertEqual(self.notes(self.ticked), [scorecard.NO_VERB])
+
+    def test_the_reader_still_says_both_for_the_doctor_to_show(self):
+        # The page leaves out the reader's own words, which the doctor prints
+        # as the reader read them.
+        card = self.read(self.no_verb)
+        self.assertEqual(card.warnings,
+                         (scorecard.NO_VERB, scorecard.thin_card_note(card.checks)))
 
 
 if __name__ == "__main__":

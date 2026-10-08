@@ -15,6 +15,11 @@ The fixture is two seasons of the four invented clubs of ``test_pipeline``, with
 one roster line changed in the second: Parkview's Kit Vasse is replaced by Robin
 Quaife. That gives 13 people named, 9 who played, 7 who played in both seasons,
 four who are only ever on a roster, and one each who played in one season only.
+
+Since 4.430 a single-season build printing names writes the page too, as the
+season's players across its competitions, measured on a fictional season of three
+competitions of its own (``write_club_season``, near the end). The tests that held
+single mode to no page were moved in place, each marked "Moved by 4.430".
 """
 
 from __future__ import annotations
@@ -92,8 +97,20 @@ def setUpModule():
 # --- the fixture ------------------------------------------------------------
 
 
+def _scratch_is_made() -> None:
+    """Refuse to write a fixture before setUpModule has made SCRATCH.
+
+    Until then SCRATCH is the working directory, and a probe that called a
+    fixture without the module's setup wrote its cards into tests/cards/.
+    """
+    if SCRATCH == Path():
+        raise RuntimeError("test_careers.setUpModule has not run, so this fixture "
+                           "would be written into the working directory")
+
+
 def season_cards(key: str) -> Path:
     """One season's six cards, written once per run and copied into each project."""
+    _scratch_is_made()
     folder = SCRATCH / "cards" / key
     if folder.is_dir():
         return folder
@@ -1210,13 +1227,22 @@ class TestTheCareersPageIsOnlyEverWrittenInMultiSeasonMode(SiteCase):
     the thing JavaScript would then have to decide. And every caller asks the one
     decider: with it patched to say no, a multi build writes no page, no front-page
     link, no report line, refuses nothing, and keeps the namesake note.
+
+    The class's name is 0.1.0's. Since 4.430 a single-season write printing names
+    has the page too, as the season's players across its competitions, which moved
+    the first test below; the rest are as they were.
     """
 
-    def test_a_single_season_site_has_no_careers_page_and_no_link(self):
+    def test_a_single_season_site_has_the_players_page_and_the_link(self):
+        # Moved by 4.430: this was test_a_single_season_site_has_no_careers_page_
+        # and_no_link, and asserted both absent. A single-season write printing
+        # names now writes careers.html as the season's players, and the front
+        # page links it.
         write(self.out, "2026-winter", multi=False)
-        self.assertFalse((self.out / site.CAREERS_PAGE).exists())
-        self.assertNotIn("careers.html",
-                         (self.out / "index.html").read_text(encoding="utf-8"))
+        page = (self.out / site.CAREERS_PAGE).read_text(encoding="utf-8")
+        self.assertIn(f"<h1>{careers.SINGLE_HEADING}</h1>", page)
+        self.assertIn('<a href="careers.html">',
+                      (self.out / "index.html").read_text(encoding="utf-8"))
 
     def test_one_multi_season_has_the_page_the_link_and_says_it_is_one(self):
         write(self.out, "2026-winter")
@@ -1536,6 +1562,11 @@ class TestTheFrontPageLinksTheCareersPageByItsFileName(SiteCase):
 
     Appended after the last season group rather than given a sentinel of its own,
     so the single-season front page is the same bytes it always was.
+
+    Since 4.430 a single-season front page printing names carries a link too, in
+    its own words (the season's players), appended after the last competition the
+    same way: without the link it is still the bytes it was, which is what the
+    second test below now measures.
     """
 
     LINK = ('\n    <p class="careers-link"><a href="careers.html">Careers across '
@@ -1548,13 +1579,20 @@ class TestTheFrontPageLinksTheCareersPageByItsFileName(SiteCase):
         front = (self.out / "index.html").read_text(encoding="utf-8")
         self.assertIn("    </div>" + self.LINK, front)
 
-    def test_the_single_front_page_is_what_it_was_without_the_link(self):
+    def test_the_single_front_page_is_what_it_was_with_the_link_after_the_list(self):
+        # Moved by 4.430: this was test_the_single_front_page_is_what_it_was_
+        # without_the_link, and asserted no careers.html on it. The page is now
+        # linked, after the last competition, in single-season words; take the
+        # link away and the rest is the same bytes, as before.
         write(self.out, "2026-winter", multi=False)
         front = (self.out / "index.html").read_bytes()
-        self.assertNotIn(b"careers.html", front)
-        with mock.patch.object(site, "CAREERS_LINK_HTML", ""):
+        link = site.SINGLE_CAREERS_LINK_HTML.encode("utf-8")
+        self.assertIn(b"    </div>" + link, front)
+        self.assertEqual(front.count(b"careers.html"), 1)
+        with mock.patch.object(site, "SINGLE_CAREERS_LINK_HTML", ""):
             write(self.tmp / "bare", "2026-winter", multi=False)
-        self.assertEqual((self.tmp / "bare" / "index.html").read_bytes(), front)
+        self.assertEqual((self.tmp / "bare" / "index.html").read_bytes(),
+                         front.replace(link, b""))
 
 
 class TestAnOutFolderNamedCareersDoesNotMistakeTheCareersPageForAOneFileDashboard(SiteCase):
@@ -1828,6 +1866,11 @@ class TestTheReportSaysHowManyCareersSpanSeasons(unittest.TestCase):
     A figure, so it is printed under ``--check`` and hidden by ``--quiet`` as the
     ``seasons`` line is. It counts people who played; somebody who is only ever on
     a roster has no season to span.
+
+    Since 4.430 a single-season build printing names has the line too, counting
+    competitions where this one counts seasons, which moved the single-mode half
+    of the third test below; the single-season line's own tests are in
+    TestASingleSeasonBuildPrintingNamesListsEveryPlayerOfTheSeason.
     """
 
     def lines(self, run):
@@ -1844,8 +1887,14 @@ class TestTheReportSaysHowManyCareersSpanSeasons(unittest.TestCase):
         self.assertEqual(self.lines(run),
                          ["  careers      one season so far; totals add up from the second"])
 
-    def test_single_mode_and_quiet_print_none(self):
-        self.assertEqual(self.lines(run_build(project("2026-winter", multi=False))), [])
+    def test_single_mode_counts_competitions_and_quiet_prints_none(self):
+        # Moved by 4.430: this was test_single_mode_and_quiet_print_none, and
+        # asserted no line in single mode. A single-season build printing names
+        # writes the page now, and its line counts competitions, of which this
+        # build has one.
+        self.assertEqual(self.lines(run_build(project("2026-winter", multi=False))),
+                         ["  careers      one competition so far; totals add up "
+                          "from the second"])
         self.assertEqual(self.lines(run_build(project(*BOTH), "--quiet")), [])
 
     def test_check_prints_it_and_writes_no_page(self):
@@ -1872,6 +1921,12 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
     mode-switch sentence about depth, which is untrue of a page; the dashboard
     paragraph after it is today's, byte for byte; and ``--prune`` removes it only
     while it still carries the mark.
+
+    Since 4.430 the single build that leaves it is one that withholds names: a
+    single build printing them writes the page over this one, as the season's
+    players (TestSwitchingModeOrWithholdingNamesLeavesNoPlayersPageStale). So the
+    tree below is switched to a withheld single build, and the reason and the
+    leads it is given are the withheld ones, which moved the tests marked so.
     """
 
     @classmethod
@@ -1887,7 +1942,12 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
         for name in ("data", "site"):
             shutil.copytree(self.base / name, cwd / name)
         shutil.move(str(cwd / "data" / "2025-winter"), str(cwd / "archive"))
-        (cwd / "config.toml").write_text("", encoding="utf-8")
+        # Moved by 4.430: the config was empty, a single build printing names,
+        # which wrote no careers page until 4.430 and so left this one behind. It
+        # now writes the page over this one; a single build withholding names is
+        # the one that still leaves it.
+        (cwd / "config.toml").write_text('[build]\nplayers = "numbered"\n',
+                                         encoding="utf-8")
         return cwd
 
     def item(self, lines, path):
@@ -1900,8 +1960,13 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
         return " ".join(body)
 
     def test_the_page_is_listed_last_with_its_own_reason(self):
+        # Moved by 4.430: the run exited 0, the reason was "only a multi-season
+        # build writes a careers page, and this run is in single-season mode", and
+        # the lead said the mode had left it. The mode no longer leaves a page; a
+        # withheld run does, which exits 1 while it prints names (4.58), and its
+        # reason and lead are the withheld ones, in single-season words.
         run = run_build(self.switched())
-        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.code, 1, run.text)
         lines = section(run.out, "left behind")
         listed = [line.strip() for line in lines
                   if line.startswith("  site/") and not line.startswith("   ")]
@@ -1909,13 +1974,11 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
                                   "site/2026-winter/" + COMP["2026-winter"],
                                   "site/careers.html"])
         item = self.item(lines, "site/careers.html")
-        self.assertEqual(item, "careers across seasons -- built 2026-09-10T12:00:00 "
-                               "only a multi-season build writes a careers page, "
-                               "and this run is in single-season mode")
+        self.assertEqual(item, f"careers across seasons -- built {STAMP} "
+                               f"{SINGLE_WITHHELD_REASON} {NAMES_LINE}")
         text = collapsed("\n".join(lines))
-        lead = ("The careers page above adds up the seasons of the dashboards "
-                "listed with it. A multi-season build wrote it and this run, in "
-                "single-season mode, did not; the command below removes it with them.")
+        lead = ("The command below removes the careers page above with the "
+                "dashboards.")
         self.assertIn(lead + " Every directory above is a complete dashboard", text)
 
     def test_prune_removes_it_with_the_dashboards(self):
@@ -1932,17 +1995,19 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
                       collapsed(run.out))
 
     def test_the_page_alone_has_a_lead_of_its_own(self):
+        # Moved by 4.430: the lead was the single-season one ("was written by a
+        # multi-season build, and this run, in single-season mode, did not write
+        # it"), which no run gives since the mode stopped leaving the page; the
+        # withheld run that leaves it gets the withheld lead.
         cwd = self.switched()
         self.assertEqual(run_build(cwd, "--prune").code, 0)
         (cwd / "site" / site.CAREERS_PAGE).write_bytes(self.marked)
         run = run_build(cwd)
         text = collapsed("\n".join(section(run.out, "left behind")))
-        self.assertIn("The careers page above was written by a multi-season build, "
-                      "and this run, in single-season mode, did not write it. "
-                      "Nothing under site links it any more, but it opens by "
-                      "double-click and shows the figures it was built with, which "
-                      "is why this run names it. To delete it: python3 build.py "
-                      "--prune", text)
+        self.assertIn("Nothing under site links the careers page above any more, "
+                      "but it opens by double-click and shows every name it was "
+                      "built with, which is why this run names it. To delete it: "
+                      "python3 build.py --prune", text)
         self.assertNotIn("That refuses", text)
         self.assertNotIn("Every directory above", text)
         run = run_build(cwd, "--prune")
@@ -1950,33 +2015,39 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
                       "was touched.", collapsed(run.out))
         self.assertFalse((cwd / "site" / site.CAREERS_PAGE).exists())
 
-    def test_a_run_withholding_names_gives_it_the_single_season_leads(self):
-        """The mode left the page, so the lead is the mode's, withheld or not.
+    def test_a_run_withholding_names_gives_it_the_withheld_leads(self):
+        """The lead agrees with the reason above it, in both forms.
 
-        A withheld single-season run lists the page with the single-season reason,
-        and its lead has to agree with that reason in both forms. Nothing held the
+        A withheld single-season run lists the page with the withheld reason, and
+        its lead has to agree with that reason in both forms. Nothing held the
         lead to it until the review of z462: handed the section's own flag, which
         is true of any run that withholds names, in place of asking whether
         withholding is all that kept the page away, the lead said the page was
         left for its names, directly under a reason saying it was left for the mode
         (/tmp/t4/scratch/z462/review/lead.mutH.txt).
+
+        Moved by 4.430, which renamed it from ..._gives_it_the_single_season_
+        leads: the mode no longer keeps the page away, so withholding is all that
+        ever does, and both forms of the lead are now the withheld ones. Asked
+        with ``--players`` over a config printing names, as it was.
         """
         cwd = self.switched()
+        (cwd / "config.toml").write_text("", encoding="utf-8")
         run = run_build(cwd, "--players", "numbered")
         self.assertEqual(run.code, 1, run.text)
         text = collapsed("\n".join(section(run.out, "left behind")))
-        self.assertIn("this run withholds them The careers page above adds up the "
-                      "seasons of the dashboards listed with it. A multi-season build "
-                      "wrote it and this run, in single-season mode, did not; the "
-                      "command below removes it with them. Every directory above", text)
-        self.assertEqual(run_build(cwd, "--prune").code, 0)
+        self.assertIn("this run withholds them The command below removes the "
+                      "careers page above with the dashboards. Every directory "
+                      "above", text)
+        self.assertNotIn("A multi-season build wrote it", text)
+        self.assertEqual(run_build(cwd, "--prune", "--players", "numbered").code, 0)
         (cwd / "site" / site.CAREERS_PAGE).write_bytes(self.marked)
         run = run_build(cwd, "--players", "numbered")
         self.assertEqual(run.code, 1, run.text)
         text = collapsed("\n".join(section(run.out, "left behind")))
-        self.assertIn("this run withholds them The careers page above was written by "
-                      "a multi-season build, and this run, in single-season mode, did "
-                      "not write it.", text)
+        self.assertIn("this run withholds them Nothing under site links the "
+                      "careers page above any more", text)
+        self.assertNotIn("was written by a multi-season build", text)
 
     def test_an_unmarked_page_is_neither_listed_nor_removed(self):
         cwd = self.switched()
@@ -2048,7 +2119,10 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
         both = self.lead(dashboard, page)
         tail = alone[alone.index("  Every directory above"):]
         self.assertTrue(both.endswith(tail), both)
-        self.assertLess(both.index("The careers page above adds up"),
+        # Moved by 4.430: the page's paragraph here was the single-season one,
+        # "The careers page above adds up ...", which no run gives any more.
+        self.assertLess(both.index("The command below removes the careers page "
+                                   "above"),
                         both.index("Every directory above"))
 
     def test_a_page_that_lost_its_mark_is_not_removed(self):
@@ -2079,7 +2153,14 @@ class TestASingleSeasonBuildNamesTheCareersPageItLeftBehind(unittest.TestCase):
         self.assertIn("kept: no longer carries the mark", text)
         self.assertIn("The careers page was not removed; the line under it says "
                       "why.", collapsed(text))
-        self.assertIn("careers.html not removed", text)
+        # Moved by 4.430: the last line's clause was "careers.html not removed",
+        # the clause of a run printing names. The run that lists the page now
+        # withholds them, and a page it could not remove is the page still
+        # printing names, said once (TestAWithheldBuildNamesTheCareersPageANames
+        # BuildLeft.test_a_page_prune_could_not_remove_is_one_clause).
+        self.assertTrue(last_line(text).endswith(
+            " and careers.html still prints players' names"), last_line(text))
+        self.assertNotIn("careers.html not removed", text)
         self.assertNotIn("dashboard(s) not removed", text)
 
 
@@ -2106,6 +2187,10 @@ class TestANamesakesLineAcrossGradesIsNotCalledUselessInMultiSeasonMode(unittest
     The note that calls it useless is true of the season pages, where a name in two
     grades is two players already; on the careers page the two grades are one
     career until that line splits them, so the note's advice would merge two people.
+
+    Since 4.430 a single-season build printing names writes the page too, and
+    there the two grades are one entry until that line splits them, as here: the
+    note is no longer given in single mode either, which moved the first test.
     """
 
     NAMESAKES = '[namesakes]\n"ada-renn" = ["marina-magpies", "station-starlings"]\n'
@@ -2117,9 +2202,17 @@ class TestANamesakesLineAcrossGradesIsNotCalledUselessInMultiSeasonMode(unittest
                                          encoding="utf-8")
         return cwd, run_build(cwd)
 
-    def test_single_mode_still_says_it_separated_nobody(self):
-        _, run = self.run_mode(False)
-        self.assertIn("separated nobody", collapsed(run.out))
+    def test_single_mode_no_longer_says_it_and_the_page_has_two_entries(self):
+        # Moved by 4.430: this was test_single_mode_still_says_it_separated_
+        # nobody. The single build writes the season's players now, where the
+        # line splits one entry into two, so the note would be untrue.
+        cwd, run = self.run_mode(False)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertNotIn("separated nobody", collapsed(run.out))
+        ids = read_page(cwd / "site").ids
+        self.assertIn("p-ada-renn-marina-magpies", ids)
+        self.assertIn("p-ada-renn-station-starlings", ids)
+        self.assertNotIn("p-ada-renn", ids)
 
     def test_multi_mode_does_not_and_the_page_has_two_careers(self):
         cwd, run = self.run_mode(True)
@@ -2843,7 +2936,13 @@ class TestASplitCareersPageLeftBehindIsNamedAndPrunedWhole(unittest.TestCase):
             shutil.copytree(self.base / name, cwd / name)
         if single:
             shutil.move(str(cwd / "data" / "2025-winter"), str(cwd / "archive"))
-            (cwd / "config.toml").write_text("", encoding="utf-8")
+            # Moved by 4.430: the config was empty, a single build printing names,
+            # which now writes the page over the split instead of leaving it. A
+            # single build withholding names is the one that leaves it, so the
+            # single tests below give the withheld reason and exit 1 until it is
+            # gone.
+            (cwd / "config.toml").write_text('[build]\nplayers = "numbered"\n',
+                                             encoding="utf-8")
         else:
             shutil.copy2(self.base / "config.toml", cwd / "config.toml")
         return cwd
@@ -2860,17 +2959,18 @@ class TestASplitCareersPageLeftBehindIsNamedAndPrunedWhole(unittest.TestCase):
                 if line.startswith("  site/") and not line.startswith("   ")]
 
     def test_a_single_season_build_lists_them_as_one_page(self):
+        # Moved by 4.430: exit 0 and the single-season reason, which no run gives
+        # since the mode stopped leaving the page; see copied().
         run = run_build(self.copied(single=True))
-        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(run.code, 1, run.text)
         lines = section(run.out, "left behind")
         self.assertEqual(self.listed(lines),
                          ["site/2025-winter/" + COMP["2025-winter"],
                           "site/2026-winter/" + COMP["2026-winter"],
                           "site/careers.html"])
         self.assertEqual(self.item(lines, "site/careers.html"),
-                         f"careers across seasons, 29 pages -- built {STAMP} only "
-                         f"a multi-season build writes a careers page, and this "
-                         f"run is in single-season mode")
+                         f"careers across seasons, 29 pages -- built {STAMP} "
+                         f"{SINGLE_WITHHELD_REASON} {NAMES_LINE}")
 
     def test_prune_removes_every_page_and_counts_them(self):
         cwd = self.copied(single=True)
@@ -2910,11 +3010,11 @@ class TestASplitCareersPageLeftBehindIsNamedAndPrunedWhole(unittest.TestCase):
         cwd = self.copied(single=True)
         (cwd / "site" / site.CAREERS_PAGE).unlink()
         run = run_build(cwd)
+        # Moved by 4.430: the single-season reason; see copied().
         self.assertEqual(self.item(section(run.out, "left behind"),
                                    "site/careers-a.html"),
-                         f"careers across seasons, 28 pages -- built {STAMP} only "
-                         f"a multi-season build writes a careers page, and this "
-                         f"run is in single-season mode")
+                         f"careers across seasons, 28 pages -- built {STAMP} "
+                         f"{SINGLE_WITHHELD_REASON} {NAMES_LINE}")
         run_build(cwd, "--prune")
         self.assertEqual(self.pages(cwd), [])
 
@@ -2952,8 +3052,11 @@ class TestASplitCareersPageLeftBehindIsNamedAndPrunedWhole(unittest.TestCase):
         with mock.patch.object(site, "remove_orphan", side_effect=refuse):
             code, text = main_in_process(cwd, "--prune")
         self.assertEqual(code, 1, text)
-        self.assertTrue(last_line(text).endswith(" and careers-a.html not removed"),
-                        last_line(text))
+        # Moved by 4.430: "careers-a.html not removed", the clause of a run
+        # printing names; the withheld run that lists the pages now names the
+        # page it could not remove as still printing them, by the same file.
+        self.assertTrue(last_line(text).endswith(
+            " and careers-a.html still prints players' names"), last_line(text))
 
     def test_a_page_of_the_clubs_among_them_is_neither_counted_nor_removed(self):
         cwd = self.copied(single=True)
@@ -3241,8 +3344,12 @@ class TestABuildWorksTheCareersOutOnceAndReportsTheSplitItWrote(unittest.TestCas
                                  fixture_bytes(), kept=True)))
             self.assertEqual(site.careers_summary(out / "split", documents(*BOTH)[0]),
                              write(out / "split", *BOTH).careers)
-            self.assertIsNone(write(out / "single", "2026-winter",
-                                    multi=False).careers)
+            # Moved by 4.430: a single-season write returned no summary, having
+            # written no page. It writes one now, of the season's 8 players who
+            # played, in one competition, and so returns its count.
+            self.assertEqual(write(out / "single", "2026-winter",
+                                   multi=False).careers,
+                             site.CareersSummary(careers.Counts(8, 0, 1), None))
 
     def test_the_line_says_what_the_write_returned(self):
         # A count and a split the fixture cannot give, where it gives 7 of 9 players
@@ -3345,14 +3452,19 @@ class TestABuildThatWithholdsNamesWritesNoCareersPage(unittest.TestCase):
     page with a warning, which publishes the wrong figure with a caveat.
     """
 
-    def test_the_decider_writes_it_only_for_a_multi_build_printing_names(self):
+    def test_the_decider_writes_it_for_every_build_printing_names_and_no_other(self):
+        # Moved by 4.430: this was test_the_decider_writes_it_only_for_a_multi_
+        # build_printing_names, and held a single-season build printing names to
+        # no page. It writes the season's players now; withholding is still the
+        # only way to have no page, in either mode.
         multi = config_mod.Config(path=Path("config.toml"), seasons_mode="multi")
         single = config_mod.Config(path=Path("config.toml"))
-        self.assertTrue(careers.writes_careers(multi, "names"))
-        for mode in ("numbered", "initials"):
-            self.assertFalse(careers.writes_careers(multi, mode), mode)
-        for mode in ("names", "numbered", "initials"):
-            self.assertFalse(careers.writes_careers(single, mode), mode)
+        for config in (multi, single):
+            self.assertTrue(careers.writes_careers(config, "names"),
+                            config.seasons_mode)
+            for mode in ("numbered", "initials"):
+                self.assertFalse(careers.writes_careers(config, mode),
+                                 (config.seasons_mode, mode))
 
     def test_each_way_of_withholding_writes_no_page_and_links_none(self):
         for mode, how in WITHHELD:
@@ -3472,6 +3584,10 @@ class TestAWithheldMultiSeasonReportSaysWhyThereIsNoCareersPage(unittest.TestCas
     ``--quiet`` as the count is. Single-season mode has no careers line either way.
     Measured before: every withheld two-season run printed the count, "7 of 9
     player(s) played in more than one season", for a page that summed two people.
+
+    Since 4.430 single-season mode has the page under names and so the line
+    either way: a withheld single run says why it wrote none, in that mode's
+    words, which moved the fourth test below.
     """
 
     def lines(self, run):
@@ -3497,12 +3613,18 @@ class TestAWithheldMultiSeasonReportSaysWhyThereIsNoCareersPage(unittest.TestCas
         run = run_build(project("2026-winter"), "--players", "initials")
         self.assertEqual(self.lines(run), [WITHHELD_LINE])
 
-    def test_quiet_and_single_mode_print_none(self):
+    def test_quiet_prints_none_and_single_mode_says_it_in_its_words(self):
+        # Moved by 4.430: this was test_quiet_and_single_mode_print_none, and held
+        # a withheld single run to no line. A single run printing names writes the
+        # page now, so one withholding them says why it wrote none: a label there
+        # is one competition's. Wrapped by the report, which keeps to 78 columns.
         cwd, argv = withheld_project("numbered", "--players", *BOTH)
         self.assertEqual(self.lines(run_build(cwd, "--quiet", *argv)), [])
         run = run_build(project("2026-winter", multi=False), "--players", "numbered")
         self.assertEqual(run.code, 0, run.text)
-        self.assertEqual(self.lines(run), [])
+        self.assertEqual(len(self.lines(run)), 1, run.out)
+        self.assertIn(f"seasons single (every card is one season) "
+                      f"{SINGLE_WITHHELD_LINE} ", collapsed(run.out))
 
     def test_a_run_with_no_season_says_nothing_of_careers(self):
         """No season is no careers page in either mode, and withholding is not why.
@@ -3673,10 +3795,13 @@ class TestAWithheldBuildNamesTheCareersPageANamesBuildLeft(unittest.TestCase):
         run = run_build(cwd, "--players", "numbered")
         self.assertEqual(run.code, 1, run.text)
         lines = section(run.out, "left behind")
+        # Moved by 4.430: the reason was the single-season one, "only a
+        # multi-season build writes a careers page, and this run is in
+        # single-season mode". A single build printing names writes the page now,
+        # so withholding is what left it, said in single-season words.
         self.assertEqual(self.item(lines, "site/careers.html"),
-                         f"careers across seasons -- built {STAMP} only a "
-                         f"multi-season build writes a careers page, and this run "
-                         f"is in single-season mode {NAMES_LINE}")
+                         f"careers across seasons -- built {STAMP} "
+                         f"{SINGLE_WITHHELD_REASON} {NAMES_LINE}")
         self.assertEqual(last_line(run.out),
                          "exit 1: all 6 card(s) scored, no errors, 2 dashboard(s) "
                          "still print players' names and careers.html still prints "
@@ -3699,6 +3824,12 @@ class TestACheckRunSaysABuildWouldLeaveNothingLinkingTheCareersPage(unittest.Tes
     no front page. Rejected: a lead of its own for ``--check`` beside each of the
     three a copy left behind can get, which would be six leads where there are
     three.
+
+    Since 4.430 a single-season build printing names writes the page over the
+    one left, so the single-season lead is given by no run, and the leads a page
+    listed alone can get are two: the dashboards' and the withheld one. The
+    single-season copy below is built withholding names, which moved the tests
+    marked so.
     """
 
     @classmethod
@@ -3733,26 +3864,36 @@ class TestACheckRunSaysABuildWouldLeaveNothingLinkingTheCareersPage(unittest.Tes
 
     def single(self) -> Path:
         """A multi site whose dashboards were deleted by hand, built as one season."""
-        cwd = self.copied("")
+        # Moved by 4.430: the config was empty, a single build printing names,
+        # which now writes the page over this one and lists nothing.
+        cwd = self.copied('[build]\nplayers = "numbered"\n')
         for key in BOTH:
             shutil.rmtree(cwd / "site" / key)
         shutil.move(str(cwd / "data" / "2025-winter"), str(cwd / "archive"))
         return cwd
 
-    def test_the_single_season_lead(self):
-        text = self.lead(self.single(), code=0)
-        self.assertIn("did not write it. A build would leave nothing under site "
-                      "linking it, but it opens by double-click and shows the "
-                      "figures it was built with, which is why this run names "
-                      "it. To delete it: python3 build.py --prune", text)
+    def test_a_single_season_run_gives_the_withheld_lead(self):
+        # Moved by 4.430: this was test_the_single_season_lead, exit 0, "did not
+        # write it. A build would leave nothing under site linking it, but it
+        # opens by double-click and shows the figures it was built with". The run
+        # that leaves the page in single mode now withholds names, and exits 1
+        # while the page prints them.
+        text = self.lead(self.single(), code=1)
+        self.assertIn("A build would leave nothing under site linking the careers "
+                      "page above, but it opens by double-click and shows every "
+                      "name it was built with, which is why this run names it. To "
+                      "delete it: python3 build.py --prune", text)
         self.assertNotIn("any more", text)
+        self.assertNotIn("single-season mode", text)
 
     def test_a_build_of_the_same_copy_says_nothing_links_it_any_more(self):
         """The other tense of both leads, from the run that rewrote the page."""
+        # Moved by 4.430: the single-season copy said "links it" and exited 0;
+        # see single().
         for what, cwd, argv, code in (
                 ("the careers page above", self.copied(MULTI),
                  ("--players", "numbered"), 1),
-                ("it", self.single(), (), 0)):
+                ("the careers page above", self.single(), (), 1)):
             with self.subTest(what=what):
                 run = run_build(cwd, *argv)
                 self.assertEqual(run.code, code, run.text)
@@ -3905,6 +4046,652 @@ class TestEveryCallerOfTheDeciderAsksAboutTheBuildItSpeaksFor(unittest.TestCase)
                                   if caller == "_namesake_notes"], ["names"], seen)
                 self.assertEqual((cwd / "site" / site.CAREERS_PAGE).exists(),
                                  mode == "names")
+
+
+# --- one season, three competitions (4.430) ---------------------------------
+
+# A single-season club of three competitions, two rounds each: Monday Division
+# 1, and Tuesday Division 3 Grades A and B. Ada Renn is registered in a Monday
+# team and in a Grade A team; Hux Bardo, registered in Grade B, fills in for
+# Quarry Quolls in Grade A's round 2. 19 player rows, 17 people, 11 who played,
+# and those two in two competitions each.
+CLUB_TEAMS = {
+    "1": (("HILLTOP ACES", ("Ada Renn", "Dev Raman", "Elin Sotto")),
+          ("RIVERSIDE ROCKETS", ("Ana Fernandez", "Bo Nakamura", "Cass Ellery"))),
+    "3 Grade A": (("MARINA MAGPIES", ("Ada Renn", "Bex Toloa", "Cai Ferris")),
+                  ("QUARRY QUOLLS", ("Dee Halvard", "Eli Prass", "Fay Ngo"))),
+    "3 Grade B": (("STATION STARLINGS", ("Gus Emmett", "Hux Bardo", "Ivy Salter")),
+                  ("TERRACE TEALS", ("Jem Okonkwo", "Kai Bright", "Lux Marris"))),
+}
+CLUB_DATES = {"1": {"1": "2026-08-17", "2": "2026-08-24"},
+              "3 Grade A": {"1": "2026-08-18", "2": "2026-08-25"},
+              "3 Grade B": {"1": "2026-08-18", "2": "2026-08-25"}}
+# Division, round, home and away (indexes into CLUB_TEAMS), and the four rows.
+CLUB_FIXTURES = (
+    ("1", "1", 0, 1, ((6, 2), (6, 3), (4, 6), (6, 1))),
+    ("1", "2", 1, 0, ((6, 4), (2, 6), (6, 3), (5, 6))),
+    ("3 Grade A", "1", 0, 1, ((6, 2), (6, 3), (6, 1), (6, 4))),
+    ("3 Grade A", "2", 1, 0, ((6, 4), (3, 6), (6, 2), (6, 3))),
+    ("3 Grade B", "1", 0, 1, ((6, 0), (6, 1), (6, 2), (6, 3))),
+    ("3 Grade B", "2", 1, 0, ((2, 6), (6, 4), (1, 6), (3, 6))),
+)
+# Division, round, team, the place on court taken, and who took it.
+CLUB_FILL_IN = ("3 Grade A", "2", "QUARRY QUOLLS", 1, "Hux Bardo")
+CLUB_COMPETITIONS = ("monday-division-1", "tuesday-division-3-grade-a",
+                     "tuesday-division-3-grade-b")
+CLUB_LINE = "  careers      2 of 11 player(s) played in more than one competition"
+# Wrapped by the report, which keeps to 78 columns, so read back collapsed.
+SINGLE_WITHHELD_LINE = ("careers no page: this run withholds names, and a label is "
+                        "one competition's")
+SINGLE_WITHHELD_REASON = ("only a build that prints players' names writes a careers "
+                          "page: a withheld label belongs to one competition, not "
+                          "to a person")
+SINGLE_LINK = ('<p class="careers-link"><a href="careers.html">Players this '
+               'season</a> <span class="muted">every player\'s competitions, added '
+               'up</span></p>')
+
+
+def write_club_season(data: Path, *, namesake: str | None = None,
+                      respelt: tuple[str, str, str] | None = None) -> None:
+    """The three competitions' six cards; *namesake* names two people alike.
+
+    Given, it is printed for the second player of Hilltop Aces (Monday) and of
+    Terrace Teals (Grade B), two people the cards alone cannot tell apart.
+    *respelt* is a team, a player of it and how that team's cards print them.
+    """
+    for index, (div, rnd, home_at, away_at, scores) in enumerate(CLUB_FIXTURES,
+                                                                 start=1):
+        folder = data / f"Round{rnd}"
+        folder.mkdir(parents=True, exist_ok=True)
+        sides = []
+        for at in (home_at, away_at):
+            team, names = CLUB_TEAMS[div][at]
+            names = list(names)
+            if respelt and team == respelt[0]:
+                names = [respelt[2] if name == respelt[1] else name for name in names]
+            if namesake and team in ("HILLTOP ACES", "TERRACE TEALS"):
+                names[1] = namesake
+            on, fill = list(names), ()
+            if (div, rnd, team) == CLUB_FILL_IN[:3]:
+                on[CLUB_FILL_IN[3]] = CLUB_FILL_IN[4]
+                fill = (CLUB_FILL_IN[4],)
+                names.pop(CLUB_FILL_IN[3])
+            sides.append((team, tuple(
+                cw.RosterRow(name=name, singles=2.5, doubles=2.5, captain=not i)
+                for i, name in enumerate(names)), on, fill))
+        (home, home_rows, home_on, home_fill), (away, away_rows, away_on,
+                                                 away_fill) = sides
+        cw.write_card_file(
+            folder / f"{div.lower().replace(' ', '-')}-r{rnd}.pdf", cw.CardSpec(
+                date=CLUB_DATES[div][rnd], round_label=rnd, division=div,
+                court=f"{index:02d}", match_id=f"500{index:04d}",
+                home_name=home, away_name=away,
+                rows=rows_for(scores, home_on, away_on),
+                home_roster=home_rows, away_roster=away_rows,
+                home_fill_ins=home_fill, away_fill_ins=away_fill))
+
+
+def club_project(config: str = "", *, namesake: str | None = None,
+                 season: str = "",
+                 respelt: tuple[str, str, str] | None = None) -> Path:
+    """A project holding the club's season, under ``data/<season>/`` if given."""
+    _scratch_is_made()
+    cwd = Path(tempfile.mkdtemp(dir=SCRATCH))
+    write_club_season(cwd / "data" / season if season else cwd / "data",
+                      namesake=namesake, respelt=respelt)
+    (cwd / "config.toml").write_text(config, encoding="utf-8")
+    return cwd
+
+
+def washout_project() -> Path:
+    """Monday's round 1 alone, rained off before a game: no competition has a result."""
+    _scratch_is_made()
+    cwd = Path(tempfile.mkdtemp(dir=SCRATCH))
+    (home, home_names), (away, away_names) = CLUB_TEAMS["1"]
+    folder = cwd / "data" / "Round1"
+    folder.mkdir(parents=True)
+    cw.write_card_file(folder / "1-r1.pdf", cw.CardSpec(
+        date=CLUB_DATES["1"]["1"], round_label="1", division="1", court="01",
+        match_id="5000001", home_name=home, away_name=away,
+        rows=rows_for(((0, 0),) * 4, home_names, away_names),
+        cancelled=True, winner=cw.NO_TICK,
+        home_roster=tuple(cw.RosterRow(name=name, singles=2.5, doubles=2.5,
+                                       captain=not i)
+                          for i, name in enumerate(home_names)),
+        away_roster=tuple(cw.RosterRow(name=name, singles=2.5, doubles=2.5,
+                                       captain=not i)
+                          for i, name in enumerate(away_names))))
+    (cwd / "config.toml").write_text("", encoding="utf-8")
+    return cwd
+
+
+def built_club() -> tuple[Path, Run]:
+    """The single-season build of the club's season, made once and only ever read."""
+    if "club" not in _BUILT:
+        cwd = club_project()
+        _BUILT["club"] = (cwd, run_build(cwd))
+    return _BUILT["club"]
+
+
+def club_documents(out: Path) -> dict[str, dict]:
+    """Each competition's document as the build wrote it, by competition id."""
+    return {path.parent.name: json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted(out.rglob("season.json"))}
+
+
+def visible_words(page: CareersPage) -> list[str]:
+    """Every heading, paragraph, caption and column head a reader of *page* meets."""
+    words = [*page.headings.values(), *page.captions,
+             *(text for _, text in page.paragraphs)]
+    for table in page.tables.values():
+        for row in table["thead"] + table["tfoot"]:
+            words += [cell["text"] for cell in row["cells"]]
+    return words
+
+
+class TestASingleSeasonBuildPrintingNamesListsEveryPlayerOfTheSeason(unittest.TestCase):
+    """A single-season build that prints names writes careers.html as the season's players.
+
+    The owner asked for "the stats of all players at the club" from the front page.
+    A single-season site had nowhere that lists them: each competition's dashboard
+    lists its own players, the front page lists the competitions and nobody in them,
+    and ``careers.writes_careers`` answered yes in multi-season mode only. Measured
+    before on this fixture (/tmp/mcf/scratch/CLUB/measure/before.txt): 3
+    competitions, 19 player rows, 17 people, Ada Renn and Hux Bardo in two
+    competitions each, and no careers.html, no link to one on the front page, and
+    app.js's ``careersHref`` returning '' on every single-season player page. On the
+    owner's export, 183 player rows, 165 people and 18 of them in more than one
+    competition: a player's season was on as many pages as they played competitions,
+    and nothing added it up.
+
+    Now every build that prints names writes it, in single-season mode as the
+    season's players: one entry per person, a row for each competition they are
+    named in, linked to that competition's page for them, and the rows added up
+    under it. Listed by name, as the careers page is, for the reason its third
+    paragraph gives. Rejected: writing it only from a second competition, which a
+    player page could not tell without its document changing whenever another
+    competition's does; a file name of its own in single-season mode, which a switch
+    of mode leaves behind with every link to it; and a sort control, which would
+    rank across divisions the page says are not the same tennis.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cwd, cls.built = built_club()
+        cls.out = cls.cwd / "site"
+        # Read only if it was written, so a build that writes no page fails each
+        # test that reads one, by name, and not the class in its setup.
+        written = cls.out / site.CAREERS_PAGE
+        cls.text = written.read_text(encoding="utf-8") if written.is_file() else ""
+        cls.page = CareersPage(cls.text)
+        cls.documents = club_documents(cls.out)
+
+    def mine(self, slug: str, competition: str) -> dict:
+        return next(player for player in self.documents[competition]["players"]
+                    if player["slug"] == slug)
+
+    def test_the_build_is_clean_and_writes_the_page(self):
+        self.assertEqual(self.built.code, 0, self.built.text)
+        self.assertEqual(sorted(self.documents), list(CLUB_COMPETITIONS))
+        self.assertTrue(site._is_careers_page(self.out / site.CAREERS_PAGE))
+
+    def test_it_is_headed_as_this_seasons_players(self):
+        self.assertIn("<h1>Players this season</h1>", self.text)
+        self.assertIn("<title>Players this season · ", self.text)
+        self.assertIn("<small>Players this season</small>", self.text)
+
+    def test_every_player_is_listed_once(self):
+        people = {player["slug"] for document in self.documents.values()
+                  for player in document["players"]}
+        self.assertEqual(len(people), 17)
+        listed = [row["cells"][0]["href"] for row in self.page.rows("index")]
+        self.assertEqual(sorted(listed), sorted(f"#p-{slug}" for slug in people))
+        self.assertEqual(set(self.page.tables) - {"index"}, people)
+
+    def test_a_player_in_two_competitions_has_a_row_for_each_and_their_sum(self):
+        rows = self.page.rows("ada-renn")
+        self.assertEqual([row["cells"][0]["text"] for row in rows],
+                         ["Monday Division 1", "Tuesday Division 3 Grade A"])
+        self.assertEqual([row["cells"][1]["text"] for row in rows],
+                         ["Hilltop Aces", "Marina Magpies"])
+        both = ("monday-division-1", "tuesday-division-3-grade-a")
+        for row, competition in zip(rows, both):
+            mine = self.mine("ada-renn", competition)
+            for key in FIGURES:
+                self.assertEqual(fields(row)[key],
+                                 str(careers.figure(mine, key)), (competition, key))
+        total = self.page.total("ada-renn")
+        self.assertEqual(total["cells"][0]["text"], "All competitions")
+        for key in FIGURES:
+            self.assertEqual(fields(total)[key], str(sum(
+                careers.figure(self.mine("ada-renn", competition), key)
+                for competition in both)), key)
+        self.assertEqual(fields(total)["matches"], "4")
+
+    def test_a_fill_in_has_a_row_for_the_competition_they_filled_in(self):
+        rows = self.page.rows("hux-bardo")
+        self.assertEqual([(row["cells"][0]["text"], row["cells"][1]["text"])
+                          for row in rows],
+                         [("Tuesday Division 3 Grade A", "(not on a roster)"),
+                          ("Tuesday Division 3 Grade B", "Station Starlings")])
+        self.assertEqual(fields(self.page.total("hux-bardo"))["matches"], "3")
+
+    def test_every_row_opens_that_competitions_page_for_them(self):
+        labels = {document["meta"]["label"]: competition
+                  for competition, document in self.documents.items()}
+        rows = 0
+        for slug, table in self.page.tables.items():
+            if slug == "index":
+                continue
+            for row in table["tbody"]:
+                head = row["cells"][0]
+                competition = labels[head["text"].split(" (on the roster")[0]]
+                self.assertEqual(head["href"],
+                                 f"{competition}/index.html#/player/{slug}")
+                self.assertTrue((self.out / competition / "index.html").is_file())
+                rows += 1
+        self.assertEqual(rows, 19)
+
+    def test_somebody_only_on_a_roster_is_listed_and_counted_nowhere(self):
+        row, = self.page.rows("cai-ferris")
+        self.assertEqual(row["cells"][0]["text"], "Tuesday Division 3 Grade A "
+                                                  "(on the roster, no sets played)")
+        self.assertEqual(row["attrs"].get("class"), "muted")
+
+    def test_a_row_printed_under_another_spelling_says_how(self):
+        """A row whose competition prints the name another way says "as" that spelling.
+
+        An ``[aliases]`` line joins two spellings as one person and leaves each
+        competition's page printing its own, which the report says, with the
+        advice to give the name under ``[player_names]``. Measured
+        (/tmp/mcf/scratch/CLUB/fix/probes430.txt, 1): Hilltop Aces' cards print
+        "A. Renn", and with ``"a-renn" = "ada-renn"`` her entry is headed "Ada
+        Renn", the last competition's spelling, and its Monday row says "as A.
+        Renn". A mutant that left the note off a single-season row was failed by
+        none of the 189 tests this item had (/tmp/mutate617.py, #41). Rejected:
+        the heading's spelling alone on every row, which hides the name the row's
+        own page prints; and spelling the entry from the alias, which says who a
+        spelling is and not how to spell them.
+        """
+        cwd = club_project('[aliases]\n"a-renn" = "ada-renn"\n',
+                           respelt=("HILLTOP ACES", "Ada Renn", "A. Renn"))
+        run = run_build(cwd)
+        self.assertEqual(run.code, 0, run.text)
+        page = read_page(cwd / "site")
+        self.assertEqual(page.headings["h-ada-renn"], "Ada Renn")
+        self.assertEqual([(row["cells"][0]["text"], row["cells"][0]["small"])
+                          for row in page.rows("ada-renn")],
+                         [("Monday Division 1", "as A. Renn"),
+                          ("Tuesday Division 3 Grade A", "")])
+
+    def test_the_list_counts_competitions_played_and_not_seasons(self):
+        head = [cell["text"] for cell in self.page.tables["index"]["thead"][0]["cells"]]
+        self.assertEqual(head[:2], ["Player", "Competitions played"])
+        played = {row["cells"][0]["href"][len("#p-"):]:
+                  fields(row)["competitions_played"]
+                  for row in self.page.rows("index")}
+        self.assertEqual((played["ada-renn"], played["hux-bardo"], played["eli-prass"],
+                          played["cai-ferris"]), ("2", "2", "1", "0"))
+
+    def test_nothing_on_it_speaks_of_seasons(self):
+        """The one season is the page's whole subject, so "seasons" is never true here.
+
+        Every word a reader meets: the heading, the paragraphs, each table's caption,
+        head and foot. Before, the page's words were the multi-season page's alone.
+        """
+        said = [words for words in visible_words(self.page)
+                if "season" in words.casefold().replace("this season", "")]
+        self.assertEqual(said, [])
+        self.assertNotIn("Season", [cell["text"] for cell in
+                                    self.page.tables["ada-renn"]["thead"][0]["cells"]])
+
+    def test_the_front_page_links_it_after_the_last_competition(self):
+        front = (self.out / "index.html").read_text(encoding="utf-8")
+        self.assertIn(SINGLE_LINK, front)
+        self.assertNotIn("Careers across seasons", front)
+        self.assertGreater(front.index(SINGLE_LINK), front.rindex('class="pick"'))
+
+    def test_the_report_says_how_many_played_in_more_than_one_competition(self):
+        lines = self.built.out.splitlines()
+        self.assertIn(CLUB_LINE, lines)
+        self.assertTrue(lines[lines.index(CLUB_LINE) - 1].startswith(
+            "  seasons      single"), lines)
+
+    def test_the_readme_quotes_the_line_it_prints(self):
+        quoted = [line for line in readme_block(
+            self, "### Every player this season, on one page", contains="careers ")
+            if line.startswith("  careers ")]
+        printed = [line for line in self.built.out.splitlines()
+                   if line.startswith("  careers ")]
+        self.assertEqual(quoted, printed)
+        self.assertEqual(quoted, [CLUB_LINE])
+
+    def test_check_says_so_too_and_writes_no_page(self):
+        cwd = club_project()
+        run = run_build(cwd, "--check")
+        self.assertIn(CLUB_LINE, run.out.splitlines())
+        self.assertFalse((cwd / "site" / site.CAREERS_PAGE).exists())
+
+    def test_a_rebuild_with_nothing_new_writes_nothing(self):
+        cwd = Path(tempfile.mkdtemp(dir=SCRATCH))
+        for name in ("data", "site"):
+            shutil.copytree(self.cwd / name, cwd / name)
+        shutil.copy2(self.cwd / "config.toml", cwd / "config.toml")
+        run = run_build(cwd, generated=LATER_NIGHT)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertIn("  wrote        nothing", run.out)
+        self.assertEqual((cwd / "site" / site.CAREERS_PAGE).read_bytes(),
+                         (self.out / site.CAREERS_PAGE).read_bytes())
+
+    def test_a_page_of_the_clubs_own_by_that_name_stops_it_and_is_left_alone(self):
+        """The refusal a multi build makes, made by the build that now writes the page.
+
+        Until 4.430 a file of the club's under that name in a single-season site
+        was never touched, since nothing was written there. Written through now,
+        it would be gone. Measured (/tmp/mcf/scratch/CLUB/probe/before-ownpage):
+        a single-season build over one exited 0 and left it; after
+        (probe/after-ownpage) it exits 2 with the multi build's words and writes
+        nothing. Rejected: a name of its own for the single-season page to step
+        round it, for the reason the class gives.
+        """
+        cwd = club_project()
+        (cwd / "site").mkdir()
+        (cwd / "site" / site.CAREERS_PAGE).write_text("<p>our own page</p>")
+        run = run_build(cwd)
+        self.assertEqual(run.code, 2, run.text)
+        self.assertEqual(run.err, "error: site/careers.html is not a page this tool "
+                                  "wrote, and the careers page needs that name; move "
+                                  "it aside or build into a different --out "
+                                  "directory\n")
+        self.assertEqual((cwd / "site" / site.CAREERS_PAGE).read_text(),
+                         "<p>our own page</p>")
+        self.assertFalse((cwd / "site" / CLUB_COMPETITIONS[0]).exists())
+
+
+class TestASingleSeasonBuildThatWithholdsNamesWritesNoPlayersPage(unittest.TestCase):
+    """Withheld names, in single-season mode too: no page, no link, and the reason.
+
+    A withheld label is made per competition document: Quarry Quolls #2 in one
+    division and in another can be two people, so a page joining labels across
+    competitions would add two people up as one. Measured before
+    (/tmp/mcf/scratch/CLUB/measure/before.txt) a single-season build wrote no page
+    whatever it printed, so withholding had nothing to say; now that a names build
+    writes one, the withheld run says why it did not, in the competition's word.
+    Rejected: the multi-season line ("a label is one season's"), untrue of a run
+    whose every label is one season's and joins nothing.
+    """
+
+    def test_each_way_of_withholding_writes_no_page_and_links_none(self):
+        for mode, how in WITHHELD:
+            with self.subTest(mode=mode, how=how):
+                if how == "--players":
+                    cwd, argv = club_project(), ("--players", mode)
+                else:
+                    cwd, argv = club_project(f'[build]\nplayers = "{mode}"\n'), ()
+                run = run_build(cwd, *argv)
+                self.assertEqual(run.code, 0, run.text)
+                self.assertFalse((cwd / "site" / site.CAREERS_PAGE).exists())
+                self.assertNotIn(site.CAREERS_PAGE, (cwd / "site" / "index.html")
+                                 .read_text(encoding="utf-8"))
+                self.assertIn(f"seasons single (every card is one season) "
+                              f"{SINGLE_WITHHELD_LINE} ", collapsed(run.out))
+
+
+class TestSwitchingModeOrWithholdingNamesLeavesNoPlayersPageStale(unittest.TestCase):
+    """One file name in both modes, so a switch rewrites the page and leaves none.
+
+    Measured before: a multi-season build's careers.html was listed as left
+    behind by the next single-season build, with its own reason, and removed by
+    ``--prune``; a single-season build wrote none to leave. Now both modes write
+    careers.html, so a switch either way rewrites it in the new mode's words and
+    every link a season page or a bookmark has to it still lands; and a switch to
+    withheld names lists it, as before, as a page this run did not write and that
+    prints names, with the reason in the words of the mode it is in, and the
+    name the page was written under. Rejected: a file of its own for the
+    single-season page, which each switch would leave behind for ``--prune``.
+    """
+
+    MULTI = '[build]\nseasons = "multi"\n'
+
+    def switch(self, first: str, then: str, *argv: str) -> tuple[Path, Run]:
+        cwd = club_project(first, season="2026-winter")
+        done = run_build(cwd)
+        self.assertEqual(done.code, 0, done.text)
+        (cwd / "config.toml").write_text(then, encoding="utf-8")
+        return cwd, run_build(cwd, *argv, generated=LATER_NIGHT)
+
+    def listed(self, run: Run) -> list[str]:
+        return [line.strip() for line in section(run.out, "left behind")
+                if line.startswith("  site/") and not line.startswith("   ")]
+
+    def test_multi_to_single_rewrites_the_page_and_lists_only_the_dashboards(self):
+        cwd, run = self.switch(self.MULTI, "")
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(self.listed(run), [f"site/2026-winter/2026-winter-{competition}"
+                                            for competition in CLUB_COMPETITIONS])
+        page = read_page(cwd / "site")
+        self.assertEqual(page.rows("ada-renn")[0]["cells"][0]["href"],
+                         "monday-division-1/index.html#/player/ada-renn")
+        self.assertIn("<h1>Players this season</h1>",
+                      (cwd / "site" / site.CAREERS_PAGE).read_text(encoding="utf-8"))
+        run = run_build(cwd, "--prune", generated=LATER_NIGHT)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertTrue(site._is_careers_page(cwd / "site" / site.CAREERS_PAGE))
+        self.assertFalse((cwd / "site" / "2026-winter").exists())
+
+    def test_single_to_multi_rewrites_the_page_and_lists_only_the_dashboards(self):
+        cwd, run = self.switch("", self.MULTI)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertEqual(self.listed(run), [f"site/{competition}"
+                                            for competition in CLUB_COMPETITIONS])
+        text = (cwd / "site" / site.CAREERS_PAGE).read_text(encoding="utf-8")
+        self.assertIn("<h1>Careers across seasons</h1>", text)
+        self.assertEqual(read_page(cwd / "site").rows("ada-renn")[0]["cells"][0]["href"],
+                         "2026-winter/2026-winter-monday-division-1/index.html"
+                         "#/player/ada-renn")
+
+    def test_names_to_withheld_lists_the_page_by_the_name_it_was_written_under(self):
+        cwd, run = self.switch("", "", "--players", "numbered")
+        self.assertEqual(run.code, 1, run.text)
+        self.assertEqual(self.listed(run), ["site/careers.html"])
+        item = TestASingleSeasonBuildNamesTheCareersPageItLeftBehind.item(
+            self, section(run.out, "left behind"), "site/careers.html")
+        self.assertEqual(item, f"players this season -- built {STAMP} "
+                               f"{SINGLE_WITHHELD_REASON} {NAMES_LINE}")
+        orphan, = [orphan for orphan in site.find_orphans(
+            cwd / "site", keep={}, writes_careers=False) if orphan.kind == "careers"]
+        self.assertEqual(orphan.label, "players this season")
+        self.assertNotIn(site.CAREERS_PAGE, (cwd / "site" / "index.html")
+                         .read_text(encoding="utf-8"))
+        run = run_build(cwd, "--players", "numbered", "--prune",
+                        generated=LATER_NIGHT)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertFalse((cwd / "site" / site.CAREERS_PAGE).exists())
+
+    def test_a_page_from_before_it_carried_its_name_is_the_page_across_seasons(self):
+        """A page with no ``<meta name="page">`` is 0.1.0's, and only multi wrote one.
+
+        Measured (/tmp/mcf/scratch/CLUB/fix/probes430.txt, 2): the careers.html a
+        0.1.0 multi-season build writes has no such line in its head, and this
+        unit's run withholding names lists it as "careers across seasons". Made
+        here by taking the line out of a page this unit's multi build wrote,
+        which leaves the mark and the stamp where 0.1.0 put them. A mutant that
+        read a nameless page as the season's players was failed by none of the
+        189 tests this item had (/tmp/mutate617.py, #42). Rejected: naming a
+        nameless page by this run's mode, which in a single-season run would call
+        0.1.0's page the season's players, a page no 0.1.0 build wrote.
+        """
+        cwd = club_project(self.MULTI, season="2026-winter")
+        done = run_build(cwd)
+        self.assertEqual(done.code, 0, done.text)
+        page = cwd / "site" / site.CAREERS_PAGE
+        text = page.read_text(encoding="utf-8")
+        named = '<meta name="page" content="Careers across seasons">\n'
+        self.assertIn(named, text)
+        page.write_text(text.replace(named, ""), encoding="utf-8")
+        run = run_build(cwd, "--players", "numbered", generated=LATER_NIGHT)
+        self.assertEqual(run.code, 1, run.text)
+        item = TestASingleSeasonBuildNamesTheCareersPageItLeftBehind.item(
+            self, section(run.out, "left behind"), "site/careers.html")
+        self.assertEqual(item, f"careers across seasons -- built {STAMP} "
+                               f"{WITHHELD_REASON} {NAMES_LINE}")
+
+
+class TestANamesakesLineAcrossCompetitionsIsNotCalledUselessInSingleSeasonMode(
+        unittest.TestCase):
+    """The players page joins one name across competitions, so a line can part two.
+
+    Before, in single-season mode, a ``[namesakes]`` entry naming a team in each of
+    two competitions was told it "separated nobody" and to leave it off, which was
+    true when every page was one competition's. Measured on a fictional pair
+    (/tmp/mcf/scratch/CLUB/probe/before-namesakes): Robin Quaife printed for a
+    Monday player and a Grade B player, the entry naming Hilltop Aces and Terrace
+    Teals got that warning. Now the season's players page lists both competitions
+    on one page, where without the entry they are one entry, so the advice would
+    join two people: the note says nothing, and the page has one entry each.
+    Rejected: a note for every name in two competitions, which on the owner's
+    export is 18 names, most of them one person each.
+    """
+
+    ENTRY = '[namesakes]\n"robin-quaife" = ["Hilltop Aces", "Terrace Teals"]\n'
+
+    def test_with_the_line_there_is_no_warning_and_one_entry_each(self):
+        cwd = club_project(self.ENTRY, namesake="Robin Quaife")
+        run = run_build(cwd)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertNotIn("separated nobody", collapsed(run.out))
+        ids = read_page(cwd / "site").ids
+        self.assertIn("p-robin-quaife-hilltop-aces", ids)
+        self.assertIn("p-robin-quaife-terrace-teals", ids)
+        self.assertNotIn("p-robin-quaife", ids)
+
+    def test_without_it_the_two_are_one_entry_with_two_rows(self):
+        cwd = club_project(namesake="Robin Quaife")
+        run = run_build(cwd)
+        self.assertEqual(run.code, 0, run.text)
+        rows = read_page(cwd / "site").rows("robin-quaife")
+        self.assertEqual([row["cells"][1]["text"] for row in rows],
+                         ["Hilltop Aces", "Terrace Teals"])
+
+    def test_a_line_naming_a_team_no_card_prints_still_says_so(self):
+        cwd = club_project('[namesakes]\n"robin-quaife" = ["Hilltop Aces", '
+                           '"Terrace Teels"]\n', namesake="Robin Quaife")
+        flat = collapsed(run_build(cwd).out)
+        self.assertIn("no card puts that name in terrace-teels. The rest were still "
+                      "separated", flat)
+        self.assertNotIn("separated nobody", flat)
+
+
+class TestASplitPlayersPageIsWordedForTheSeasonOnEveryPage(unittest.TestCase):
+    """Split by initial, the season's players page keeps the season's words.
+
+    A single-season page is split as a page across seasons is: past
+    ``CAREERS_LIMIT``, or where an earlier build split it, which is how a club
+    that switches a split multi-season site to single-season mode gets one.
+    Measured on that switch (/tmp/mcf/scratch/CLUB/measure/split-switch.txt):
+    the single build kept the 29 pages and headed them "Players this season".
+    The split's own sentences are three more places the page across seasons has
+    words of its own: the index's line on why it is split, the initials' list,
+    and an initial's line for nobody. Rejected: the page across seasons' words on
+    the split pages, "too many careers" and "No name in the seasons built so far",
+    untrue of one season's competitions; and never splitting a single-season page,
+    which would leave a switched club's 28 initial pages with nothing linking them.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cwd = club_project()
+        with mock.patch.object(site, "CAREERS_LIMIT", 10_000):
+            cls.code, cls.text = main_in_process(cls.cwd)
+        cls.out = cls.cwd / "site"
+
+    def page(self, name: str) -> str:
+        return (self.out / name).read_text(encoding="utf-8")
+
+    def test_it_is_split(self):
+        self.assertEqual(self.code, 0, self.text)
+        self.assertEqual(len(list(self.out.glob("careers*.html"))),
+                         1 + len(careers.INITIALS))
+
+    def test_the_index_says_there_are_too_many_players_for_one_page(self):
+        index = self.page(site.CAREERS_PAGE)
+        self.assertIn("<h1>Players this season</h1>", index)
+        self.assertIn("<p>There are too many players here for one page, so each "
+                      "initial has a page of its own.", index)
+        self.assertNotIn("too many careers", index)
+
+    def test_the_index_opens_by_saying_where_each_players_competitions_are(self):
+        """The split index's own lead says where the figures are, in the season's words.
+
+        The index lists names and no figure, so its first paragraph says which
+        page adds a player up. A mutant that gave the season's index the lead
+        across seasons, "Each player's seasons are added up", was failed by none
+        of this item's 71 other tests (/tmp/mutate617.py, #12). Rejected: that
+        lead, untrue of a page whose rows are one season's competitions.
+        """
+        index = CareersPage(self.page(site.CAREERS_PAGE))
+        self.assertEqual(index.paragraphs[0], (
+            "", "Each player's competitions are added up on the page for their "
+                "initial, where every competition opens the page its row was "
+                "copied from. This page lists the names only."))
+
+    def test_the_initials_are_listed_as_the_players_by_initial(self):
+        for name in (site.CAREERS_PAGE, "careers-a.html"):
+            with self.subTest(page=name):
+                self.assertIn('<nav class="initials" aria-label="Players by '
+                              'initial">', self.page(name))
+
+    def test_an_initials_page_is_headed_and_captioned_for_the_season(self):
+        page = self.page("careers-a.html")
+        self.assertIn("<h1>Players this season: A</h1>", page)
+        self.assertIn("Everyone named in this season&#x27;s competitions whose "
+                      "name starts with A, by name", page)
+
+    def test_an_initial_nobody_has_says_so_in_the_seasons_words(self):
+        self.assertIn('<p class="empty">No name in this season&#x27;s competitions '
+                      "starts with Z.</p>", self.page("careers-z.html"))
+
+
+class TestAPlayersPageOfOneCompetitionOrNoneSaysSoInItsOwnWords(unittest.TestCase):
+    """Until two competitions have results, the season's page says what it cannot add.
+
+    The page across seasons has a line for one season with results and another
+    for none; the season's page has its own two, in the competition's words. A
+    mutant giving the season's page either line of the seasons was failed by
+    none of the 189 tests this item had, every single-season fixture of which had
+    three competitions with results (/tmp/mutate617.py, #43 and #44). Measured
+    (/tmp/mcf/scratch/CLUB/fix/probes430.txt, 3, and noresult.txt): Monday's two
+    cards alone give the line for one competition, and one card rained off
+    before a game gives the line for none, each with the report's line in the
+    same words. The page is written for a club of one competition too, where it
+    repeats that dashboard's Players view under this line, which says why: one
+    rule for every build printing names, so a player page's link never turns on
+    how many competitions there are. Rejected: no page until a second
+    competition has a result, which a club of one competition would never get,
+    and whose player pages would link nothing until then.
+    """
+
+    def test_one_competition_with_results_says_every_total_is_that_competitions(self):
+        cwd = club_project()
+        for card in sorted((cwd / "data").rglob("3-grade-*.pdf")):
+            card.unlink()
+        run = run_build(cwd)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertIn("  careers      one competition so far; totals add up from "
+                      "the second", run.out.splitlines())
+        self.assertIn(("muted", "Only one competition has results so far, so every "
+                                "total below is that competition's. They start "
+                                "adding up when a second competition's cards are "
+                                "filed."), read_page(cwd / "site").paragraphs)
+
+    def test_no_competition_with_a_result_says_so_in_place_of_the_list(self):
+        cwd = washout_project()
+        run = run_build(cwd)
+        self.assertEqual(run.code, 0, run.text)
+        self.assertIn("  careers      no competition has a result in it yet",
+                      run.out.splitlines())
+        self.assertIn(("empty", "No competition has a result in it yet."),
+                      read_page(cwd / "site").paragraphs)
 
 
 if __name__ == "__main__":

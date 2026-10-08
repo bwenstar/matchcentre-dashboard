@@ -8,6 +8,596 @@ is a program a club runs and not a library, so what each of the three numbers
 promises about your own `config.toml`, your `data/` folder and your published
 figures is spelled out in `README.md`, under *Versions and upgrading*.
 
+## [Unreleased]
+
+### Fixed
+
+- A card is filed under the night its competition line names (`Tuesday Night
+  Fixtures 2026`) before the weekday of its date. Filed by its date alone, a card
+  dated off its night made a competition of its own, and a card printing a range of
+  days in place of a date (`Tue 29/09 - Sun 04/10`) read as undated and was filed by
+  the Sunday the range closes on: on a club's 201 cards 0.1.0 built 17 competitions
+  where there are 10, and one ladder the strays left said a round "accounts for none
+  of" two teams and credited no bye. The competition line is the line printing
+  `Night Fixtures` nearest the set table, the team names apart, so the night is not
+  read off a venue or a letterhead above it that prints those words. A card dated
+  off its night is now shown on the date the round's other cards dated on that night
+  agree on, or on its own when they do not, with one note per card saying which and
+  why; where a declared draw dates the round otherwise, `date-mismatch` quotes the
+  date the card prints beside the one it is shown on. A range is dated the day of it
+  on the night, in the year the competition line prints, and is undated, with a
+  warning saying why, when the line prints no single year, the days are no such week
+  in it, or the range is longer than a week. A line naming no weekday, or more than
+  one, names no night: a range under it is dated the day it opens, which files it,
+  and any other card is filed as before. `tools/doctor.py`'s verdict names the night
+  wherever it overrules the date (`2026-09-24 Thursday (filed by the Tuesday its
+  competition line names)`), and its `date` header field finds a range of days
+  printed with no year, which `--redact` withholds. README section: *A card was
+  refused*.
+- A card level on games and won on its finished sets agrees with itself where its
+  last rubber stopped with no box ticked. A club whose play stops at a fixed hour
+  leaves that rubber unfinished whatever the score, and the card's own cross-checks
+  credited it to whoever led, so rows 4-6, 2-6, 6-2 and 4-2 with `LOSES TO` and the
+  away tick were told they give `games 16-16 (level) and at most 2-2 sets (level)`:
+  F6 on the verb, F6 on the tick and exit 1, though the ladder scored the match
+  rightly, away on sets, 3.6 to 5.6. Two cards of one club's real season were so, 4
+  of the 18 errors of its build. A verb or tick naming a side is now also held to the
+  rows as the ladder credits them, under each set rule every row could have been
+  printed under: a finished set to its winner, a forfeited rubber to the side that
+  stayed and a stopped one to nobody. That card builds with exit 0, its
+  `set-unfinished` warning its one finding, and so do its mirror and a night level
+  at 17-17 and won 2-1 on sets. `DEFEATS` and the home tick over the same rows still
+  disagree, as do those rows read with their games columns swapped, and `LOSES TO`
+  over 6-2, 6-3, 2-4 and 0-0, which only fast4 gives the away side and which fast4
+  cannot have printed. A card short of a result whose finished sets bear its verb
+  out is `verb-no-result` alone: 6-4, 0-5, 0-5, 0-5 with `DEFEATS` and the home tick
+  was that, F6 on the verb and F6 on the tick. On a whole-match forfeit the home tick
+  alone over 6-4, 4-5, 4-5, 0-2 under the away side's box agrees, where it was F6. No
+  set rule backs the side a Match Forfeited box says forfeited, so under the home
+  side's box the same tick is still F6, and so is the home tick over 6-4, 3-5, 2-2,
+  0-0 under that box, held to the box.
+  `tools/demo.py` writes such a night as a seventh special, its last rubber stopped
+  with no box ticked and its games level where the format allows: in the default
+  demo it is round 2's Wombats v Bunyips, so the Bunyips go top on 29.1, where the
+  Wombats led on 27.0, and the build warns 7 times where it warned 6. The cost,
+  measured and accepted: the reader's own check that the two games columns were not
+  swapped passes more swaps, and a Match Winner tick for the side that lost, beside
+  a verb for the side that won, passes it more often. Of 228481 seeded decided
+  cards, each passed the reader in 13740 before and passes in 25904 now. The rule
+  and order each card was decided by give none of those swaps to the verb's side,
+  and that is what `verb-mismatch` and `verb-no-result` hold a verb to; but nothing
+  holds the tick to them, so a card printing `DEFEATS` and ticking away over 4-6,
+  3-6, 6-0, 5-4, home on games 18-16 and scored so, was F6 on the tick and is now
+  reported by nothing.
+- The reader's TOTAL row cross-check says what it found. It holds the printed games
+  to the set rows' sums and the printed sets only to the most the rows allow, and
+  said both `match the 4 set rows`, so rows of 6-1 four times under a TOTAL of sets
+  2-0 read `printed games 24-4 and sets 2-0 match the 4 set rows` in
+  `tools/doctor.py`, while the build failed the card on `totals-mismatch`. It reads
+  `printed games 24-4 match the 4 set rows, and sets 2-0 are within the 4-0 they
+  allow` now, and so does the README's doctor sample. The check is unchanged:
+  `totals-mismatch` holds the printed sets to the club's own set rule.
+- `tools/doctor.py`'s verdict on a card a cross-check disagrees with no longer says
+  the build refuses to score it, or that something was misread. It said `build.py
+  reports this as an error rather than scoring it`, where the build fails the run and
+  still records the match as its set rows or its `Match Forfeited` box give it, as it
+  records any other: a card printing `LOSES TO` and the away tick over rows the home
+  side won three sets to one, read exactly, was told so and published played, home,
+  6.2 to 3.2. It now says the readings differ because something was misread or
+  misprinted, or the card counts its rows by a rule the cross-check does not; that
+  `build.py` reports this as an error, which fails the run; and that the match is
+  still recorded as its set rows give it under the club's rules, or as its
+  `Match Forfeited` box gives it if one is ticked. It does not say the match is
+  scored, which a card whose rows give no result, four sets of 0-0, is not. The
+  README's paragraph on the cross-checks says the same.
+- `tools/doctor.py` finds the court a card prints. It looked for a number after the
+  `Court:` label, where Match Centre's cards print the court after the venue on the
+  line above it, so it said `court not found` on 201 of 201 real cards while the
+  reader read a court from every one; and on a card whose comments say `Court 3 was
+  under water` it found court 3 beside a reader that found none, or found 12. It now
+  reports the court the reader reads, and under `--redact` keeps the number.
+- Each tick line in `tools/doctor.py`'s checkbox section names the box the reader
+  reads it from, with its row and side: `the away Match Winner box`, `row 4's home
+  Retired box`. It named the words to the right of the fill, so a tick in the away
+  side's Match Winner box, whose label is to its left, read `(no label to its right)`
+  (79 of 201 real cards), and a tick in a set's Forfeit or Retired box read a run of
+  its neighbours' labels, `Forfeit Retired Incomplete` (8 lines on 5 real cards). A
+  tick the reader takes for no box, a square no label names, or a box in no set row
+  is said to be one. Under `--redact` the tick lines are kept, as the rest of the
+  census is.
+- A dashboard left behind by a card that an earlier build filed under the wrong
+  night, and this run filed under its own, was given the reason a deleted season
+  gets, "no card under data belongs to it any more", though this run had just
+  read that card. Its reason under *left behind* now names the card, or counts
+  the cards and names up to three fixtures, says which competition they were
+  filed under and, where `--prune` would remove the stale copy, says so. While
+  `config.toml` still has the section an earlier first run wrote for that
+  night, the reason also says the section is all that keeps the night on the
+  front page, with no results, and to delete it. It says this only where this
+  run read a card of the same fixture and match id for every card the copy
+  holds, under the one competition that fields both teams. A copy only some of
+  whose cards were read keeps the reason it had, and so does one whose two
+  teams another night fields by the same names.
+- A rubber with no games on it and no box ticked reads `No score` in the match
+  card's Status column, where it read `Unfinished`, a word that says the set was
+  started. The report has called such a row a rubber nobody played since
+  `set-no-games`, and the page now says what the report says, on every match card
+  and in the season's table of every rubber and its CSV. A set that stopped with
+  games on it still reads `Unfinished`, and a row whose Forfeit, Retired or
+  Incomplete box is ticked still reads that box, games or none. The word is the
+  row's alone, so a night called off or given up is still said once, by the card's
+  own summary line, and not again on each of its rows.
+- A set nobody won reads its match card's word in a player's Every set played list,
+  `Unfinished`, `No score`, `Retired` or `Incomplete`, where a set with no box
+  ticked printed the lowercase `played` the export stores, beside a 5-3 and a 0-0
+  alike, and a retired or incomplete one its word in lowercase.
+- A set a Forfeit tick decided reads `Won, forfeit` or `Lost, forfeit` in a player's
+  Every set played list, where a bare `Won` or `Lost` read as a set won or lost on
+  court.
+- A player off a card's roster block is one warning, naming every set row they are
+  on (`R1 brindle-rosellas v brindle-kookaburras d1 and s2: Priya Halloran is
+  registered to brindle-magpies ...`), where it was one warning for each row that
+  said the same thing. The same goes for `unknown-player`, `fill-in`,
+  `fill-in-other-competition`, `player-no-team` and `off-roster`. A name on one row
+  reads as before. The demo's one fill-in, on two rows of one card, is one warning
+  where it was two.
+- `ratings-missing` names only a player on their side's roster block, since that is
+  the one place a rating is printed, and says what the block gave: `the roster
+  block gives no rating for jo-calder, who played, so jo-calder shows none for this
+  round.` Several names are one sentence, told of the block they are on, or of
+  both blocks where they are on both. A fill-in or a stranger on no line of it is
+  no longer told of a missing rating as well as being named as a fill-in or a
+  stranger. One of the demo's warnings was that, for its fill-in, so with the
+  change above the demo reports 4 warnings, down from 6.
+- The Fill-in note on a match card and on a player's page says `is on no team’s
+  roster` of a player no squad of the club registers, in the words the Team share
+  tile and the players-to-check list already used, where it said they `played
+  outside their registered roster`. A player another competition of the club
+  registers keeps that sentence, which is true of them, and each player in
+  `season.json` has a new `registered_elsewhere`, naming that competition, or
+  null. A player who plays for their own team on a card whose roster block leaves
+  them out is no longer a fill-in: no Fill-in note, and their games that night are
+  in their own Share, where the team's caption counted them as played by somebody
+  with no row in the table.
+- A round the season has not reached is no longer told as a round short of cards.
+  With every team's byes typed in from the association's sheet ahead of the
+  season, each round still to come was told it "accounts for none of" four teams,
+  missing scorecards, so find the cards: 6 notes over 3 divisions of one club's
+  season. A round with no card of its own and none of a later round is still to
+  come, by the rule `card-missing` asks, and its byes wait for its cards; a round
+  inside the span played keeps its note. As in 0.1.0, nothing is credited for a
+  round still to come, under `unplayed = "average"` too.
+- With the team list unconfirmed, a round short of cards names the teams it leaves
+  off, and talks of a rest only where it leaves off one. It offered to credit "a
+  team resting" on a round one card short, which leaves two teams off, where
+  confirming the list credits nobody: two teams off is missing scorecards, and is
+  now told as that. A final is no longer told as short of cards, list confirmed or
+  not, and the fullest round a round is measured against is never a final.
+- A round's gap that a card filed under another competition fits now says what was
+  read and where it went. A card of two of a competition's teams for one of its
+  rounds, dated another weekday or printing another division, counts where it is
+  filed, and the round it is missing from asked for the card, as did `card-missing`,
+  which also said to run `tools/doctor.py` on it. Both now name the competition the
+  card was filed under and why, and the round's note gives the file it was read
+  from. Where the card leaves one team of the round on no card, the note offers
+  that team's line in the byes table, after the team list is confirmed if it is
+  not, since a byes table alone closes the list to the teams it names. The card
+  still counts only where it is filed.
+- With the team list confirmed, a declared round that has cards and leaves two or
+  more teams on no fixture, card or rest now names them and asks for their cards or
+  the fixtures it leaves out. A round typed in as its cards show it lists no fixture
+  of a card that never came, and was told nothing but the ladder's count of matches
+  played.
+- A rubber that stopped with no box ticked on its row, `set-unfinished`,
+  `set-tied` or `set-no-games`, was a warning of its own, so a club whose play
+  stops at a fixed time whatever the score had one most nights. Each of the three
+  is now one warning for the competition, listing every such rubber, with its
+  score where it has games, in the order the matches were played and naming the
+  cards, as in `3 rubbers stopped short of a finished set under first-to-6 (first
+  to 6) and are not marked forfeit, retired or incomplete, so nobody is credited
+  them: R1 ... d2 4-3, ...`. A competition with only one reads as before. They are
+  still warnings, as a misread row reads the same way, and a match they leave
+  short of a result is still its own `no-result`.
+- The note a first run writes over `[team_names]` in `config.toml` names the two
+  guesses most worth checking. It said a line behind a `#` was the program's
+  best guess and to correct it if it read wrongly, and named no guess that
+  might. Two are read wrongly by design, because no rule tells them apart from
+  names read right: an acronym of four letters or more is read as a word, so
+  `RIVERSIDE ABCD` is offered as `Riverside Abcd`, and a letter A after a word
+  that names one can be read as the word "a", so `RIVERSIDE VITAMIN A ROCKETS`
+  is offered as `Riverside Vitamin a Rockets`. Offered beside names that are
+  right, both were uncommented with them, as written, by a club reviewing its
+  file. The note now names the two, with an example of each, and so do
+  `config.example.toml` and the README, which also says that the same cut keeps
+  a shouted word of three letters, such as `OLD`, in capitals. How a shouted
+  name is put in title case has not changed.
+- The comment on the team name rule's abbreviation check named a four-letter
+  acronym, beside `RTC`, as a word it keeps, where the check keeps three letters
+  or fewer and title-cases four. It now names `RTC` and `TC`.
+- A player's Matches tile says how many of their matches were for their own team.
+  It gave every night the player was on court, a night lent to another side
+  included, over the nights their own team played. In the demo Priya Halloran, who
+  played three of the Brindle Magpies' four nights and one for the Brindle Rosellas,
+  read `Matches 4` over `of 4 the team has played`, and on a season of five rounds a
+  player lent to another side on their own side's bye read `5` over `of 4`. A name
+  on no team's roster read its own count over itself, `1` over `of 1 the team has
+  played`. `season.json` now gives each player a `team_matches`, how many of their
+  team's nights they played, and Priya's tile reads `4` over `3 of 4 the team has
+  played, 1 for another side`. A player who played only for their own team reads
+  `of 4 the team has played` as before, and a name on no roster reads `on no team’s
+  roster`, as its Team share tile does. The Played column under Players to check
+  takes the same words: `1 of 4, 1 for another side`. `available`, the nights the
+  player's team played, is `null` for a name on no roster where it was the name's
+  own count, and `team_matches` is `null` beside it. Both are part of format `4`: a
+  page reading a document built before this release prints no line under the
+  figure. The first build after upgrading rewrites each competition's `app.js`,
+  `season.json` and `season-data.js`, and the next build writes nothing.
+- The overview and the Players view count as registered only the players a roster
+  block registers. They counted every row of the players table, which has one for
+  every name a counted set row prints, so on a season whose roster blocks register
+  12 and whose set rows name one more, the overview read `13 registered players` and
+  `Players used 10 of 13`, and the Players view `13 registered players.` They read
+  `12 registered players · 1 on no team’s roster`, `9 of 12` over `3 yet to play · 1
+  more on no team’s roster`, and `12 registered players and 1 on no team’s roster.`,
+  and the view's subtitle says it lists everyone on no team's roster who played. A
+  competition whose every name is on a roster reads as it did.
+- A team's "Points earned by round" no longer says a round nobody played had
+  nothing on its card. A night called off part way keeps the games played before
+  the rain, and the line read "R5 was not played, so there is nothing on its card
+  to plot." beside a Values table printing 12–5 for it. It now says what the match
+  card itself says, "so nothing on its card is counted", true of a card part
+  played and of a blank one alike, and then what the round was worth, as before.
+- The Matches page heads a round whose every card was called off, or left blank,
+  **not played** in a grey pill, where it said **played** in green over cards that
+  each said they counted for nothing. A round like that with a card still missing
+  from a typed-in draw says **card missing** in amber instead, since the missing
+  card may be the night somebody played. A final of either kind is no longer
+  named under "Finals played". The round still counts among the rounds played, as
+  the association's sheet counts it, and `season.json`'s rounds carry a new
+  `cards_played` count; a `season.json` built before it reads as it did.
+- The overview's *Tightest match* says when the night it names was level on games
+  and won on sets. Under a scheme decided on games and then sets, such a night's
+  games margin is 0, and the tile read `0 games` over the two sides and the round,
+  with nothing saying that one of them won it. Its foot now ends `level on games,
+  decided on sets`, the words the night's own line in the Matches view uses, now
+  written once and asked by both; a match decided on games reads as before.
+- A chart with nothing to draw says so, where it drew its floor. The head-to-head
+  key read `0 games` to `1 games` under a grid with no game in it, every cell a
+  dot or a walkover's 0–0, the 1 being the floor the colours are divided by and
+  not a game; the key now tops out at the grid's own largest figure and is left
+  out where that is 0. *Games for and against*, *Strength by set slot* and a
+  player's *Singles and doubles* drew a bar of 0 for every team, slot or
+  discipline on an axis reading 1, 0, 1 when none had a game to show: after a
+  round washed out, a walkover or a grand final alone, and for a rostered player
+  who never played. Each now shows its empty text, worded for what it counts: `No
+  regular-season games counted yet.`, `No regular-season set played yet.` and
+  `No games won or lost yet.` *Points earned by round* and *Games differential by
+  opponent* still draw a 0, which on those charts can be a result.
+- A count of one game reads `1 game`. The *Biggest margin* tile, a head-to-head
+  cell's hover, the spoken labels of the bars in *Games for and against*,
+  *Strength by set slot* and *Singles and doubles*, the player page's *Team share*
+  tile (`0.5 of 1 team games won`) and both of the team page's Share caption
+  sentences printed `1 games`, the first of them `1 of the 12 games the team won
+  belong to no row above`. Each now words its noun, and that verb, for its count,
+  as the *Tightest match* tile already did.
+- A ladder with nothing counted has not started, and places nobody. With round 1
+  washed out, or a final the only card, no regular-season match had been counted,
+  and the report still called the ladder `in progress: teams have played unequal
+  numbers of matches`. The teams were placed 1 to 4 by name, the overview's top
+  crowned the first of them on `0.0 points from 0 matches` (with a final alone, the
+  final's loser), the team pages charted round 1 at those places, and the build
+  after round 2 listed the moves out of that alphabetical order, `Riverside Rockets
+  4th -> 1st`. `season.json` now says `meta.ladder_state`, one of `empty`,
+  `in-progress` and `complete` by one rule, and an empty ladder places nobody,
+  charts no place, names no leader and moves nobody. The report says `ladder  not
+  started: no regular-season match has been counted yet`, and the overview says
+  the teams are listed by name. A team with nothing counted beside teams with some
+  is still placed last, and `meta.ladder_complete` is kept, as the state
+  `complete`.
+- The front page and the overview name the same leader, or nobody. With a match
+  still to come, the front page's card named no leader and the overview's top
+  crowned the top row, a team on 2 matches above teams on 3: `6.30 | Riverside
+  Rockets · 12.6 points from 2 matches`. `season.json`'s new `meta.leader` is the
+  top of a complete ladder and nobody else, with the points average it leads on,
+  and both pages read it; until the counts are level the overview says `No leader
+  while teams have played unequal numbers of matches`. A division with an odd
+  number of teams has a bye every round, so unless its rules credit the bye it is
+  led only after the rounds where the byes come out even. The README says so.
+- A season's progress is said as a count against its length, `3 of 10 rounds
+  played`, where it read `Round 3 of 10`: with cards for rounds 2, 3 and 5 that is
+  a round's label, and not the one the latest card is from. The front page's card
+  says so, and so does the overview's progress box, in its label and its meter's
+  spoken label alike. The bar, the percentage and the report's `3 of 10 played` are
+  unchanged.
+- The front page counts a competition "with results" once a night has been played
+  in it, finals and forfeits in and washouts out. A competition whose every card was
+  washed out has a document, and was counted for it: a washed-out division beside a
+  played one read `2 of 2 competitions with results`. It now reads `1 of 2`, from
+  `season.json`'s new `meta.matches_played`, the count the overview's *Matches
+  played* makes. The washed-out competition's card is still linked, and says no
+  regular-season match has been counted yet.
+- The ladder's state is said in the terms it was decided in. F10 compares the
+  matches each team has counted, which under `unplayed = "average"` include the
+  byes and washouts credited the team's own average, and each sentence giving its
+  answer said played. Three teams with a bye a round credited read `ladder
+  complete: every team has played the same number` over a `P` column of 2, 3 and
+  3; four teams with a washout beside a card not yet in read `in progress: teams
+  have played unequal numbers of matches` over a `P` of 1 for every team, in the
+  report, in F10's warning, on the front page, in the ladder's note and at the top
+  of the overview. Where every team's count is its `P` the words are as they were;
+  where a round has been credited they name the count: `every team has 4 matches
+  counted, byes and washouts credited their average`, and `teams have unequal
+  numbers of matches counted, byes and washouts included`. One function words it
+  for all five, and `season.json` carries it as `meta.ladder_detail`, a key the
+  page reads only where it is there. The document format is still `4`.
+- The run report's ladder prints what each average divides by. With a round
+  credited, `pts` divided by `P` is not `avg`, and the page's *Counted* column
+  says why where the report said nothing: the Spinners top on `18.0` points and
+  `6.00` from a `P` of 1. The table prints `cnt` between `pts` and `avg` wherever
+  some team's count is above its `P`, as the page shows its column, and is 78
+  columns wide at the longest team name it prints, the report's width.
+- Crediting a week off can change the ladder's order, and the README,
+  `config.example.toml`, the `config.toml` a first run writes and the 0.1.0 entry
+  said it never could. `simple`, `sets-first` and `rubbers` rank on points first,
+  and the credit is in the points: three teams with the Spinners resting twice
+  read Rockets, Spinners, Aces under `zero` and Spinners, Rockets, Aces under
+  `average`, in `simple` and `sets-first` alike; in `rubbers` the same nights
+  bring the Spinners level on points, and wins keep the Rockets first.
+  `games-bonus` ranks on the average, which the credit cannot move, and there it
+  moves only teams level on average. Each now says so, and the FAQ for an order
+  unlike the association's names `unplayed` beside `scoring` and `sets`. And
+  `config.example.toml`'s `average` option said the credited round counts as a
+  match played, which `P`, the matches played, has never counted; it now says the
+  round counts in that average but not in `P`. No figure or order changes.
+- The overview's progress box says `6 matches played`, where it said `6 matches
+  scored` beside the data health line's `7 of 7 cards scored`: a washed-out card
+  is scored, in the report's sense and the chip's, and is no match played. The
+  chip keeps its word.
+- A season's name is offered as its pages show it, or not offered. Over cards that print
+  no season, the first run's file offered `# season = "2026 Season 2"`, a name no card,
+  date or folder gave, and the review list offered `season = "2026"` for the same
+  competition; over cards dated 2027 the file still offered `"2026 Season 2"` beside the
+  review list's `"2027"`, and deleting its `#` put `2026 Season 2` in the page's heading
+  as declared. In multi-season mode the `[seasons]` table offered
+  `# 2026-winter = "2026-winter"`, and adopted it renamed the season from the
+  `2026 Winter` its pages showed. The file, the review list and the `[seasons]` table now
+  ask one rule: the name the pages show, else the year or years the matches' dates give,
+  else nothing. Where there is nothing, the section says so and writes no `season =` line,
+  and the review list says to add one with the name typed in double quotes. It had offered
+  `season = ""`, which added as printed declared nothing.
+- Each message about a season's name says where the name shown came from. In multi-season
+  mode, a season no card names shows its folder's name made readable, while the review
+  list said `scorecards do not reliably print it, so the dashboard leaves it out`, the
+  file's comment said the same, and the page flagged it
+  `No season label was declared, so this one was worked out from the cards`. All three now
+  say what the name shown was made from: the folder's name, or, where the cards sit in no
+  season folder, the year on them, which multi-season mode names the season by. The page
+  says to name the season under `[seasons]` or in the competition's section. A
+  competition that shows no name at all is no longer counted among the values we worked
+  out: `season.json` gives its season the provenance `empty`, and the page lists nothing
+  for it.
+- An absence is not a value we worked out. A division whose cards name nobody, such as one
+  whose only card is a washout, had `players` and `captains` listed on the page as values
+  worked out, with advice to correct names nobody had printed, and a division whose
+  rosters mark no captain listed `captains` the same way. `season.json` now gives each
+  such aspect the provenance `empty`, and the page lists neither.
+- A captain the club declared reads as declared wherever the captain is printed. The
+  captains' provenance was merged over the players record of each team's captain, so a
+  declared captain on no counted card was left out of it: a division whose captains were
+  all declared that way read captains `derived`, and the team page flagged the captain
+  `The captain was worked out from a roster mark rather than declared`, telling the club
+  to declare what it had. Each team's captain is now read as declared where the club named
+  one and as the card's otherwise. The page's captains advice, which it shows only where
+  some captains were declared and the rest read from the `(C)` their cards print, now
+  says that, rather than calling the `(C)` a guess.
+- The first run offers no number for the season's length. Over cards for rounds 1 to 7, it
+  wrote `# rounds_total = 7` under `Remove the # to use it`, and the review list said
+  `delete the # to adopt it`; a club that did as it was told declared the season over at
+  round 7, the page read `Round 7 of 7` over `100% of the declared rounds`, and round 8's
+  cards stopped the next run on F3. The line is now `# rounds_total =` with nothing after
+  the `=`, under a comment saying to type there the number of rounds your association's
+  draw gives the season, and the review list gives it a status of its own saying the same.
+  Its offer to have the file written for you counts the line among those that land
+  commented out, and says one with nothing after the `=` needs its value typed there too.
+  Deleted alone, the `#` leaves a line the next run refuses as not valid TOML, naming the
+  line, rather than a length nobody typed. The rounds played are still named, as a count.
+- The date on a competition's card on the front page says what it is:
+  **4 teams · 6 cards · generated 10 Sep**. A bare date beside the count of cards
+  read as the night of the last card. It is the build that last changed what that
+  competition's dashboard holds, the date the dashboard's own header and footer
+  give, in the same word, and a rebuild with nothing new keeps it.
+- A card with nothing on it, every set row 0-0, `VS` or no verb, no tick and a
+  TOTAL row of noughts or none, is reported once, by its `no-result` warning.
+  0.1.0 also told a night called off before anybody was entered
+  `players-unrecorded`, and a night nobody entered a result for F6's warning
+  that nothing on it confirms its set rows and `totals-missing`, each saying
+  again in its own words that nothing was played. Those three stand down on such
+  a card, each asking it the same one question, and the `no-result` of a night
+  not called off now says its rows read 0-0 and, if the match was played, to
+  enter its result in Match Centre and export the card again. The match's notes
+  on the dashboard no longer say that a cross-check is missing either. A card
+  that ticks Match Disputed over such rows is still told `disputed`, and what
+  each empty rubber lacks, but no longer `verb-absent`. A card with games on it,
+  a walkover, and a card whose verb, tick or TOTAL row names a result over blank
+  rows keep every finding they had, and `tools/doctor.py` says which a card is.
+- A walkover is scored as the forfeit it is. Match Centre exports a match one side
+  gave up whole with `Match Cancelled` ticked, the side that came ticked `Match
+  Winner`, and a TOTAL row of every rubber to that side as a love set: 4-0 and 24-0
+  over four rubbers of `first-to-6`. 0.1.0 read every such card as a washout and
+  failed the run on it, `A match called off has no winner, so the card contradicts
+  itself`. A card printing exactly that, with no Match Forfeited box ticked and any
+  verb it prints naming the side that came, is now a forfeit by the side that did
+  not come, paid what a forfeit is worth (`forfeit_award`, below), its verb, tick
+  and TOTAL row held to the walkover rather than to its rows, and its `Unspecified
+  player` cells said to be a forfeit's. Rows of play its TOTAL row does not count, a
+  night given up part way, are said once, as the warning `walkover-rows-played`;
+  rows that, every set finished, give the absent side the match are
+  `forfeit-contradicted`, as against the box. A TOTAL row that is not that award,
+  or none, is a washout's, and so is `VS`, `DRAWS WITH` or a word this program does
+  not know beside the tick.
+- A card ticked `Match Cancelled` that also ticks a `Match Winner` box or prints a
+  winning verb, over the rows of a night the rain stopped, no longer fails the run.
+  Match Centre exports a washout that way, naming the side ahead when play stopped,
+  and the cancelled tick takes precedence: the match is the washout it says, no
+  result and no points, as before, and its one `no-result` finding is a warning,
+  as it was before 0.1.0, saying what the card also claims and that the Match
+  Cancelled tick decides. The README's advice to correct such a card in Match
+  Centre, which a club could not act on, is gone.
+- `players-unrecorded` on a match forfeited whole by its Match Forfeited box now
+  ends `this match was forfeited whole, so nobody played those rubbers`, as a
+  walkover's does. 0.1.0 said nothing more of a box forfeit's `Unspecified player`
+  cells, and told one ticking `Match Cancelled` too that it was called off, though
+  the match is scored as the forfeit.
+- A side that every rubber's `Forfeit` box gives up, over rows left 0-0, is no
+  longer asked for its roster, as a side the Match Forfeited box gives up is not.
+- `set-player-count` no longer tells a match forfeited whole that a rubber nobody
+  played is short of a name. The side that gave the match up, by the box or as a
+  walkover, naming one player on a pair's 0-0 row was told that the rubber is a
+  doubles set with 1 player(s) named; that row is now passed by, as
+  `set-no-games` and `set-players-missing` already pass it, and a forfeit given
+  up after a rubber is still held to the names on the rubbers it played. A
+  played card's row left 0-0 with no box ticked is still held to its names: the
+  card does not say nobody played it, and the players' figures count them.
+- A pair naming one player above Match Centre's `Unspecified player` is read as a
+  full side whose second place nobody filled. The reader's note `read 1 away
+  player name(s) from a row its own marker '1&2' says is doubles`, word for word
+  what a pair with its second cell left blank gets, is no longer among the
+  match's Parse notes, nor printed twice by `tools/doctor.py`; the blank cell is
+  still told. The match page follows the one name of a pair with `+ not
+  recorded`, the placeholder's or the blank cell's alike, where it showed the
+  name alone, as a full side reads, and so do the matches page's table of every
+  rubber and its CSV.
+- A played card's `Unspecified player` cells are reported once, by
+  `players-unrecorded`, and no longer also by `set-player-count` and
+  `set-players-missing` as names that failed to read; a pair printing it in one
+  cell and leaving the other blank is still told `set-players-missing`, for the
+  blank one. Its clause says, side by side, which rubbers have nobody to credit
+  and which pairs name one player, half their games credited to nobody, where it
+  said of every such rubber that nobody was credited. Where a rubber printing it
+  was left 0-0, the clause begins `those rubbers with games have` and not `those
+  rubbers have games`. Its detail names the side, `3 placeholder cell(s): away in
+  rubber(s) 1, 3, 4`.
+- A rubber ticked `Forfeit` against one side is scored as Match Centre's own TOTAL
+  row counts it: a love set to the other side, 6-0 under `first-to-6` and 4-0
+  under `fast4`, whatever games the row prints, and every rubber of a match
+  forfeited whole likewise to the side that came, rows with play on them included.
+  0.1.0 scored the games printed, so a card with three rubbers ticked against the
+  away side, all three of which it won on court, 2-6 6-2 1-6 3-6, was 12-20 to the
+  side that forfeited, failed the run on `totals-mismatch` and `verb-mismatch`
+  against its own TOTAL row of 4-0 and 24-2, and paid 3.2 and 6.0 under
+  `games-bonus`; it now builds clean, 24-2 and 6.4 and 2.2. Under
+  `forfeit_award = "as-played"` the games printed stand and the tick still gives
+  the set. A TOTAL row may total the rows as scored or as printed, and a verb or
+  tick may go by either. The ladder's Games column, `games-bonus` and the players'
+  games count the games scored; the match page says the games played beside them,
+  as `Forfeit, 2–6 on court`, and so does a player's list of sets; a rubber left
+  0-0 under a forfeit, which nobody played, is in no player's figures and is
+  counted in the team page's caption; and the overview's Games played counts the
+  games printed, its tiles leaving out a night not one rubber of which was played,
+  and its Sets completed a rubber nobody played. A washout's rows are scored so
+  too, as its TOTAL row counts them, though the night still counts for nothing.
+- A set one side's `Retired` box is ticked on is the other side's, its games
+  raised to win it where they were fewer: 5-1 with the away box ticked is 6-1 to
+  home, 4-2 with the home box 4-6 to away, and 0-0 with the away box 6-0. 0.1.0
+  gave every retired set to nobody, so a card printing Match Centre's 4-0 and 24-8
+  over a retirement at 5-1 failed the run on `totals-mismatch`, and a night whose
+  result needed every rubber had none. Both boxes ticked is nobody's set, at the
+  games printed, and the new warning `set-retired-both`; `Incomplete` is nobody's,
+  as before; under `as-played` the set is still the other side's, at the games
+  printed. The demo's retired-set card prints a verb and ticks a winner where the
+  retirement decides the night.
+- `set-forfeit-contradicted` is no longer said of a row ticking `Forfeit` against
+  the side it shows winning when the card's TOTAL row counts the row as Match
+  Centre does, a love set to the other side, since the card then agrees with
+  itself. Said, it now says what the row is scored: `scored 6-0 to` the side that
+  stayed `as forfeited`, or `credited to` it under `as-played`.
+- The first run offers no home court that no card gave. Its `courts` table wrote
+  `# "Bramble Finches" = 1` for the first team by name in every competition, from a rule
+  in the writer that no card prints a court, though every card prints the court it was
+  played on: deleting the `#` declared court 1 for a team whose home cards print court 5.
+  The table now offers the court the cards print (see Added), and keeps that sample line
+  only for a competition none of whose cards prints a court.
+- `--discover --force` over a config whose declared draw closes its team list wrote the
+  list it offered under `# The full list of teams in this competition, as read from the
+  cards.`, though the list left out a team the cards name, the one the run's F8 reports.
+  The comment now says the list is as the declared draw names it, and the list with that
+  team follows it behind a `#`.
+- The test that nothing published names a particular club or player reads each line as
+  a slug folds it, its case and accents set aside, and asks each term it is given as
+  written and as its slug, so a name written with an accent its listed spelling has not,
+  or written as a slug, is found; the terms it is given may be match ids. The examples of
+  the reader's comment on the identity line, of the parser and doctor tests that read
+  it, of the slug test and of this file's 0.1.0 entry on the identity line are a made-up
+  match id, `1000100`, and a made-up name, where 0.1.0 used ones from a real club's
+  cards.
+
+### Added
+
+- The data health detail on a dashboard can show its errors alone, its warnings
+  alone or both. Above the list, where it holds both kinds, three radio buttons
+  under **Show** read **Both**, the errors and the warnings, each counted in the
+  summary's words, so a card the build refused is counted apart there as the
+  summary counts it. A choice hides the other kind and changes no count. The page
+  opens on **Both** every time and keeps no choice from one visit to the next, and
+  an open list prints whole whatever was chosen.
+- `[rules] forfeit_award` (`full-games`, `fixed` or `as-played`) and
+  `forfeit_points`: what a match forfeited whole is worth, overridable under
+  `[competitions.<id>]` and written behind a `#` by the first run. The default is
+  `full-games` under every preset: a win with every rubber a love set to the side
+  that turned up, and 0 to the side that gave the match up, which is 6.4 and 0
+  under `games-bonus` over four rubbers of `first-to-6`, where 0.1.0 paid 4.0 and
+  2.0, as played. `fixed` pays `forfeit_points` and 0, and stops the run without
+  it; `forfeit_points` under another award is reported as not read; `as-played` is
+  0.1.0's pricing. The Match Forfeited box, every rubber 0-0 and ticked `Forfeit`
+  against one side, and a walkover are paid alike. Whenever a forfeit is not paid
+  as played, the run report's scoring line and the dashboard's rules banner say
+  what it is paid.
+- **Every player this season, on one page.** A single-season build that prints
+  players' names writes `careers.html` too, as *Players this season*, linked from
+  the front page after the last competition and from every player's page (*Season
+  across competitions →*). It lists everyone the cards name, by name and not as a
+  ranking, with a row for each competition they appeared in, the team whose
+  roster they are on there, and a total; every row opens that competition's page
+  for them. So a player entered in a Monday and a Tuesday division, or a fill-in,
+  has their season added up in one place. The report's `cards` section says
+  `careers      2 of 11 player(s) played in more than one competition`. The page
+  keeps its file name, so switching to multi-season mode keeps every link to it,
+  and switching back rewrites it rather than listing it under *left behind*. A
+  build that withholds names writes no page and no link, and its `careers` line
+  says why in single-season words: a withheld label belongs to one competition,
+  not to a person. Such a run over a site that printed names lists the page under
+  *left behind*, since it still prints every name, and exits 1 until `--prune`
+  removes it, as it does for a dashboard left with names. A one-file dashboard
+  has no link to it. A `careers.html` of your own in `site/` now stops a
+  single-season build that prints names, as it stops a multi-season one, and is
+  left as it is. A `[namesakes]` line naming teams of two competitions is no
+  longer called useless in single-season mode, because on this page it tells two
+  people apart.
+- `python3 build.py --discover` over an existing `config.toml` writes a proposal beside it,
+  `config.proposed.toml`, and leaves `config.toml` as it is. It had refused, exit 2, before
+  reading a card, and the one way to ask the cards what they would write was `--force`,
+  which writes the file fresh and drops a declared draw and every comment. The run now
+  builds the dashboard as a plain run does, with the same exit status, and the proposal is
+  the file `--discover --force` would write, under a header that says which run wrote it,
+  that nothing reads it, how to adopt it, and what adopting it whole loses. The review
+  section opens with what it offers that `config.toml` lacks: competitions it does not
+  declare, teams a declared list or draw lacks, captains (a blank one among them) and
+  home courts where it names none or another, and any other value it does not hold, each
+  with its lines; or it says the proposal offers nothing `config.toml` lacks. It writes
+  over a proposal of its own, and leaves one that holds what it would write already as it
+  is, date and all, as the site's pages are. It refuses, exit 2, a file of that name it did
+  not write, or cannot read, and says which. `.gitignore` ignores `*.proposed.toml`, since
+  a proposal holds every name `config.toml` does. `--config club.toml` gets
+  `club.proposed.toml`. `--check --discover` writes nothing, and `--discover --force`
+  writes over `config.toml` as before, with the proposal's body and so its offers.
+- The first run offers each team's home court from its cards. The `courts` table writes,
+  behind a `#`, the court each team's home cards print most, in the words the captains
+  are offered in, with a comment naming each court and on how many cards where they print
+  more than one. Two courts printed equally often are named and neither is offered, and a
+  team with no home card gets no line. A court the club declared is written back live,
+  with the court its home cards print below it behind a `#` where the two differ. The
+  dashboard shows a home court only once it is declared.
+
 ## [0.1.0] — 2026-10-01
 
 Initial release.
@@ -1561,7 +2151,7 @@ Initial release.
   `.rules-more p { max-width: none; }` is caught wherever in the sheet it is written, and
   a rule for a class that only starts the same is not mistaken for one that reaches them.
 - The identity line may put a colon after its words — `Division: C / Yellow Ball / Round:
-  1 / #3665611`, with or without a space either side — and may print the round as `Rd 1`
+  1 / #1000100`, with or without a space either side — and may print the round as `Rd 1`
   or `Rnd 1`, the grade after its letter, `C Grade`, and any of them in capitals. Each of
   those was refused, as a page that "names both a division and a round" nowhere;
   `Division : C / Round : 1` was scored under a competition with no division and no round

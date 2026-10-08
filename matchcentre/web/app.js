@@ -15,8 +15,8 @@
  *    predecessor's progress meter read 100% at round three of ten, because a null
  *    round total was treated as "as many rounds as have been played". Here,
  *    meta.rounds_total === null means the meter and every percentage derived from
- *    it are not drawn at all (F3), meta.ladder_complete === false labels the
- *    ladder a snapshot rather than a standing (F10), and meta.provenance marks
+ *    it are not drawn at all (F3), meta.ladder_state labels the ladder a snapshot
+ *    or not started rather than a standing (F10), and meta.provenance marks
  *    every derived identity with a visible flag and a one-line instruction for
  *    correcting it (F7).
  * 2. A scorecard that was seen and not scored disappearing. validation.rejected
@@ -51,7 +51,10 @@
  * and rounds carry the key this page finds a card by, 4 the first whose rounds say
  * whether the build read their label as a number. A key this page of format 4 reads
  * and an older build of it did not write, meta.regular_fixtures, it prints as
- * unknown, a dash through num(), rather than bumping the format a second time. */
+ * unknown, a dash through num(), rather than bumping the format a second time, and
+ * so players[].team_matches, by printing no line under a player's Matches figure;
+ * and rounds[].cards_played it reads as the older document's rounds were read, a
+ * round with a card played (noCardPlayed). */
 var SEASON_FORMAT = 4;
 
 /* How many categorical hues styles.css names. Read, not chosen, here: the series
@@ -812,6 +815,9 @@ function setsOfPlayer(slug) {
   (S.matches || []).slice().sort(byRound).forEach(function (m) {
     if (!countsAsPlayed(m) || m.not_credited) return;
     (m.sets || []).forEach(function (st) {
+      // A rubber nobody played pays its players nothing, by the exporter's one rule
+      // (4.289, 4.421), so it is no set of theirs either.
+      if (st.nobody_played) return;
       var side = null;
       if ((st.home_players || []).indexOf(slug) >= 0) side = 'home';
       else if ((st.away_players || []).indexOf(slug) >= 0) side = 'away';
@@ -838,8 +844,9 @@ function setsOfPlayer(slug) {
 
 /* F7. meta.provenance says where each kind of identity came from: "declared" (a
  * human wrote it in config.toml), "card" (printed on a scorecard), "derived"
- * (this program worked it out) or "mixed". The first two are evidence and are
- * shown as fact. The other two get a visible marker and, beside it, the one line
+ * (this program worked it out) or "mixed", and "empty" where it names nothing,
+ * which nothing is shown for. The first two are evidence and are shown as fact.
+ * "derived" and "mixed" get a visible marker and, beside it, the one line
  * that tells the reader how to replace a guess with a declaration — because a
  * derived name is neither a fact nor an error, it is an invitation.
  *
@@ -850,10 +857,12 @@ var PROVENANCE_ADVICE = {
     'spelling in [team_names] in config.toml.',
   players: 'Player names came from the spelling printed on a card, or were ' +
     'title-cased from it. Correct any in [player_names] in config.toml.',
-  captains: 'The captain was worked out from a roster mark rather than declared. ' +
-    'Set captains under [competitions."{id}"] in config.toml.',
-  season: 'No season label was declared, so this one was worked out from the ' +
-    'cards. Set season under [competitions."{id}"] in config.toml.',
+  captains: 'Some captains here were declared and the rest were read from the ' +
+    '(C) their cards print. Set captains under [competitions."{id}"] in ' +
+    'config.toml to declare every one.',
+  season: 'No card printed this season\'s name and nobody declared one, so this ' +
+    'is its folder\'s name made readable. Name the season under [seasons] in ' +
+    'config.toml, or set season under [competitions."{id}"].',
   rounds_total: 'Nobody has declared how many rounds this season runs, so no ' +
     'percentage and no progress bar are shown. Set rounds_total under ' +
     '[competitions."{id}"] in config.toml.',
@@ -863,6 +872,14 @@ var PROVENANCE_ADVICE = {
   format: 'The match format was worked out rather than declared. Set format ' +
     'under [competitions."{id}"] in config.toml if it is wrong.'
 };
+
+/* The season's sentence where its name is the year on cards that sit in no
+ * season folder, which multi-season mode keys them by: meta.season_label_from
+ * says so, "date" there and "folder" for the sentence above. */
+var SEASON_FROM_DATE_ADVICE = 'No card printed this season\'s name and nobody ' +
+  'declared one, so this is the year on its cards, which sit in no season ' +
+  'folder. Name the season under [seasons] in config.toml, or set season under ' +
+  '[competitions."{id}"].';
 
 /* The order the derived-values list reads in: identity first, because a wrong
  * name is what a club notices, then the two absences that change arithmetic. */
@@ -883,6 +900,9 @@ function isDerived(aspect) {
 
 function provenanceAdvice(aspect) {
   var text = PROVENANCE_ADVICE[aspect] || '';
+  if (aspect === 'season' && meta().season_label_from === 'date') {
+    text = SEASON_FROM_DATE_ADVICE;
+  }
   return text.replace('{id}', meta().competition || '');
 }
 
@@ -1462,6 +1482,11 @@ function scrollRegionName(wrap) {
  * Both label the value at the tip, outside the bar when it fits there. */
 function hbarCard(opts) {
   var rows = opts.rows || [];
+  // A chart over a fixed list -- every team, every slot, both disciplines -- has a
+  // row for each whether or not anything was played, so rows that are every one 0
+  // are no rows, and its own empty text shows instead of an axis of nothing. Asked
+  // for, because in a chart of differentials a 0 is a result.
+  if (opts.zeroIsEmpty && rows.every(function (r) { return !r.value && !r.neg; })) rows = [];
   var mode = opts.mode || 'single';
 
   var tableRows = rows.map(function (r) { return opts.tableRow(r); });
@@ -1844,7 +1869,9 @@ function ladderLineCard(opts) {
  * never carries the value alone. */
 function h2hGridCard() {
   var teams = IDX.teamsOrdered;
-  var maxGames = 1;
+  // The grid's own largest figure, counted from 0: the key tops out at it, and only
+  // the fill keeps a floor under it, so a walkover's 0–0 cells never divide by 0.
+  var maxGames = 0;
   var records = [];
   /* One entry per pairing, not per cell: the grid draws each pairing twice, once
    * from each team's side, and a count of finals summed over the cells would be
@@ -1913,15 +1940,15 @@ function h2hGridCard() {
         return;
       }
       w += rec.won; l += rec.lost; d += rec.drawn;
-      var frac = rec.gamesFor / maxGames;
+      var frac = rec.gamesFor / Math.max(1, maxGames);
       var step = Math.max(0, Math.min(PAL.seq.length - 1, Math.round(frac * (PAL.seq.length - 1))));
       var fill = PAL.seq[step];
       td.textContent = rec.gamesFor + '–' + rec.gamesAgainst;
       td.style.setProperty('background', fill);
       td.style.setProperty('color', inkOn(fill));
       td.style.setProperty('font-weight', '600');
-      var title = row.name + ' won ' + rec.gamesFor + ' games, ' +
-        col.name + ' won ' + rec.gamesAgainst;
+      var title = row.name + ' won ' + rec.gamesFor + ' ' + plural(rec.gamesFor, 'game') +
+        ', ' + col.name + ' won ' + rec.gamesAgainst;
       if (rec.undecided) {
         // Of this pairing, not of the table: the games in this cell are the ones
         // the reader is asking about.
@@ -1942,7 +1969,7 @@ function h2hGridCard() {
   var scale = el('div', { class: 'scale-legend' }, [
     el('span', { text: '0 games' }),
     el('span', { class: 'scale-ramp', 'aria-hidden': 'true' }),
-    el('span', { text: maxGames + ' games' })
+    el('span', { text: maxGames + ' ' + plural(maxGames, 'game') })
   ]);
 
   var fig = el('figure', { class: 'card chart-card' });
@@ -1953,7 +1980,9 @@ function h2hGridCard() {
   cap.appendChild(el('p', { class: 'sub', text: 'Every meeting played, games for and against.' }));
   fig.appendChild(cap);
   fig.appendChild(wrap);
-  fig.appendChild(scale);
+  // A key for colours, so none where no cell has one: under a grid of dots it read
+  // "0 games" to "1 games", the second figure being the floor and not a game.
+  if (maxGames > 0) fig.appendChild(scale);
   return fig;
 }
 
@@ -2052,6 +2081,38 @@ function hook(id, className, host, before) {
 
 /* ============================================================ match render == */
 
+/* What a rubber's Status cell says, from the set alone: the one word for it on its
+ * match card, in the season's table of rubbers and its CSV, and in a player's Every
+ * set played list, so no two of them give one rubber two words.
+ *
+ * A box the card ticked is its own word, and a set played to a finish has none, which
+ * the cell shows as an em dash. A set that stopped with games on it is unfinished. A
+ * row with no games on it at all is 'no score' (4.453): validate's set-no-games calls
+ * it a rubber nobody played, not a contest that stopped, and 'unfinished' said that it
+ * had been started. Whatever became of the night, called off or given up, the card's
+ * summary already says, and the night stays out of this column (3.17), so the word is
+ * the row's and the same on every such row. */
+function rubberStatus(st) {
+  if (st.status && st.status !== 'played') return st.status;
+  if (st.completed) return '';
+  return st.home_games || st.away_games ? 'unfinished' : 'no score';
+}
+
+/* What a rubber printed, where it is scored otherwise: a rubber ticked Forfeit
+ * against one side is scored a love set to the other, and a set one side retired
+ * from the other's at the games to win it (4.421, 4.422), so the games played are
+ * said beside it, `2–6 on court`, from *side*'s end, home's where none is given. A
+ * rubber nobody played printed no games anybody played, and says so. Empty where
+ * the row is scored as it printed. Read off the export, never worked out here. */
+function onCourt(st, side) {
+  if (st.nobody_played) return 'not played';
+  var home = st.printed_home_games, away = st.printed_away_games;
+  if (home === undefined || home === null || away === undefined || away === null ||
+      (home === st.home_games && away === st.away_games)) return '';
+  return (side === 'away' ? num(away) + '–' + num(home)
+    : num(home) + '–' + num(away)) + ' on court';
+}
+
 function setRow(m, st) {
   function names(list) {
     var wrap = el('span');
@@ -2060,6 +2121,14 @@ function setRow(m, st) {
       wrap.appendChild(playerLink(slug));
     });
     if (!list || !list.length) wrap.appendChild(el('span', { class: 'muted', text: 'not recorded' }));
+    /* A side naming somebody, but fewer than its rubber's places: each place left
+     * over is marked too. Match Centre's 'Unspecified player' beside a name and a
+     * cell left blank both leave that share of the rubber credited to nobody, so
+     * the slot decides and not the cell. An empty side keeps its one mark above. */
+    for (var gap = (list || []).length; gap && gap < (st.doubles ? 2 : 1); gap++) {
+      wrap.appendChild(document.createTextNode(' + '));
+      wrap.appendChild(el('span', { class: 'muted', text: 'not recorded' }));
+    }
     return wrap;
   }
   /* Whether the night these rubbers were played on is in no figure anywhere: the
@@ -2078,15 +2147,16 @@ function setRow(m, st) {
   var win = unscored ? 'win win--unscored' : 'win';
   var homeCls = st.winner === 'home' ? win : 'lose';
   var awayCls = st.winner === 'away' ? win : 'lose';
-  var status = st.status && st.status !== 'played' ? st.status : (st.completed ? '' : 'unfinished');
+  var status = rubberStatus(st);
+  var words = [status, onCourt(st)].filter(Boolean).join(', ');
   return [
     { text: slotLabel(st.slot), cls: '' },
     names(st.home_players),
     { text: num(st.home_games), cls: homeCls },
     { text: num(st.away_games), cls: awayCls },
     names(st.away_players),
-    { text: status ? upperFirst(status) : '—',
-      cls: status ? '' : 'muted' }
+    { text: words ? upperFirst(words) : '—',
+      cls: words ? '' : 'muted' }
   ];
 }
 
@@ -2151,14 +2221,8 @@ function matchCard(m, opts) {
   // none of them were credited with it. Worded apart from "disputed" for that
   // reason: two meanings for one word, two chips apart, is a reader's problem.
   if (m.not_credited === 'names') bits.push('players not credited');
-  // Only when a basis actually broke the tie. `tied_on_games` alone is true of a
-  // genuine draw, where nothing broke it, and the exporter keeps it false on a
-  // match nobody played -- 0-0 is not a tie, it is a night that did not happen.
-  // A draw gets nothing extra here: it is level on every basis the ruleset has,
-  // which is what the result already says.
-  if (m.tied_on_games && m.decided_by === 'sets') {
-    bits.push('level on games, decided on sets');
-  }
+  var tiebreak = tiebreakWords(m);
+  if (tiebreak) bits.push(tiebreak);
   if ((m.warnings || []).length) bits.push((m.warnings || []).length + ' note' +
     ((m.warnings || []).length === 1 ? '' : 's'));
   summary.appendChild(el('span', { class: 'meta', text: bits.join(' · ') }));
@@ -2243,9 +2307,16 @@ function matchCard(m, opts) {
       'Everybody gets the night back when the card that is wrong leaves the ' +
       'data folder.'));
   }
+  // A player no squad of the club registers has no registered roster to be
+  // outside, and is told what the Team share tile and the players-to-check list
+  // say of them. One on another night's squad, registered_elsewhere, has one, and
+  // keeps the sentence, as the report's finding about them says (4.443).
   (m.fill_ins || []).forEach(function (slug) {
+    var who = IDX.playerBySlug[slug];
     body.appendChild(note('warning', 'Fill-in', playerName(slug) +
-      ' played outside their registered roster.'));
+      (who && (who.team || who.registered_elsewhere)
+        ? ' played outside their registered roster.'
+        : ' is on no team’s roster.')));
   });
   (m.warnings || []).forEach(function (w) {
     body.appendChild(note('warning', 'Parse note', typeof w === 'string' ? w : (w.message || String(w))));
@@ -2307,6 +2378,20 @@ function uncountedWords(m) {
   if (m.not_totalled === 'duplicate') why.push('copy of another card');
   if (m.not_totalled === 'names') why.push('reading not used');
   return why.length ? why.join(', ') + ' — counts for nothing' : '';
+}
+
+/* What broke a tie on games, in words, or '' where nothing needs saying. Only when a
+ * basis actually broke the tie. `tied_on_games` alone is true of a genuine draw,
+ * where nothing broke it, and the exporter keeps it false on a match nobody played
+ * -- 0-0 is not a tie, it is a night that did not happen. A draw gets nothing extra
+ * here: it is level on every basis the ruleset has, which is what the result already
+ * says. Said in one place because the match card and the overview's Tightest match
+ * tile both say it, and two copies of the test can disagree about one night. */
+function tiebreakWords(m) {
+  if (m.tied_on_games && m.decided_by === 'sets') {
+    return 'level on games, decided on sets';
+  }
+  return '';
 }
 
 /* The id Match Centre printed on the scorecard, in words. A card that printed none
@@ -2376,6 +2461,22 @@ function scheduledRow(fx) {
 
 /* ============================================================== view: home == */
 
+/* The rows of S.players a roster block registers, and how many more there are.
+ *
+ * stats.player_stats writes a row for every registered player and one for every
+ * other name a counted set row prints, and gives a team to the first kind alone.
+ * Registered is what the cards, Competition.player_index and validate's
+ * unknown-player warning mean by it, printed in a roster block, so a row with no
+ * team is counted apart, in the words the Team share tile and the players-to-check
+ * list give it, and only where there is one (4.450). Not the rows with
+ * fill_in_appearances, which a registered player lent to another side has too; not
+ * S.teams[].players, a second list beside the rows the counts are of. */
+function registeredPlayers() {
+  var rows = S.players || [];
+  var registered = rows.filter(function (p) { return !!p.team; });
+  return { rows: registered, unrostered: rows.length - registered.length };
+}
+
 function renderOverview(main) {
   var m = meta();
   var ladder = IDX.ladder;
@@ -2394,19 +2495,29 @@ function renderOverview(main) {
   var played = (S.matches || []).filter(function (x) {
     return countsAsPlayed(x) && !x.not_totalled;
   });
+  // A night not one rubber of which was played, a walkover over blank rows, happened
+  // and is a match played; it has no tennis to count, so the sets, games and margins
+  // leave it out, by the exporter's `no_rubber_played` (4.421), and Sets completed
+  // leaves out a rubber nobody played on a night that had play, by `nobody_played`.
+  // Games played are the games printed, the games on court; the margins are the
+  // games scored.
+  var rubbers = played.filter(function (x) { return !x.no_rubber_played; });
   var scheduled = (S.fixtures || []).length;
   var drawDeclared = m.draw_source === 'declared';
 
   var setsPlayed = 0, gamesPlayed = 0, tightest = null, widest = null;
-  played.forEach(function (x) {
-    setsPlayed += (x.sets || []).filter(function (st) { return st.completed; }).length;
-    gamesPlayed += (x.home_games || 0) + (x.away_games || 0);
+  rubbers.forEach(function (x) {
+    setsPlayed += (x.sets || []).filter(function (st) {
+      return st.completed && !st.nobody_played;
+    }).length;
+    gamesPlayed += (x.printed_home_games || 0) + (x.printed_away_games || 0);
     if (x.result === 'home' || x.result === 'away') {
       if (!tightest || x.margin < tightest.margin) tightest = x;
       if (!widest || x.margin > widest.margin) widest = x;
     }
   });
-  var appeared = (S.players || []).filter(function (p) { return p.matches > 0; }).length;
+  var registered = registeredPlayers();
+  var appeared = registered.rows.filter(function (p) { return p.matches > 0; }).length;
 
   var head = el('div', { class: 'view-head' });
   head.appendChild(el('h1', { text: m.label || m.competition || 'Competition' }));
@@ -2414,7 +2525,8 @@ function renderOverview(main) {
     document.createTextNode(
       (m.cards_scored || 0) + ' ' + plural(m.cards_scored || 0, 'scorecard') + ' read · ' +
       ladder.length + ' ' + plural(ladder.length, 'team') + ' · ' +
-      (S.players || []).length + ' registered ' + plural((S.players || []).length, 'player'))
+      registered.rows.length + ' registered ' + plural(registered.rows.length, 'player') +
+      (registered.unrostered ? ' · ' + registered.unrostered + ' on no team’s roster' : ''))
   ]);
   head.appendChild(line);
   if (m.season_label) {
@@ -2427,17 +2539,18 @@ function renderOverview(main) {
   }
   main.appendChild(head);
 
-  // Hero: the one number the season leads with.
-  var leader = ladder[0];
+  // Hero: the one number the season leads with, for the team Python named the
+  // leader (meta.leader) and nobody else, as the front page does: the top row of a
+  // ladder in progress or not started is no leader (4.438).
+  var top = m.leader ? teamOf(m.leader.slug) : null;
   var hero = el('div', { class: 'card hero' });
   hero.appendChild(el('div', { class: 'hero-figure' }, [
     el('div', { class: 'label', text: 'Ladder leader — points average' }),
-    el('div', { class: 'value', text: leader && leader.points_average !== null &&
-      leader.points_average !== undefined ? num(leader.points_average, 2) : '—' }),
-    el('div', { class: 'foot', text: leader
-      ? leader.name + ' · ' + num(leader.points, 1) + ' points from ' +
-        leader.played + ' ' + plural(leader.played, 'match', 'matches')
-      : 'No results yet' })
+    el('div', { class: 'value', text: top ? num(m.leader.value, 2) : '—' }),
+    el('div', { class: 'foot', text: top
+      ? top.name + ' · ' + num(top.points, 1) + ' points from ' +
+        top.played + ' ' + plural(top.played, 'match', 'matches')
+      : noLeaderReason(m) })
   ]));
   hero.appendChild(seasonProgress(drawDeclared));
   main.appendChild(hero);
@@ -2448,17 +2561,24 @@ function renderOverview(main) {
       drawDeclared ? 'of ' + scheduled + ' in the draw' : 'read from scorecards'),
     tile('Sets completed', String(setsPlayed),
       slotKeys.length ? slotKeys.join(' · ') + ' each match' : 'no set slots recorded'),
-    tile('Games played', String(gamesPlayed), played.length
-      ? num(gamesPlayed / played.length, 1) + ' per match' : 'no matches yet'),
+    tile('Games played', String(gamesPlayed), rubbers.length
+      ? num(gamesPlayed / rubbers.length, 1) + ' per match'
+      : played.length ? 'no rubber played yet' : 'no matches yet'),
     tile('Tightest match', tightest ? num(tightest.margin) + ' ' +
       plural(tightest.margin, 'game') : '—',
-      tightest ? teamShort(tightest.home) + ' v ' + teamShort(tightest.away) +
-        ', ' + roundTitle(tightest.round).toLowerCase() : 'no decided matches'),
-    tile('Biggest margin', widest ? num(widest.margin) + ' games' : '—',
+      // A night level on games and won on sets has a margin of 0, and printed bare
+      // the tile read "0 games" over a match one side won. Its foot says what broke
+      // the tie, asked of the function the match card asks; a win on games adds none.
+      tightest ? dotted([teamShort(tightest.home) + ' v ' + teamShort(tightest.away) +
+        ', ' + roundTitle(tightest.round).toLowerCase(), tiebreakWords(tightest)])
+        : 'no decided matches'),
+    tile('Biggest margin', widest ? num(widest.margin) + ' ' +
+      plural(widest.margin, 'game') : '—',
       widest ? teamShort(widest.result === 'home' ? widest.home : widest.away) +
         ', ' + roundTitle(widest.round).toLowerCase() : 'no decided matches'),
-    tile('Players used', appeared + ' of ' + (S.players || []).length,
-      (S.players || []).length - appeared + ' yet to play')
+    tile('Players used', appeared + ' of ' + registered.rows.length,
+      registered.rows.length - appeared + ' yet to play' + (registered.unrostered
+        ? ' · ' + registered.unrostered + ' more on no team’s roster' : ''))
   ]));
 
   main.appendChild(sectionTitle('Ladder'));
@@ -2487,6 +2607,20 @@ function renderOverview(main) {
     });
   }
   main.appendChild(box);
+}
+
+/* Why the hero names nobody, by F10's state as Python gave it (meta.ladder_state).
+ * In progress, in Python's words for what it compared, meta.ladder_detail: matches
+ * played, or counted where a round was credited (4.458). A document built before
+ * the keys names no leader either, and says no more than that. */
+function noLeaderReason(m) {
+  if (m.ladder_state === 'in-progress' && m.ladder_detail) {
+    return 'No leader while ' + m.ladder_detail;
+  }
+  if (m.ladder_state === 'empty') {
+    return 'No regular-season match has been counted yet';
+  }
+  return 'No leader named';
 }
 
 /* Season progress, in the two shapes the evidence allows (F3).
@@ -2520,25 +2654,28 @@ function seasonProgress(drawDeclared) {
     box.appendChild(label);
     box.appendChild(el('div', { class: 'foot',
       text: num(regular.played) + ' ' + plural(regular.played, 'match', 'matches') +
-        ' scored. ' + noLengthReason() }));
+        ' played. ' + noLengthReason() }));
     if (finals) box.appendChild(finals);
     return box;
   }
 
   var percent = Math.max(0, Math.min(100, Math.round((playedRounds / total) * 100)));
+  // A count, said once for the label and the meter: "Round 3 of 10" read as round
+  // 3's label where the cards were rounds 2, 3 and 5 (4.439).
+  var count = playedRounds + ' of ' + total + ' ' + plural(total, 'round') + ' played';
   box.appendChild(el('div', { class: 'label' }, [
     el('span', { text: 'Season progress' }),
-    el('span', { text: 'Round ' + playedRounds + ' of ' + total })
+    el('span', { text: count })
   ]));
   box.appendChild(el('div', { class: 'meter', role: 'img',
-    'aria-label': playedRounds + ' of ' + total + ' rounds played' }, [
+    'aria-label': count }, [
     el('span', { style: { width: percent + '%' } })
   ]));
   box.appendChild(el('div', { class: 'foot',
     text: (drawDeclared
       ? num(regular.played) + ' of ' + num(regular.total) + ' fixtures played · '
       : num(regular.played) + ' ' + plural(regular.played, 'match', 'matches') +
-        ' scored · ') +
+        ' played · ') +
       percent + '% of the declared rounds' }));
   if (finals) box.appendChild(finals);
   return box;
@@ -2555,12 +2692,30 @@ function noLengthReason() {
   return 'How long this season runs has not been declared, so no percentage is shown.';
 }
 
+/* Whether a round has cards and not one of them counts as played, every one called
+ * off or left blank (4.452). Python counts the ones that do, by
+ * Match.counts_as_played, as rounds[].cards_played, so this keeps no copy of that
+ * rule (4.112). Of the cards that are in, and no more: a fixture whose card is
+ * missing may be the night somebody played, which is why the Matches heading asks
+ * card_missing as well before it calls the round not played. Strictly 0: a document
+ * of format 4 built before the key was written lacks it, and its rounds read as they
+ * did then, played wherever a card has the round, rather than every round with
+ * cards as not played. */
+function noCardPlayed(r) {
+  return !!r && !!r.played && r.cards_played === 0;
+}
+
 /* The finals with cards, by the flags season.json's rounds carry: is_finals as the
- * club or the round's own label declared it, played where a card has that round.
- * Named, never counted, and never a final the draw lists that nobody has played. */
+ * club or the round's own label declared it, played where a card has that round and,
+ * in a document that counts them (noCardPlayed), one of its cards counts as played.
+ * Named, never counted, and never a final the draw lists that nobody has played.
+ * A final with a card missing and the rest called off is left out too, as one with
+ * every card missing always was: this names the finals the cards say were played,
+ * and says nothing of the others. */
 function finalsPlayed() {
-  return (S.rounds || []).filter(function (r) { return r.is_finals && r.played; })
-    .map(function (r) { return roundTitle(r.number); });
+  return (S.rounds || []).filter(function (r) {
+    return r.is_finals && r.played && !noCardPlayed(r);
+  }).map(function (r) { return roundTitle(r.number); });
 }
 
 /* The progress box's line naming them, or null on a season with none. */
@@ -2588,9 +2743,12 @@ function ladderHeadToHeadNote() {
     'head-to-head grid on this page counts the finals as well.';
 }
 
-/* F10. The ladder always states its basis; when teams have played unequal numbers
- * of counted matches it also says so, because a table that looks settled and is
- * not is the failure this rule exists to stop. */
+/* F10. The ladder always states its basis; when teams have unequal numbers of
+ * counted matches it also says so, because a table that looks settled and is not
+ * is the failure this rule exists to stop. In Python's words, meta.ladder_detail,
+ * which say played where every team's count is its P and counted where a round was
+ * credited (4.458); a document written before the key is said to be in progress
+ * and no more. */
 function ladderNote() {
   var m = meta();
   var order = (rules().ladder_by || []).map(function (k) { return k.replace(/_/g, ' '); });
@@ -2599,10 +2757,18 @@ function ladderNote() {
   if (m.ladder_complete) {
     return el('p', { class: 'ladder-note', text: basis });
   }
+  // Every team on nothing: no unequal numbers, and nobody placed (4.428).
+  if (m.ladder_state === 'empty') {
+    return el('p', { class: 'ladder-note ladder-note--incomplete' }, [
+      el('span', { class: 'ico', 'aria-hidden': 'true', text: '!' }),
+      el('span', { text: ' No regular-season match has been counted yet, so there ' +
+        'is no ladder: the teams are listed by name.' })
+    ]);
+  }
   return el('p', { class: 'ladder-note ladder-note--incomplete' }, [
     el('span', { class: 'ico', 'aria-hidden': 'true', text: '!' }),
-    el('span', { text: ' In progress — teams have played unequal numbers of ' +
-      'matches, so this order is a snapshot and not a standing. ' + basis })
+    el('span', { text: ' In progress' + (m.ladder_detail ? ' — ' + m.ladder_detail : '') +
+      ', so this order is a snapshot and not a standing. ' + basis })
   ]);
 }
 
@@ -2687,7 +2853,10 @@ function pointsAverageChart(selectedSlug) {
           { name: 'Points', value: num(t.points, 1) },
           { name: 'Played', value: String(t.played) }
         ].concat(showCounted ? [{ name: 'Counted', value: String(t.counted) }] : [])
-          .concat([{ name: 'Ladder position', value: String(t.position) }])
+          // Null on a ladder not started, as the # column and the team page say it
+          // (4.428), though only a team with an average is drawn here.
+          .concat([{ name: 'Ladder position', value: t.position === null ||
+            t.position === undefined ? '—' : String(t.position) }])
       }
     };
   });
@@ -2723,7 +2892,8 @@ function gamesForAgainstChart(selectedSlug) {
       color: dim ? PAL.deemph : PAL.divPos,
       negColor: dim ? PAL.deemph : PAL.divNeg,
       dim: dim,
-      aria: t.name + ': ' + t.games_won + ' games won, ' + t.games_lost + ' games lost',
+      aria: t.name + ': ' + t.games_won + ' ' + plural(t.games_won, 'game') + ' won, ' +
+        t.games_lost + ' ' + plural(t.games_lost, 'game') + ' lost',
       tip: {
         title: t.name,
         rows: [
@@ -2742,11 +2912,13 @@ function gamesForAgainstChart(selectedSlug) {
     mode: 'diverging',
     axisLabel: 'Games',
     integer: true,
+    zeroIsEmpty: true,
     legend: legendBar([
       { name: 'Games won', color: PAL.divPos, kind: 'rect' },
       { name: 'Games lost', color: PAL.divNeg, kind: 'rect' }
     ]),
-    empty: 'No games recorded yet.',
+    // A team's figures are its regular season's: a grand final is not in them.
+    empty: 'No regular-season games counted yet.',
     tableHead: ['Team', 'Games won', 'Games lost', 'Differential', 'Sets won', 'Sets lost'],
     tableRow: function (r) {
       var t = IDX.teamBySlug[r.href.split('/').pop()];
@@ -2779,7 +2951,7 @@ function ladderHistoryChart(selectedSlug) {
     sub: 'One line per team, position 1 at the top.',
     xs: xs,
     series: series,
-    empty: 'Positions appear once a round has been played.',
+    empty: 'Positions appear once a regular-season match has been counted.',
     tableCaption: 'Ladder position after each round.',
     valueText: function (pt) {
       return 'P' + pt.y + (pt.avg === null || pt.avg === undefined ? '' : ' · ' + num(pt.avg, 2));
@@ -2798,8 +2970,8 @@ function slotStrengthChart(t) {
       value: rec.games_won, neg: rec.games_lost,
       valueText: num(rec.games_won), negText: num(rec.games_lost),
       color: PAL.divPos, negColor: PAL.divNeg,
-      aria: slot.label + ': ' + rec.games_won + ' games won, ' + rec.games_lost +
-        ' lost, record ' + rec.won + '–' + rec.lost,
+      aria: slot.label + ': ' + rec.games_won + ' ' + plural(rec.games_won, 'game') +
+        ' won, ' + rec.games_lost + ' lost, record ' + rec.won + '–' + rec.lost,
       tip: {
         title: slotTitle(slot.key),
         rows: [
@@ -2821,11 +2993,13 @@ function slotStrengthChart(t) {
     mode: 'diverging',
     axisLabel: 'Games',
     integer: true,
+    zeroIsEmpty: true,
     legend: legendBar([
       { name: 'Games won', color: PAL.divPos, kind: 'rect' },
       { name: 'Games lost', color: PAL.divNeg, kind: 'rect' }
     ]),
-    empty: 'No sets played yet.',
+    // The slots are counted over the regular season, as the team's other figures are.
+    empty: 'No regular-season set played yet.',
     tableHead: ['Slot', 'Sets won', 'Sets lost', 'Games won', 'Games lost'],
     tableRow: function (r) {
       var rec = (t.by_slot || {})[r.label] || {};
@@ -2913,13 +3087,16 @@ function pointsByRoundChart(t, matches) {
     // said "so it has no points to plot" first, and the demo season built under
     // `unplayed = "average"` answers that: the same team goes from 55.3 points over 13
     // counted rounds to 59.553846 over 14, so the round it never played earned it 4.25.
-    // The card is empty under either preset; only the clause knows what the round was
-    // worth, and it is the only thing here that says.
+    // What is the same under either preset is that nothing on the card is counted, the
+    // match card's own words for the night. The card is not always empty: this said
+    // "there is nothing on its card to plot" over the demo's own R5 washout, called off
+    // at 6-0 6-5 with 12-5 in the Values table beside it (4.451). Only the clause knows
+    // what the round was worth, and it is the only thing here that says.
     footer: unplayed.length ? el('p', { class: 'foot muted',
       style: { 'font-size': '12px', margin: '8px 0 0' },
       text: unplayed.map(function (m) { return roundTick(m.round); }).join(', ') +
-        (unplayed.length === 1 ? ' was ' : ' were ') + 'not played, so there is nothing ' +
-        (unplayed.length === 1 ? 'on its card ' : 'on their cards ') + 'to plot. ' +
+        (unplayed.length === 1 ? ' was ' : ' were ') + 'not played, so nothing ' +
+        (unplayed.length === 1 ? 'on its card ' : 'on their cards ') + 'is counted. ' +
         (unplayed.length === 1 ? 'The round itself is ' : 'Each round itself is ') +
         rules().unplayed_worth + '.' }) : null,
     tableHead: ['Round', 'Opponent', 'Result', 'Games', 'Points'],
@@ -3237,11 +3414,13 @@ function teamPlayersTable(t) {
   if (off > 0) {
     caption += ' The Share column falls ' + pct(gap.share_pct) +
       ' short of 100%: ' + shareNum(off) + ' of the ' +
-      shareNum(gap.team_games_won) + ' games the team won belong to no row above.';
+      shareNum(gap.team_games_won) + ' ' + plural(gap.team_games_won, 'game') +
+      ' the team won ' + plural(off, 'belongs', 'belong') + ' to no row above.';
   } else if (off < 0) {
     caption += ' The Share column runs ' + pct(-gap.share_pct) +
-      ' past 100%: the rows above are credited with ' + shareNum(-off) +
-      ' games more than the ' + shareNum(gap.team_games_won) + ' the team won.';
+      ' past 100%: the rows above are credited with ' + shareNum(-off) + ' ' +
+      plural(-off, 'game') + ' more than the ' + shareNum(gap.team_games_won) +
+      ' the team won.';
   }
   /* And then why, in the counts the same walk made while it was deciding what to
    * credit: a rubber with somebody in it this table has no row for, a rubber the card
@@ -3275,6 +3454,16 @@ function teamPlayersTable(t) {
       (crowded === 1 ? 'has' : 'have') + ' more names on the scorecard than places ' +
       'to play ' + (crowded === 1 ? 'it' : 'them') + ', so ' +
       (crowded === 1 ? 'its' : 'their') + ' games are credited more than once.';
+  }
+  /* A rubber won by a forfeit nobody played (4.421): its love set is the team's
+   * games and nobody took the court, so no row holds it. Left out of `found` below:
+   * it is nothing to correct, and the data health section does not list it. */
+  var nobody = gap.rubbers_nobody_played || 0;
+  if (nobody) {
+    caption += ' ' + nobody + ' ' + plural(nobody, 'rubber') + ' ' +
+      (nobody === 1 ? 'was' : 'were') + ' won by a forfeit with nobody on court, ' +
+      'so ' + (nobody === 1 ? 'its' : 'their') + ' games count for the team and ' +
+      'for nobody in it.';
   }
   /* Only where a rubber was found to point at. A night credited to nobody is listed
    * below as the pair of files it came from and not as a rubber, so on a season
@@ -3341,6 +3530,26 @@ function teamH2HTable(t) {
 
 /* ============================================================ view: player == */
 
+/* How many of a player's matches were for the team that registers them, for the
+ * Matches tile and the players-to-check Played cell alike (4.449).
+ *
+ * `matches` is every night the player was on court, a night lent to another side
+ * included; `available` is the nights their team played and `team_matches` how
+ * many of those they played, both Python's and both null for a player on no team's
+ * roster. Null here where there is nothing to be out of: a player on no roster, and
+ * a document built before team_matches, which cannot say which nights were the
+ * team's and is given no line rather than a guess. Not matches less
+ * fill_in_appearances, which moves whenever the rule for a fill-in does. */
+function matchesOutOf(p) {
+  if (!p.team || p.team_matches === null || p.team_matches === undefined) return null;
+  var lent = p.matches - p.team_matches;
+  return {
+    played: p.team_matches,
+    of: p.available,
+    lent: lent ? lent + ' for ' + plural(lent, 'another side', 'other sides') : ''
+  };
+}
+
 function renderPlayer(main, slug) {
   var p = IDX.playerBySlug[slug];
   if (!p) { renderMissing(main, 'No player with the id "' + slug + '".'); return; }
@@ -3366,7 +3575,8 @@ function renderPlayer(main, slug) {
   ];
   var career = careersHref(p.slug);
   if (career) head.push(el('p', { class: 'career-link' }, [
-    el('a', { href: career, text: 'Career across seasons →' })
+    el('a', { href: career, text: meta().seasons_mode === 'multi'
+      ? 'Career across seasons →' : 'Season across competitions →' })
   ]));
   main.appendChild(el('div', { class: 'view-head' }, head));
   if (meta().players) {
@@ -3382,8 +3592,11 @@ function renderPlayer(main, slug) {
   var streakWord = p.streak && p.streak.length
     ? p.streak.length + ' ' + (p.streak.type === 'W' ? 'won' : p.streak.type === 'L' ? 'lost' : 'drawn')
     : '—';
+  var outOf = matchesOutOf(p);
   main.appendChild(el('div', { class: 'grid tiles' }, [
-    tile('Matches', String(p.matches), 'of ' + p.available + ' the team has played'),
+    tile('Matches', String(p.matches), !p.team ? 'on no team’s roster' : outOf &&
+      (outOf.lent ? outOf.played + ' of ' + outOf.of + ' the team has played, ' +
+        outOf.lent : 'of ' + outOf.of + ' the team has played')),
     tile('Sets', p.sets_won + '–' + p.sets_lost, p.sets_played + ' played'),
     tile('Win rate', p.win_pct === null || p.win_pct === undefined ? '—' : pct(p.win_pct),
       'of completed sets'),
@@ -3396,7 +3609,8 @@ function renderPlayer(main, slug) {
     tile('Team share', p.contribution ? pct(p.contribution.share_pct) : '—',
       !p.team ? 'on no team’s roster'
         : p.contribution ? shareNum(p.contribution.games_won) + ' of ' +
-          num(p.contribution.team_games_won) + ' team games won' : '—')
+          num(p.contribution.team_games_won) + ' team ' +
+          plural(p.contribution.team_games_won, 'game') + ' won' : '—')
   ]));
 
   var charts = el('div', { class: 'grid charts', style: { 'margin-top': '12px' } });
@@ -3449,14 +3663,20 @@ function renderPlayer(main, slug) {
         if (i) vsNode.appendChild(document.createTextNode(' + '));
         vsNode.appendChild(playerLink(pl));
       });
+      var court = onCourt(s.set, s.side);
       return [
         roundTick(s.match.round),
         teamLinkBySlug(s.opponentTeam),
         slotLabel(s.set.slot),
         withNode,
         vsNode,
-        num(s.gamesFor) + '–' + num(s.gamesAgainst),
-        { text: s.decided ? (s.won ? 'Won' : 'Lost') : (s.set.status || 'unfinished'),
+        num(s.gamesFor) + '–' + num(s.gamesAgainst) + (court ? ' (' + court + ')' : ''),
+        /* The rubber's own word, as its match card prints it: beside the result
+         * where a box decided the set, so a forfeit reads 'Won, forfeit' and not
+         * as a set won on court (4.436), and in place of one where nobody won it
+         * (4.454), where the stored status read 'played' of a 5-3 and a 0-0. */
+        { text: s.decided ? [s.won ? 'Won' : 'Lost', rubberStatus(s.set)].filter(Boolean).join(', ')
+                          : upperFirst(rubberStatus(s.set)),
           cls: s.decided ? (s.won ? 'win' : 'lose') : 'muted' }
       ];
     });
@@ -3479,8 +3699,8 @@ function disciplineChart(p) {
       value: d.rec.games_won || 0, neg: d.rec.games_lost || 0,
       valueText: num(d.rec.games_won || 0), negText: num(d.rec.games_lost || 0),
       color: PAL.divPos, negColor: PAL.divNeg,
-      aria: d.label + ': ' + (d.rec.games_won || 0) + ' games won, ' +
-        (d.rec.games_lost || 0) + ' lost',
+      aria: d.label + ': ' + (d.rec.games_won || 0) + ' ' +
+        plural(d.rec.games_won || 0, 'game') + ' won, ' + (d.rec.games_lost || 0) + ' lost',
       tip: {
         title: d.label,
         rows: [
@@ -3500,11 +3720,15 @@ function disciplineChart(p) {
     mode: 'diverging',
     axisLabel: 'Games',
     integer: true,
+    zeroIsEmpty: true,
     legend: legendBar([
       { name: 'Games won', color: PAL.divPos, kind: 'rect' },
       { name: 'Games lost', color: PAL.divNeg, kind: 'rect' }
     ]),
-    empty: 'No sets played yet.',
+    // Games, not sets: a last rubber left at 0-0 when play stopped is a set played by
+    // the two named on it, with no game in it. And no "regular-season", as a player's
+    // figures count every match, finals and all.
+    empty: 'No games won or lost yet.',
     tableHead: ['Discipline', 'Sets played', 'Won', 'Lost', 'Games won', 'Games lost'],
     tableRow: function (r) {
       var d = defs[rows.indexOf(r)];
@@ -3587,11 +3811,15 @@ function slotAppearanceTable(p) {
   // distinct match keys the player appeared in off their own roster -- the same
   // keys it counts as match_ids -- so a player used in three rubbers of one
   // night is one appearance here, not three. The word said "set" until it was
-  // checked against what the field holds.
+  // checked against what the field holds. A player no squad of the club
+  // registers has no registered roster to be outside, and is told what the Team
+  // share tile says; one on another night's squad keeps the sentence (4.443).
   if (p.fill_in_appearances) {
-    out.appendChild(note('warning', 'Fill-in', p.name + ' has played ' +
-      p.fill_in_appearances + ' ' + plural(p.fill_in_appearances, 'match', 'matches') +
-      ' outside their registered roster.'));
+    out.appendChild(note('warning', 'Fill-in', !p.team && !p.registered_elsewhere
+      ? p.name + ' is on no team’s roster.'
+      : p.name + ' has played ' +
+        p.fill_in_appearances + ' ' + plural(p.fill_in_appearances, 'match', 'matches') +
+        ' outside their registered roster.'));
   }
   return out;
 }
@@ -3675,7 +3903,17 @@ function renderMatches(main) {
     // a round had not been played over rows for cards from that very round. The rows'
     // own answer settles the heading, so the two cannot disagree on one screen.
     var absent = fixtures.filter(function (f) { return f.card_missing; }).length;
-    var state = r.played ? 'played' : (absent ? 'no cards yet' : 'not played yet');
+    // And a round with cards may be one nobody played, every card called off or left
+    // blank, each saying below that it counts for nothing: headed "played" in green
+    // over them, it was the heading and its rows disagreeing again (4.452). The team
+    // pages' words for those nights, in the pill a round not played yet has. But only
+    // with every card in: one still missing may be the night somebody played, and
+    // "not played" over it was the missing card taken for an answer. So that round
+    // says what it is short of, in the colour of a card to chase, as a round short of
+    // every card does.
+    var nonePlayed = noCardPlayed(r);
+    var ifNone = absent ? plural(absent, 'card') + ' missing' : 'not played';
+    var state = r.played ? (nonePlayed ? ifNone : 'played') : (absent ? 'no cards yet' : 'not played yet');
     var head2 = el('div', { class: 'round-head' }, [
       // A finals round never contributes ladder points (F11), and it is the
       // round's own non-numeric label that says it is one.
@@ -3684,7 +3922,7 @@ function renderMatches(main) {
       // which is the reader's answer to "why is this round in the holidays?".
       el('span', { class: 'date',
         text: longDate(r.date) + (r.note ? ' (' + r.note + ')' : '') }),
-      el('span', { class: 'pill ' + (r.played ? 'good' : (absent ? 'warning' : '')) }, [
+      el('span', { class: 'pill ' + (r.played && !nonePlayed ? 'good' : (absent ? 'warning' : '')) }, [
         el('span', { class: 'dot', 'aria-hidden': 'true' }),
         el('span', { text: state })
       ])
@@ -3902,10 +4140,12 @@ function playerSortValue(p, key) {
 
 function renderPlayers(main) {
   setPageName('Players');
+  var registered = registeredPlayers();
   var head = el('div', { class: 'view-head' }, [
     el('h1', { text: 'Players' }),
-    el('p', { text: 'Every registered player, including those yet to play. ' +
-      'Select a column heading to sort.' })
+    el('p', { text: 'Every registered player, including those yet to play' +
+      (registered.unrostered ? ', and everyone on no team’s roster who played' : '') +
+      '. Select a column heading to sort.' })
   ]);
   var nameFlag = provenanceFlag('players');
   if (nameFlag) head.appendChild(el('p', { class: 'sub muted' }, [nameFlag]));
@@ -3976,8 +4216,10 @@ function renderPlayers(main) {
       };
     });
     host.appendChild(el('div', { class: 'table-wrap' }, [
-      table(head2, rows, { caption: (S.players || []).length + ' registered ' +
-        plural((S.players || []).length, 'player') + '. A dash means nothing recorded yet.',
+      table(head2, rows, { caption: registered.rows.length + ' registered ' +
+        plural(registered.rows.length, 'player') + (registered.unrostered ? ' and ' +
+          registered.unrostered + ' on no team’s roster' : '') +
+        '. A dash means nothing recorded yet.',
         csv: 'players' })
     ]));
   }
@@ -4039,13 +4281,15 @@ function playersToCheckCard(players) {
   var rows = flagged.map(function (p) {
     var rounds = roundsPlayedIn(p.slug);
     var played = p.matches || 0;
-    var available = p.available || 0;
+    var outOf = matchesOutOf(p);
     return {
       href: '#/player/' + p.slug,
       cells: [
         playerLink(p.slug),
         teamLinkBySlug(p.team),
-        available > played ? played + ' of ' + available : String(played),
+        !outOf ? String(played) : outOf.lent
+          ? outOf.played + ' of ' + outOf.of + ', ' + outOf.lent
+          : outOf.of > played ? played + ' of ' + outOf.of : String(played),
         num(p.sets_played),
         rounds.length ? rounds.join(', ') : { text: '—', cls: 'muted' },
         !p.team
@@ -4150,9 +4394,10 @@ function renderRulesBanner() {
   var pairs = [
     ['Scoring', r.scoring, r.scoring_detail],
     ['Sets', r.set_rule, r.set_rule_detail],
-    /* Spelled out because it is invisible in the ladder's order and plain in its
-     * points column: crediting every team its own average cannot move any team's
-     * average. A club comparing totals with its association has no other way to
+    /* Spelled out because it is plain in the ladder's points column and, under a
+     * preset ranked on points first, in its order too, while under games-bonus,
+     * ranked on the average it cannot move, it moves only teams level on average
+     * (4.460). A club comparing totals with its association has no other way to
      * see which convention produced the number in front of it. */
     ['Unplayed', r.unplayed, r.unplayed_detail],
     /* Empty for almost every club, and the loop below drops a pair with nothing in
@@ -4225,6 +4470,38 @@ function refusedWords(n, card, unscored) {
 function inWords(items) {
   if (items.length < 2) return items.join('');
   return items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
+}
+
+/* The detail's list shown whole, or one kind of it (4.429): three native radios
+ * under a one-word legend, so the keyboard and a screen reader get what a radio
+ * group gives them, arrow keys included. Both is checked every time the page
+ * opens. renderHealth runs once a load, so a choice holds across the views and is
+ * gone on the next load, and an error is never hidden by a choice made on another
+ * day. Rejected: keeping it in localStorage, as the theme is kept, and in the
+ * address, whose fragment is the router's.
+ *
+ * Each option counts what it shows, in the summary's words. Errors shows the
+ * refused cards' F4 errors with the competition's own, because they are errors,
+ * and says them apart as the summary does, so "3 errors and 1 card not scored"
+ * is the summary's own clause and not a sum the pill never shows. Both counts
+ * nothing itself: the summary above it counts everything.
+ *
+ * A choice is one attribute on the list, which the stylesheet reads, and paper
+ * ignores it, so a printed list is the whole list whatever was chosen. Rejected:
+ * `hidden` on each item, which is a write per item and a state print would have
+ * to undo item by item. */
+function healthFilter(list, own, refused, warned) {
+  var box = el('fieldset', { class: 'health-filter' }, [el('legend', { text: 'Show' })]);
+  [['both', 'Both'],
+    ['errors', inWords([own + ' ' + plural(own, 'error')].concat(refused ?
+      refusedWords(refused, 'card', ' not scored') : []))],
+    ['warnings', warned + ' ' + plural(warned, 'warning')]].forEach(function (choice) {
+    box.appendChild(el('label', null, [el('input', { type: 'radio', name: 'health-show',
+      value: choice[0], checked: choice[0] === 'both',
+      on: { change: function () { list.setAttribute('data-show', choice[0]); } } }),
+      choice[1]]));
+  });
+  return box;
 }
 
 function renderHealth() {
@@ -4334,7 +4611,7 @@ function renderHealth() {
     var list = el('ul');
     errors.concat(warnings).forEach(function (item, i) {
       var isError = i < errors.length;
-      var li = el('li');
+      var li = el('li', { 'data-kind': isError ? 'error' : 'warning' });
       li.appendChild(el('strong', { text: (isError ? 'Error' : 'Warning') +
         (item.rule ? ' · ' + item.rule : '') + ': ' }));
       li.appendChild(document.createTextNode(item.message || String(item)));
@@ -4343,6 +4620,12 @@ function renderHealth() {
       if (item.detail) li.appendChild(el('span', { class: 'muted', text: ' ' + item.detail }));
       list.appendChild(li);
     });
+    /* Offered only where the list holds both kinds. Over one kind, two of its three
+     * choices show the same list and the third shows nothing, and a filter with one
+     * live choice is noise. */
+    if (errors.length && warnings.length) {
+      det.appendChild(healthFilter(list, own, refused, warnings.length));
+    }
     det.appendChild(list);
     host.appendChild(det);
   }
@@ -4709,14 +4992,15 @@ function seasonKey() {
 function isSingleFile() { return window.SINGLE_FILE === true; }
 
 /* This player's entry on the careers page, which build.py writes at the site root
- * in multi-season mode only, and only by a build that prints players' names; ''
- * where there is no such page to reach. meta.players is there only on a document
- * that withholds them, and a withheld slug is a label for one season, which no
- * career can be looked up by. Never from a one-file dashboard, which travels
- * without the site around it. Built from rootHref(), so it is exactly as deep as
- * the link to the front page beside it. */
+ * by every build that prints players' names, in either mode: careers across
+ * seasons, or in single-season mode the season's players across its
+ * competitions; '' where there is no such page to reach. meta.players is there
+ * only on a document that withholds them, and a withheld slug is a label for one
+ * competition, which nobody's entry can be looked up by. Never from a one-file
+ * dashboard, which travels without the site around it. Built from rootHref(), so
+ * it is exactly as deep as the link to the front page beside it. */
 function careersHref(slug) {
-  if (meta().seasons_mode !== 'multi' || isSingleFile() || meta().players) return '';
+  if (isSingleFile() || meta().players) return '';
   return rootHref().replace(/index\.html$/, 'careers.html') + '#p-' + slug;
 }
 

@@ -40,7 +40,9 @@ strip_team_prefix = "Willowbank"
 
 [build]
 # "single"  every card in data/ belongs to one season. Output goes to
-#           site/<competition>/. No season picker.
+#           site/<competition>/. No season picker. The site has a page of
+#           the season's players, site/careers.html, adding each player's
+#           competitions up (none in a build that withholds players' names).
 # "multi"   the first folder level under data/ is the season, so
 #           data/2026-winter/round-3/card.pdf is season "2026-winter".
 #           Output goes to site/<season>/<competition>/ and the site gains a
@@ -107,19 +109,22 @@ sets = "first-to-6"
 # unplayed — what a round a team did not play is worth: a bye, a washout, a week
 # called off. One of:
 #   average   the team is credited its own average over the matches it did play,
-#             and the round counts as a match played. Common where the ladder is
-#             ordered on average rather than on total points.
+#             and the round counts in that average but not in P, the matches
+#             played. Common where the ladder is ordered on average rather than
+#             on total points.
 #   zero      the round scores nothing and is not counted. This is the default.
 # Every preset above defaults to zero, and that is only a default: two
 # associations running the same points scheme differ on this line all the time.
 # Setting it here overrides the preset without replacing it.
 #
 # This changes the points column of every team that has had a week off, and it
-# never changes the ladder order: crediting a team its own average cannot move
-# its average, and the average is what the ladder is sorted on. So if your
-# totals are lower than your association's sheet but the teams are in the right
-# order, and the teams that differ are the ones that have had a bye or a
-# washout, this is the line to try.
+# can change the ladder order. simple, sets-first and rubbers rank on points
+# first, so a team credited a rest can pass one that played. games-bonus ranks
+# on the average, which crediting a team its own average cannot move, so there
+# it changes the order only of teams level on average. So if your ladder is
+# ordered on the average, your totals are lower than your association's sheet
+# but the teams are in the right order, and the teams that differ are the ones
+# that have had a bye or a washout, this is the line to try.
 # unplayed = "average"
 
 # draws — can a night end level at all? true or false, TOML's own booleans, not
@@ -139,6 +144,31 @@ sets = "first-to-6"
 # your rules say cannot happen into something you get told about, instead of a
 # silently-scored draw in a competition that has no D column.
 # draws = false
+
+# forfeit_award — what a match forfeited whole is worth: a card ticking a Match
+# Forfeited box, or a walkover, which Match Centre exports as Match Cancelled
+# ticked beside a winner and a TOTAL row of every rubber to that side. One of:
+#   full-games  the side that turned up is paid a win with every rubber a love
+#               set, and the side that gave the match up 0. Under games-bonus
+#               over four first-to-6 rubbers that is 4 + 0.1 x 24 = 6.4. The
+#               default.
+#   fixed       the side that turned up is paid forfeit_points, and the side
+#               that gave the match up 0.
+#   as-played   paid as a match played, on the games the rows print: over rows
+#               left 0-0, a win and a loss with no games, 4.0 and 2.0 under
+#               games-bonus.
+# The price comes from here and never from the card: a forfeit's TOTAL row is
+# checked, not paid. It says what a rubber not played out is scored, too:
+# under full-games and fixed, a rubber ticked Forfeit against one side is a
+# love set to the other, and one a side retired from is the other's, its games
+# raised to win it, as Match Centre's TOTAL row counts them; under as-played,
+# the games printed.
+# forfeit_award = "full-games"
+
+# forfeit_points — what a fixed award pays the side that turned up, 0 or more.
+# Read only where forfeit_award = "fixed", which needs it; set anywhere else,
+# the run says it was not read.
+# forfeit_points = 5
 
 # format — the shape of a match: how many sets, and which are doubles.
 # This *is* read off your cards, from the marker column beside each set row, so
@@ -209,6 +239,9 @@ silvereyes = "Silvereyes"
 # one-letter prefix: "O'Brien", but "King's", "North-West" and "(Womens)". An A
 # before TEAM(S), GRADE, RESERVE(S), SIDE or SQUAD is a team's letter, as a B
 # is, unless a small word such as OF comes before it: "Part of a Team".
+# Two guesses most need checking: an acronym of four letters or more is read
+# as a word, so ABCD is offered as "Abcd", and an A before another word can be
+# read as the word "a", so PLAN A ROCKETS is offered as "Plan a Rockets".
 
 
 # --------------------------------------------------------------------------
@@ -283,11 +316,11 @@ silvereyes = "Silvereyes"
 #
 # The teams in an entry are usually teams of the *same* competition. Each grade
 # gets a dashboard of its own, so on those dashboards one name in two grades is
-# already two players. The exception is the careers page in multi-season mode,
-# which joins one name across grades and seasons: if those are two people, one
-# entry naming a team of each gives each a career of their own. If a name is
-# merged in two grades, one entry names all four teams -- the entry is keyed on
-# the name, so there can only be one of them.
+# already two players. The exception is the careers page, which joins one name
+# across grades, and in multi-season mode across seasons too: if those are two
+# people, one entry naming a team of each gives each an entry of their own. If
+# a name is merged in two grades, one entry names all four teams -- the entry
+# is keyed on the name, so there can only be one of them.
 #
 # The key is the player's id. The teams may be written either as their ids or as
 # the banner the cards print, as below. Each player it makes is then known by
@@ -323,8 +356,9 @@ label = "Wednesday Division 3"
 
 # The night it is played, and the division as printed on the cards, without the
 # word "Division" in front of it. These two are how cards find this section; the
-# day is otherwise taken from the weekday of each card's own date, or from the
-# weekday printed beside it when the date cannot be read. A card headed
+# day is otherwise taken from the night each card's competition line names
+# (`Wednesday Night Fixtures`), else from the weekday of its own date, or from
+# the weekday printed beside it when the date cannot be read. A card headed
 # `Division 3 Grade B` is division "3 Grade B" -- the grade is half of the name,
 # and the two grades of one section are two competitions; a `C Grade` card is
 # division "C". If nothing is filed
@@ -350,8 +384,9 @@ rounds_total = 14
 # Filling it in tells the tool the list is closed, and that unlocks two things:
 # a round with a team missing can be credited as a bye to the right team, and a
 # misspelt team name on a card becomes an error instead of a seventh team.
-# Leave it out and both stay off, by design: with an open list, a card that
-# never arrived and a team that had the week off look identical.
+# Leave it out and both stay off, by design: a team on no card of a round is
+# resting only if it is one of the division's, and only a list you have checked
+# says which teams those are.
 # Write the names as you write them; they are matched by id.
 teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
          "Silvereyes"]
@@ -367,6 +402,8 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 # min_sets_for_result here is what the review list suggests when the
 # competitions in one run need different numbers.
 # min_sets_for_result = 3
+# forfeit_award = "fixed"
+# forfeit_points = 5
 
 # Captains, keyed by team name or team id. Read from the (C) marks on the cards
 # when you leave this out, and a first run writes those marks here with a # in
@@ -381,6 +418,8 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 "Silvereyes" = "Marisol Ferreira-Kaye"
 
 # Each team's home court, if your club plays on numbered courts. Whole numbers.
+# A first run writes here, with a # in front, the court each team's home cards
+# print most. The dashboard shows a home court only once it is declared here.
 [competitions.wednesday-division-3.courts]
 "Falcons" = 1
 "Herons" = 2

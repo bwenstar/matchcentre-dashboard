@@ -36,6 +36,8 @@ _NOT_SLUG = re.compile(r"[^a-z0-9]+")
 # acronym sees "Wdta" and fixes it in one line of [team_names] -- which is what
 # that section is for, and why every derived team name is written into it for
 # review rather than presented as fact.
+# The cost the other way is a word of three letters kept in capitals, OLD TOWN
+# as "OLD Town", which [team_names] spells too.
 _ACRONYM_MAX = 3
 
 # Words that stay lower case in the middle of a name, so "Kings Of The Court"
@@ -194,7 +196,7 @@ def display_name(text: str) -> str:
             continue
         if shouted:
             if sum(c.isalpha() for c in word) <= _ACRONYM_MAX:
-                out.append(word)          # RTC, WDTA — an abbreviation, keep it
+                out.append(word)          # RTC, TC — an abbreviation, keep it
                 continue
             word = _unshout(word)         # ROCKETS -> Rockets
         out.append(word)
@@ -281,7 +283,12 @@ def _is_a_letter(words: list[str], index: int) -> bool:
     capital A, and so does WORTH A 1000 WORDS, whose count reads as HILLTOP A 2's
     number does: no demo season or fixture prints such a name, so a rule telling a
     count from a team's number would be a guess, and ``[team_names]`` spells the
-    name.
+    name. And the reverse, a team's letter read as the article: a letter after a
+    word that names one, before a word not on the list, is lowered, so RIVERSIDE
+    VITAMIN A ROCKETS is ``Riverside Vitamin a Rockets``, which ``[team_names]``
+    spells. A list of the words before an A that name a letter (VITAMIN, PLAN)
+    would make PLAN A PARTY ``Plan A Party``, and the first run's note over
+    ``[team_names]`` names this guess instead.
     """
     if index + 1 == len(words) or not words[index + 1][:1].isalpha():
         return True

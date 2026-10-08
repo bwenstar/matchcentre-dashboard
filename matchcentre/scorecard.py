@@ -43,7 +43,7 @@ import stat
 import string
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import pdf
@@ -51,8 +51,10 @@ from .card import (WEEKDAYS, Card, CardError, CrossCheck, ParsedSet, Rejection,
                    RosterEntry, Totals, date_forms, states_no_result,
                    thin_card_prints, verb_side)
 from .competition import decimal_figure
-from .format import SET_RULES, FormatError, MatchFormat, from_rows
-from .model import (SetStatus, forfeit_match_winner, forfeit_set_winner,
+from .format import (SET_RULES, FormatError, MatchFormat, SetRule, completed,
+                     from_rows, plausible)
+from .model import (SIDES, SetStatus, forfeit_match_winner, forfeit_set_winner,
+                    names_miscounted, retired_set_winner, rubber_award,
                     stopped_short)
 from .scope import echoed, in_words
 
@@ -161,7 +163,7 @@ def _unnamed(boxes: Sequence[_Box], grid: _Grid) -> list[_Place]:
 
 # --- printed text patterns -----------------------------------------------
 
-# ``Division C / Yellow Ball / Round 1 / #3665611`` arrives as separate words, so
+# ``Division C / Yellow Ball / Round 1 / #1000100`` arrives as separate words, so
 # these run against a re-joined line. Associations differ in wording -- Division,
 # Grade, Section and Div all occur -- the ball colour is optional and so is the
 # id, but a card with no round cannot be placed in a season, so the round stays
@@ -381,6 +383,7 @@ class _Header:
     match_id: str
     date: str
     weekday: str
+    night: str
     court: int | None
     venue: str
     club_hint: str
@@ -698,6 +701,20 @@ def files_under(root: str | Path) -> list[Path] | None:
     return sorted([*found, *(Path(r.path) for r in unlisted)], key=str)
 
 
+def thin_card_note(checks: tuple[CrossCheck, ...]) -> str:
+    """The reader's warning on a card none of whose cross-checks is available.
+
+    Its own function so the page can leave it off a card that records nothing,
+    as F6 is left off in the report (4.424): ``export`` compares the match's notes
+    against this, so a rewording here cannot put the note back on such a card.
+    """
+    # A verb printed that confirms nothing is said as printed (4.133).
+    nouns = {"totals": "no TOTAL row", "verb": "no result verb",
+             "winner-tick": "no Match Winner tick"}
+    return (f"the card prints {thin_card_prints(checks, nouns)}, so nothing on it "
+            "confirms the set rows were read correctly")
+
+
 def read_page(page: pdf.Page, *, expect: MatchFormat | None = None) -> Card:
     """Transcribe one page, or raise :class:`~matchcentre.card.CardError`.
 
@@ -735,19 +752,22 @@ def read_page(page: pdf.Page, *, expect: MatchFormat | None = None) -> Card:
     totals = _read_totals(page, grid, warnings)
     winner_tick = _sided_flag("Match Winner", boxes, grid, warnings)
     forfeited_by = _sided_flag("Match Forfeited", boxes, grid, warnings)
+    cancelled = _centred_flag("Match Cancelled", boxes)
+    walkover_by = walkover_side(
+        sets, totals, banner.verb, cancelled=cancelled,
+        forfeit_ticked=_ticked(boxes, "Match Forfeited"), winner=winner_tick,
+        winner_ticked=_ticked(boxes, "Match Winner"))
     dropped: list[str] = []
     home_roster, away_roster = _read_rosters(page, grid, warnings, sets, dropped)
-    checks = (_totals_check(sets, totals, forfeited_by=forfeited_by),
-              _verb_check(sets, banner.verb, forfeited_by=forfeited_by),
+    checks = (_totals_check(sets, totals, forfeited_by=forfeited_by,
+                            walkover_by=walkover_by),
+              _verb_check(sets, banner.verb, forfeited_by=forfeited_by,
+                          walkover_by=walkover_by),
               _winner_tick_check(sets, winner_tick, boxes, grid,
-                                 forfeited_by=forfeited_by, verb=banner.verb))
+                                 forfeited_by=forfeited_by, verb=banner.verb,
+                                 walkover_by=walkover_by))
     if not any(check.available for check in checks):
-        # A verb printed that confirms nothing is said as printed (4.133).
-        nouns = {"totals": "no TOTAL row", "verb": "no result verb",
-                 "winner-tick": "no Match Winner tick"}
-        warnings.append(
-            f"the card prints {thin_card_prints(checks, nouns)}, so nothing on it "
-            "confirms the set rows were read correctly")
+        warnings.append(thin_card_note(checks))
 
     return Card(
         source=page.source,
@@ -755,6 +775,7 @@ def read_page(page: pdf.Page, *, expect: MatchFormat | None = None) -> Card:
         match_id=header.match_id,
         date=header.date,
         weekday=header.weekday,
+        night=header.night,
         division=header.division,
         round=header.round,
         court=header.court,
@@ -770,7 +791,8 @@ def read_page(page: pdf.Page, *, expect: MatchFormat | None = None) -> Card:
         totals=totals,
         winner_tick=winner_tick,
         forfeited_by=forfeited_by,
-        cancelled=_centred_flag("Match Cancelled", boxes),
+        walkover_by=walkover_by,
+        cancelled=cancelled,
         disputed=_centred_flag("Match Disputed", boxes),
         checks=checks,
         warnings=tuple(warnings),
@@ -979,8 +1001,14 @@ def describe_lines(page: pdf.Page) -> list[str]:
     # a whole-match forfeit, and for nothing else: what it notes about the box is
     # left out, so the warnings below are the ones this summary always listed.
     forfeited_by = _sided_flag("Match Forfeited", boxes, grid, [])
-    checks = [_totals_check(sets, totals, forfeited_by=forfeited_by),
-              _verb_check(sets, verb, forfeited_by=forfeited_by)]
+    walkover_by = walkover_side(
+        sets, totals, verb, cancelled=_centred_flag("Match Cancelled", boxes),
+        forfeit_ticked=_ticked(boxes, "Match Forfeited"), winner=winner,
+        winner_ticked=_ticked(boxes, "Match Winner"))
+    checks = [_totals_check(sets, totals, forfeited_by=forfeited_by,
+                            walkover_by=walkover_by),
+              _verb_check(sets, verb, forfeited_by=forfeited_by,
+                          walkover_by=walkover_by)]
     # The Match Winner tick is checked only where both its boxes are named. Where
     # one is not, the checkbox line above names it, and the card is refused for it
     # or for something read before its boxes, such as the header; a check that
@@ -988,7 +1016,8 @@ def describe_lines(page: pdf.Page) -> list[str]:
     # printed".
     if not any(label == "Match Winner" for label, _, _ in unnamed):
         checks.append(_winner_tick_check(sets, winner, boxes, grid,
-                                         forfeited_by=forfeited_by, verb=verb))
+                                         forfeited_by=forfeited_by, verb=verb,
+                                         walkover_by=walkover_by))
     lines.extend(CheckLine.of(check) for check in checks)
     home_roster, away_roster = _read_rosters(page, grid, warnings, sets, [])
     for label, roster in (("home", home_roster), ("away", away_roster)):
@@ -1367,7 +1396,8 @@ def _read_header(page: pdf.Page, grid: _Grid, warnings: list[str]) -> _Header:
                 + _IDENTITY_WORDING,
                 detail=_header_hint(block))
 
-    date, weekday = _read_date(joined, warnings)
+    line = _competition_line(texts)
+    date, weekday = _read_date(joined, warnings, line=line)
     court, venue = _read_court(page, warnings)
     return _Header(
         division=division,
@@ -1375,6 +1405,7 @@ def _read_header(page: pdf.Page, grid: _Grid, warnings: list[str]) -> _Header:
         match_id=match_id,
         date=date,
         weekday=weekday,
+        night=_night_named(line),
         court=court,
         venue=venue,
         club_hint=_club_hint(page, grid),
@@ -1414,10 +1445,111 @@ _WORD_RE = re.compile(r"[^\W_]+")
 # The one abbreviation of a name in common use that is not the front of it.
 _NOT_A_PREFIX = {"weds": "wednesday"}
 _TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
+# A year on its own: not a piece of a date or of a season such as ``2026/27``.
+_YEAR_RE = re.compile(r"(?<![\d/.-])\d{4}(?![\d/-]|\.\d)")
+# A range of days, ``Tue 29/09 - Sun 04/10``, printed by some cards in place of a
+# date; a year at both ends or at neither, and a weekday in front of each.
+_SPAN_RE = re.compile(
+    r"(?<![\w/.-])(?P<w1>[^\W\d_]+)\.?,?\s+(?P<d1>\d{1,2})/(?P<m1>\d{1,2})"
+    r"(?:/(?P<y1>\d{4}))?\s+-\s+(?P<w2>[^\W\d_]+)\.?,?\s+(?P<d2>\d{1,2})/"
+    r"(?P<m2>\d{1,2})(?:/(?P<y2>\d{4}))?(?![\d/])")
+
+
+def _competition_line(texts: Sequence[str]) -> str:
+    """The line printing ``Night Fixtures``, the competition line, or ``""``.
+
+    ``Brindle Tuesday Night Fixtures 2026``, of the identity block's lines the
+    nearest the set table. The template prints it below the letterhead and the
+    venue, which are the club's own words and can print ``Night Fixtures`` too,
+    and above only the season line and the identity line; the team names, which
+    are anybody's, are not in the block.
+    """
+    def prints(text: str) -> bool:
+        words = [word.casefold() for word in _WORD_RE.findall(text)]
+        return any(pair == ("night", "fixtures") for pair in zip(words, words[1:]))
+    return _nearest(texts, prints)
+
+
+def _night_named(line: str) -> str:
+    """The weekday a competition line names in front of ``Night``, in full, or ``""``.
+
+    The night a card's competition is played on, which every card of it prints
+    whatever its date says. Only when it is the one weekday the line spells: a
+    line naming two (``Monday and Tuesday Night Fixtures``) or a club called
+    ``Sun Valley`` names no night this reader can be sure of, and a night
+    guessed is a card filed under somebody else's ladder.
+    """
+    words = _WORD_RE.findall(line)
+    for before, word in zip(words, words[1:]):
+        if word.casefold() == "night":
+            night = _spelled(before, WEEKDAYS)
+            spelled = {_spelled(other, WEEKDAYS) for other in words} - {""}
+            return night if spelled == {night} else ""
+    return ""
+
+
+def _year_printed(line: str) -> str:
+    """The one year a competition line prints, or ``""`` for none or more than one."""
+    years = set(_YEAR_RE.findall(line))
+    return years.pop() if len(years) == 1 else ""
+
+
+def _read_span(text: str, *, line: str) -> tuple[str, str, str] | None:
+    """A range of days on one line, as ``(iso, weekday, warning)``, or ``None``.
+
+    ``None`` leaves the line to :func:`_find_date`, as before there was a range
+    reader: no range there, a weekday missing from either end, a year at one end
+    only, or a range printed with its years that is no week its weekdays fit.
+    Otherwise the date is the day of the range on the night *line* names, or the
+    day it opens when it names none or none is in it; the weekday is the one
+    printed in front of that day, or ``""`` for a day between the two. A range is
+    a week at most, so it holds one of each weekday at most and the night picks
+    one day; one printed closing before it opens holds only the day it opens,
+    which is the date ``_find_date`` would read. Its year is the one the
+    competition line prints, the close in the year after when it falls before the
+    open. With no year to take, or with days that are no such week in that year,
+    the match is undated and *warning* says why, without quoting the days: with
+    no year printed they are not a shape the doctor's redacted report withholds.
+    """
+    found = _SPAN_RE.search(text)
+    if found is None:
+        return None
+    opens, closes = (_spelled(found.group(word), WEEKDAYS) for word in ("w1", "w2"))
+    printed = [found.group(year) for year in ("y1", "y2") if found.group(year)]
+    night = _night_named(line)
+    if not (opens and closes) or len(printed) == 1:
+        return None
+    year = printed[0] if printed else _year_printed(line)
+    if not year:
+        lacking = ("its competition line prints no single year" if line
+                   else "no line printing Night Fixtures to take one from")
+        return "", opens, (f"the card prints a range of days with no year, and "
+                           f"{lacking}, {_undated(opens, night)}")
+    first = _date_or_none(int(year), int(found.group("m1")), int(found.group("d1")))
+    last = _date_or_none(int(printed[-1] if printed else year),
+                         int(found.group("m2")), int(found.group("d2")))
+    if first and last and last < first and not printed:
+        last = _date_or_none(int(year) + 1, int(found.group("m2")),
+                             int(found.group("d2")))
+    fits = bool(first and last and WEEKDAYS[first.weekday()] == opens
+                and WEEKDAYS[last.weekday()] == closes)
+    if not (fits and (last - first).days < 7):
+        if printed:
+            return None
+        why = ("is longer than a week" if fits else
+               f"is no week from a {opens} to a {closes} in the year its "
+               f"competition line prints")
+        return "", opens, (f"the range of days the card prints {why}, "
+                           f"{_undated(opens, night)}")
+    days = [first + datetime.timedelta(days=n)
+            for n in range((last - first).days + 1)]
+    day = next((day for day in days if WEEKDAYS[day.weekday()] == night), first)
+    weekday = opens if day == first else closes if day == last else ""
+    return day.isoformat(), weekday, ""
 
 
 def _read_date(joined: Sequence[tuple[str, list[pdf.Word]]],
-               warnings: list[str]) -> tuple[str, str]:
+               warnings: list[str], *, line: str = "") -> tuple[str, str]:
     """The card's own date, as ISO, and the weekday it prints beside it.
 
     Two readings, kept apart. The weekday used to be worked out from the date,
@@ -1433,8 +1565,19 @@ def _read_date(joined: Sequence[tuple[str, list[pdf.Word]]],
     2026 7:00 PM``), which on the measured template is on the same line. With no
     start time either there is no line to take one from: a weekday word anywhere
     else in the header is a team's or a competition's name rather than the night's.
+
+    A range of days in place of the date is read by :func:`_read_span`, with the
+    competition *line* that names its night and its year; and once that line names
+    a night, it is the night a warning says an undated card is filed by.
     """
+    night = _night_named(line)
     for text, _ in joined:
+        span = _read_span(text, line=line)
+        if span is not None:
+            iso, weekday, warning = span
+            if warning:
+                warnings.append(warning)
+            return iso, weekday
         found = _find_date(text)
         if found is None:
             continue
@@ -1451,18 +1594,25 @@ def _read_date(joined: Sequence[tuple[str, list[pdf.Word]]],
                       else "")
             warnings.append(
                 f"the date printed on this card, {printed!r}, is not a real "
-                f"date{either}, {_undated(weekday)}")
+                f"date{either}, {_undated(weekday, night)}")
         return iso, weekday
     weekday = next((_printed_weekday(text, time.start(), time.end(), unread=True)
                     for text, _ in joined if (time := _TIME_RE.search(text))), "")
     warnings.append(
         f"no date above the set table is printed in a form this reader accepts "
-        f"({date_forms()}), {_undated(weekday)}")
+        f"({date_forms()}), {_undated(weekday, night)}")
     return "", weekday
 
 
-def _undated(weekday: str) -> str:
-    """The end of a warning about a date that did not read: what files the card."""
+def _undated(weekday: str, night: str = "") -> str:
+    """The end of a warning about a date that did not read: what files the card.
+
+    The *night* the competition line names, before the *weekday* printed, as
+    :func:`~matchcentre.discover.filing_day` files it.
+    """
+    if night:
+        return (f"so the match is undated and is filed by the {night} its "
+                f"competition line names")
     if weekday:
         return f"so the match is undated and is filed by the {weekday} it prints"
     return ("and no weekday is printed beside a date or a start time, so the "
@@ -1621,6 +1771,16 @@ def _read_court(page: pdf.Page, warnings: list[str]) -> tuple[int | None, str]:
     return None, ""
 
 
+def court_in(page: pdf.Page) -> int | None:
+    """The court ``page`` prints, as :func:`_read_court` reads it, or None.
+
+    Public because tools/doctor.py asks it, so the court its header fields find is
+    the one the reader reads, off the venue's line, and a court a comment names is
+    not one (4.466).
+    """
+    return _read_court(page, [])[0]
+
+
 def _runs_into_a_date(words: Sequence[pdf.Word], line: Sequence[pdf.Word]) -> bool:
     """Whether a date printed on ``line`` takes in any of ``words``.
 
@@ -1704,6 +1864,11 @@ def _season_hint(joined: Sequence[tuple[str, list[pdf.Word]]]) -> str:
 
 # --- banner --------------------------------------------------------------
 
+# The reader's warning on a card printing no verb. Named for the same reason as
+# thin_card_note: the page leaves it off a card that records nothing (4.424).
+NO_VERB = ("no result verb is printed between the team names, so one of the "
+           "three cross-checks on this card is unavailable")
+
 
 def _read_banner(page: pdf.Page, grid: _Grid, warnings: list[str]) -> _Banner:
     """The two team names and the verb printed between them.
@@ -1742,9 +1907,7 @@ def _read_banner(page: pdf.Page, grid: _Grid, warnings: list[str]) -> _Banner:
             detail=f"home {home!r}, away {away!r}")
     verb = " ".join(w.text for w in verb_words)
     if not verb:
-        warnings.append(
-            "no result verb is printed between the team names, so one of the "
-            "three cross-checks on this card is unavailable")
+        warnings.append(NO_VERB)
     return _Banner(home=home, away=away, verb=verb)
 
 
@@ -2386,6 +2549,12 @@ def _unnamed_in_words(unnamed: Sequence[_Place], rows: int) -> list[str]:
                                 and lost[label] == needed[label]})
 
 
+def _article(word: str) -> str:
+    """The indefinite article before ``word``: ``an away``, ``an Incomplete``,
+    ``a home``. The one rule of it, for every box's place worded here."""
+    return "an" if word[0] in "aeiouAEIOU" else "a"
+
+
 def _in_places(places: Sequence[_Place],
                whole: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Each of ``places`` as a phrase, in the order they come: ``row 1's home
@@ -2419,8 +2588,7 @@ def _in_places(places: Sequence[_Place],
             continue
         plural = "es" if len(labels) > 1 else ""
         if row is None and label in _SET_STATUS_LABELS:
-            count = (len(labels) if len(labels) > 1
-                     else "an" if box_side == "away" else "a")
+            count = len(labels) if len(labels) > 1 else _article(box_side)
             which.append(f"{count} {box_side} {label} box{plural} in no set row, "
                          "which no row reads")
             continue
@@ -2428,6 +2596,67 @@ def _in_places(places: Sequence[_Place],
                  else f"the {box_side} " if box_side is not None else "the ")
         which.append(f"{where}{in_words(labels)} box{plural}")
     return which
+
+
+# What a fill is called that the reader reads as no box's tick: one in no square,
+# one not the size of the page's checkbox, which it does not take for a tick, and
+# any on a page whose boxes it cannot measure.
+_READ_AS_NO_TICK = "no box the reader finds reads this as its tick"
+
+
+def tick_places(page: pdf.Page, fills: Sequence[pdf.Rect]) -> list[str]:
+    """Each of ``fills`` as the box the reader reads it as the tick of, in
+    :func:`_in_places`'s words: ``the away Match Winner box``, ``row 4's home
+    Retired box``, ``a square on row 1's home side, which no label names``.
+
+    Public because tools/doctor.py asks it, so that the tick its census lists is
+    named by the box :func:`_read_boxes` pairs with it, and the doctor and the
+    reader cannot disagree about which box was ticked (4.467). The square no label
+    names that a fill is in is the one :func:`_ticked_squares` gives, the reader's
+    own rule: none for a fill a named box reads, and one however many outlines are
+    painted round it. A box drawn again over its own tick is named once, as the
+    one place it is, and the reader's warning says it is drawn again. With no set
+    table, as on a page refused for its columns, a box has no row or side to be
+    named by, and is said to have none.
+    """
+    side = _box_side(page)
+    if side is None:
+        return [_READ_AS_NO_TICK for _ in fills]
+    try:
+        grid: _Grid | None = _grid(page, [])
+    except CardError:
+        grid = None
+    boxes = _read_boxes(page, side, grid)
+    outlines, ticks = _box_geometry(page, side)
+    squares = _unnamed_squares(outlines, boxes)
+    named = []
+    for fill in fills:
+        if fill not in ticks:
+            named.append(_READ_AS_NO_TICK)
+            continue
+        reading = [box for box in boxes if _is_ticked(box.rect, side, (fill,))]
+        held = _ticked_squares(squares, boxes, side, (fill,))
+        if grid is None:
+            phrases = ([_without_a_table(label)
+                        for label in dict.fromkeys(box.label for box in reading)]
+                       + ["a square no label names, with no set table to give it "
+                          "a row or side" for _ in held])
+        else:
+            phrases = _in_places(
+                list(dict.fromkeys(_place(box, grid) or _place_in_no_row(box, grid)
+                                   for box in reading))
+                + [_square_place(rect, grid) for rect in held])
+        named.append(in_words(phrases) if phrases else _READ_AS_NO_TICK)
+    return named
+
+
+def _without_a_table(label: str) -> str:
+    """A box named ``label`` on a page with no set table, which has no row or
+    side to give it, as :func:`tick_places` words it."""
+    if label in _CENTRED_FLAGS:
+        return f"the {label} box"
+    lacks = "a row or side" if label in _SET_STATUS_LABELS else "a side"
+    return f"{_article(label)} {label} box, with no set table to give it {lacks}"
 
 
 def _near_labels(page: pdf.Page, labels: Sequence[str] = (),
@@ -2525,9 +2754,13 @@ def _read_row(page: pdf.Page, grid: _Grid, index: int,
     away_players, away_unnamed = _named(
         _players(page, band, grid.away_names, boxes))
 
+    # Each side held to its own names and its own placeholder cells together, so a
+    # pair naming one player above 'Unspecified player' is a full side whose second
+    # place nobody filled, and players-unrecorded tells that once a card (4.447).
     wanted = 2 if doubles else 1
-    for side, players in (("home", home_players), ("away", away_players)):
-        if players and len(players) != wanted:
+    for side, players, unnamed in (("home", home_players, home_unnamed),
+                                   ("away", away_players, away_unnamed)):
+        if names_miscounted(len(players), unnamed, wanted):
             warnings.append(
                 f"row {index + 1}: read {len(players)} {side} player name(s) "
                 f"from a row its own marker {marker!r} says is "
@@ -2535,9 +2768,11 @@ def _read_row(page: pdf.Page, grid: _Grid, index: int,
 
     home_forfeit = _ticked(boxes, "Forfeit", band=band, side="home", grid=grid)
     away_forfeit = _ticked(boxes, "Forfeit", band=band, side="away", grid=grid)
+    home_retired = _ticked(boxes, "Retired", band=band, side="home", grid=grid)
+    away_retired = _ticked(boxes, "Retired", band=band, side="away", grid=grid)
     if home_forfeit or away_forfeit:
         status = SetStatus.FORFEIT
-    elif _ticked(boxes, "Retired", band=band):
+    elif home_retired or away_retired:
         status = SetStatus.RETIRED
     elif _ticked(boxes, "Incomplete", band=band):
         status = SetStatus.INCOMPLETE
@@ -2558,7 +2793,10 @@ def _read_row(page: pdf.Page, grid: _Grid, index: int,
         status=status,
         home_forfeit=home_forfeit,
         away_forfeit=away_forfeit,
-        unnamed=home_unnamed + away_unnamed,
+        home_unnamed=home_unnamed,
+        away_unnamed=away_unnamed,
+        home_retired=home_retired,
+        away_retired=away_retired,
     )
 
 
@@ -2807,16 +3045,25 @@ def _row_claims(sets: Sequence[ParsedSet]) -> tuple[int, int]:
     bound rather than an exact count on purpose: whether ``2-4`` is a finished
     set depends on the set rule, which is configuration and not printed on the
     card, and a real card in the reference data ran out of court time at ``2-4``
-    with nobody ticking ``Incomplete``. Bounding instead of guessing means this
-    check never contradicts a legitimately untidy card, while still catching a
-    read where the two games columns were swapped.
+    with nobody ticking ``Incomplete``. It is the ceiling the printed TOTAL row's
+    sets are held to, so that row is never faulted for a legitimately untidy
+    card, while a read where the two games columns were swapped still is.
 
     A forfeited row is not bounded but answered, by the rule the model scores it
     with: a bound that credited a forfeited rubber differently from the model would
     be this check reporting a correct card as misread. So is a row whose box says
     it stopped short, retired or incomplete, which is nobody's by
-    :func:`~matchcentre.model.stopped_short`. Its leader was credited, and a card
-    won on its finished sets had its verb and tick reported as misread (4.217).
+    :func:`~matchcentre.model.stopped_short` unless one side's Retired box gives
+    it to the other (:func:`~matchcentre.model.retired_set_winner`, 4.422). Its
+    leader was credited, and a card won on its finished sets had its verb and tick
+    reported as misread (4.217).
+
+    It is not a count of who won, so it is not the only reading a verb or tick is
+    asked of. A last rubber stopped with no box ticked is its leader's here, and
+    a card level on games and won on its finished sets had its verb and tick
+    reported as misread, the ceiling level where the sets were not (4.425): a side
+    claim it does not back is also asked of the rows as each set rule credits
+    them (:func:`_won_under`).
     """
     home = away = 0
     for parsed in sets:
@@ -2826,7 +3073,10 @@ def _row_claims(sets: Sequence[ParsedSet]) -> tuple[int, int]:
                                       home_games=parsed.home_games,
                                       away_games=parsed.away_games)
         elif stopped_short(parsed.status):
-            side = None
+            # Unless one side retired, which gives the set to the other (4.422).
+            side = (retired_set_winner(home_retired=parsed.home_retired,
+                                       away_retired=parsed.away_retired)
+                    if parsed.status is SetStatus.RETIRED else None)
         elif parsed.home_games != parsed.away_games:
             side = "home" if parsed.home_games > parsed.away_games else "away"
         else:
@@ -2840,8 +3090,11 @@ def _readings(sets: Sequence[ParsedSet]) -> tuple[str | None, str | None]:
     """Who the rows say won, on games and on sets, without a ruleset.
 
     Both bases are returned because a club's rules may decide on either, and this
-    module has no business knowing which. A claim supported by neither is a
-    contradiction whatever the rules are.
+    module has no business knowing which. The sets are :func:`_row_claims`'
+    ceiling, not a count, so a side claim neither backs is also asked of each set
+    rule (:func:`_supported`), and is a contradiction only where no set rule the
+    rows could have been printed under gives it either, or it names the side a
+    Match Forfeited box says forfeited. A draw is asked of these two alone.
     """
     home_games = sum(s.home_games for s in sets)
     away_games = sum(s.away_games for s in sets)
@@ -2853,11 +3106,63 @@ def _readings(sets: Sequence[ParsedSet]) -> tuple[str | None, str | None]:
     return by_games, by_sets
 
 
-def _supported(claim: str, sets: Sequence[ParsedSet]) -> bool:
-    by_games, by_sets = _readings(sets)
+def _won_under(sets: Sequence[ParsedSet], rule: SetRule) -> tuple[int, int] | None:
+    """The sets each side won under *rule*, as the model credits them, or ``None``.
+
+    ``None`` where some row is a score *rule* does not allow
+    (:func:`~matchcentre.format.plausible`): rows that cannot have been printed
+    under a rule say nothing under it. Asked anyway, fast4 finishes only the 2-4
+    of rows 6-2, 6-3, 2-4 and 0-0, and gave the card to the side that lost two of
+    its sets. Otherwise a row *rule* finishes
+    (:func:`~matchcentre.format.completed`) is its leader's, a forfeited one the
+    side that stayed, by its box, one retired from the side that did not retire,
+    and one stopped short otherwise nobody's, as
+    :attr:`~matchcentre.model.SetResult.winner` credits them: the forfeited and
+    stopped rows through :func:`_row_claims`, which answers them so, and a played
+    row only where *rule* finishes it.
+    """
+    if not all(plausible(s.home_games, s.away_games, rule) for s in sets):
+        return None
+    return _row_claims([s for s in sets if s.status is not SetStatus.PLAYED
+                        or completed(s.home_games, s.away_games, rule)])
+
+
+def _supported(claim: str, sets: Sequence[ParsedSet], *,
+               forfeited_by: str | None) -> bool:
+    """Whether the rows back a claim of ``"home"``, ``"away"`` or ``"draw"``.
+
+    The rows are asked as printed, which ``as-played`` scores, and as Match Centre
+    counts them (:func:`_as_awarded`) under each length of set ``SET_RULES``
+    holds, as :func:`_scored_totals` asks them, since a rubber not played out is
+    scored at games that take the set rule (4.421, 4.422). A draw is backed where
+    some reading's games or ceiling leave the sides level. A side is backed by
+    some reading's games or ceiling, or by the sets some set rule gives it
+    (:func:`_won_under`), since the club's rule is configuration the reader
+    cannot see: a card level on games and won on its finished sets, its last
+    rubber stopped with no box ticked, had its verb and tick reported as misread
+    while the ceiling alone was asked (4.425).
+
+    No rule backs the side a Match Forfeited box says forfeited, since the model
+    gives that match to the side that came whatever a rule makes of its rows.
+    Asked, first-to-6 gave a home tick under the home box the 6-4 of rows 6-4,
+    3-5, 2-2 and 0-0, and a tick that was F6 agreed with the rows.
+    """
+    readings = [_readings(sets)] + [
+        _readings(_as_awarded(sets, games_to_win, None))
+        for games_to_win in sorted({rule.games_to_win for rule in SET_RULES.values()})]
     if claim == "draw":
-        return by_games is None or by_sets is None
-    return claim in (by_games, by_sets)
+        return any(by_games is None or by_sets is None
+                   for by_games, by_sets in readings)
+    if any(claim in reading for reading in readings):
+        return True
+    if forfeit_match_winner(forfeited_by) not in (None, claim):
+        return False
+    for rule in SET_RULES.values():
+        won = _won_under(sets, rule)
+        if won is not None and won[0] != won[1] and claim == (
+                "home" if won[0] > won[1] else "away"):
+            return True
+    return False
 
 
 def _left_blank(sets: Sequence[ParsedSet], forfeited_by: str | None) -> bool:
@@ -2926,6 +3231,96 @@ def _box(forfeited_by: str) -> str:
     return f"the {forfeited_by} Match Forfeited box"
 
 
+def walkover_side(sets: Sequence[ParsedSet], totals: Totals, verb: str, *,
+                  cancelled: bool, forfeit_ticked: bool, winner: str | None,
+                  winner_ticked: bool) -> str | None:
+    """The side that gave up a match its card writes as a walkover, or ``None``.
+
+    Match Centre writes a match one side gave up whole as Match Cancelled ticked,
+    the side that came named the winner, and a TOTAL row of every rubber to that
+    side as a love set and nothing to the other, ticking no Match Forfeited box.
+    So a card is read as one when Match Cancelled is ticked and no Match
+    Forfeited box is; exactly one Match Winner box is ticked, or with none a verb
+    names one side (*winner* is the side of a tick, ``None`` for two); a verb
+    printed names that side too; and every cell of the TOTAL row equals
+    :func:`box_award` for the other side under some set rule, which knowing no
+    club's this asks of every one, as :func:`_awards` does. The rows are not
+    asked: a club's real walkover prints play on three rubbers that its own
+    TOTAL row does not count, while a washout's TOTAL row totals its rows. A
+    tick and a verb for different sides, ``VS`` or a drawn verb beside a tick, a
+    word :func:`~matchcentre.card.verb_side` does not hold, a TOTAL row with a
+    cell blank or totalling anything else, are none: such a card is the washout
+    its Match Cancelled box says.
+
+    Kept on the card as ``walkover_by``, beside the boxes as printed, so the
+    three cross-checks are held to the walkover and the build scores it as the
+    forfeit it is (``Card.forfeit_side``).
+    """
+    if not cancelled or forfeit_ticked or not sets:
+        return None
+    if None in (totals.home_sets, totals.home_games, totals.away_games,
+                totals.away_sets):
+        return None
+    said = verb_side(verb) if verb else None
+    if winner_ticked:
+        if winner not in SIDES or (verb and said != winner):
+            return None
+        came = winner
+    elif said in SIDES:
+        came = said
+    else:
+        return None
+    gave_up = forfeit_match_winner(came)
+    if any(not totals.differs_on(award)
+           for award in _awards_by_rule(sets, gave_up).values()):
+        return gave_up
+    return None
+
+
+def _awards_by_rule(sets: Sequence[ParsedSet], gave_up: str) -> dict[str, Totals]:
+    """:func:`box_award` against *gave_up* under each set rule, by name, whatever
+    the rows say, over the format the rows describe."""
+    flags = [s.doubles for s in sets]
+    return {name: box_award(gave_up, from_rows(flags, rule=rule))
+            for name, rule in SET_RULES.items()}
+
+
+def _walkover(gave_up: str) -> str:
+    """What a check held to a walkover rather than to the rows is held to."""
+    return f"the walkover conceded by {gave_up}"
+
+
+def _given_up(card: Card) -> str:
+    """What *card* gives its match up by, as named: a walkover, or the box."""
+    return (_walkover(card.walkover_by) if card.walkover_by
+            else _box(card.forfeited_by))
+
+
+def _walkover_text(gave_up: str) -> str:
+    """What a walkover's card prints that makes it one, as :func:`_forfeit_text`
+    says of a Match Forfeited box."""
+    return (f"Match Cancelled is ticked beside a winner and a TOTAL row of every "
+            f"rubber to {forfeit_match_winner(gave_up)} as a love set, which is "
+            f"how Match Centre writes a walkover conceded by {gave_up}")
+
+
+def _walkover_totals(sets: Sequence[ParsedSet], totals: Totals,
+                     gave_up: str) -> CrossCheck:
+    """The TOTAL row of a walkover, held to the walkover: it totals the award
+    under the set rules named, which :func:`walkover_side` found it does under
+    one at least, and validate holds it to the club's. Every cell is printed
+    (:func:`walkover_side`), so its games fit the rules of one length of set
+    alone, which are named: never "any set rule", as a box's sets alone may be."""
+    fits = [name for name, award in _awards_by_rule(sets, gave_up).items()
+            if not totals.differs_on(award)]
+    return CrossCheck(
+        "totals", True, held_to=_walkover(gave_up),
+        detail=f"{_walkover_text(gave_up)}, so the printed TOTAL row is held to "
+               f"the walkover rather than to the rows, and totals its award under "
+               f"{in_words(fits, 'or')}: every rubber to "
+               f"{forfeit_match_winner(gave_up)}, each a love set")
+
+
 def _reading_text(sets: Sequence[ParsedSet]) -> str:
     by_games, by_sets = _readings(sets)
     home_games = sum(s.home_games for s in sets)
@@ -2936,8 +3331,90 @@ def _reading_text(sets: Sequence[ParsedSet]) -> str:
             f"({by_sets or 'level'})")
 
 
+def _as_awarded(sets: Sequence[ParsedSet], games_to_win: int,
+                given_up_by: str | None) -> list[ParsedSet]:
+    """The set rows as Match Centre counts them, every rubber not played out scored.
+
+    By :func:`~matchcentre.model.rubber_award` under ``full-games``, the arithmetic
+    Match Centre's own TOTAL row does, at *games_to_win*: each awarded row becomes
+    the love set or the raised retirement it is counted as, ticked Forfeit against
+    the side it went against, so the bound :func:`_row_claims` sets on it is the
+    award (4.421, 4.422).
+    """
+    scored = []
+    for parsed in sets:
+        award = rubber_award(status=parsed.status, home_games=parsed.home_games,
+                             away_games=parsed.away_games, games_to_win=games_to_win,
+                             home_forfeit=parsed.home_forfeit,
+                             away_forfeit=parsed.away_forfeit,
+                             home_retired=parsed.home_retired,
+                             away_retired=parsed.away_retired,
+                             given_up_by=given_up_by)
+        if award is not None:
+            side, home, away = award
+            parsed = replace(parsed, home_games=home, away_games=away,
+                             status=SetStatus.FORFEIT, home_forfeit=side == "away",
+                             away_forfeit=side == "home", home_retired=False,
+                             away_retired=False)
+        scored.append(parsed)
+    return scored
+
+
+def _awarded_text(sets: Sequence[ParsedSet], given_up_by: str | None) -> str:
+    """What Match Centre counts of the rows it awards, in the words a detail uses."""
+    if given_up_by is not None:
+        return (f"every rubber to {forfeit_match_winner(given_up_by)} as a love "
+                f"set, for {_box(given_up_by)}")
+    said = []
+    if any(s.status is SetStatus.FORFEIT for s in sets):
+        said.append("a rubber ticked Forfeit against one side as a love set to the "
+                    "other")
+    if any(s.status is SetStatus.RETIRED for s in sets):
+        said.append("a rubber one side retired from as the other's set, its games "
+                    "raised to win it")
+    return in_words(said)
+
+
+def _scored_totals(sets: Sequence[ParsedSet], totals: Totals,
+                   forfeited_by: str | None) -> CrossCheck | None:
+    """A TOTAL row held to the set rows as Match Centre counts them, or ``None``.
+
+    ``None`` where no set rule awards a rubber of the card. Otherwise it agrees
+    where the row totals the rows awarded under a set rule, named, and disagrees,
+    saying so, where it totals them under none. The reader knows no set rule, so
+    it asks each length of set ``SET_RULES`` holds, as it asks a box's award; the
+    club's is validate's to hold the row to (4.421).
+    """
+    given_up = forfeited_by if forfeited_by in SIDES else None
+    fits, awarded = [], False
+    for games_to_win in sorted({rule.games_to_win for rule in SET_RULES.values()}):
+        scored = _as_awarded(sets, games_to_win, given_up)
+        if scored == list(sets):
+            continue
+        awarded = True
+        if _totals_check(scored, totals, forfeited_by=None, scored=False).agrees:
+            fits.extend(name for name, rule in SET_RULES.items()
+                        if rule.games_to_win == games_to_win)
+    if not awarded:
+        return None
+    what = _awarded_text(sets, given_up)
+    if not fits:
+        return CrossCheck("totals", True, agrees=False,
+                          detail=f"nor does it total the set rows as Match Centre "
+                                 f"counts them under any set rule, {what}")
+    under = "any set rule" if len(fits) == len(SET_RULES) else in_words(fits, "or")
+    return CrossCheck(
+        "totals", True,
+        detail=f"printed games {_shown(totals.home_games)}-"
+               f"{_shown(totals.away_games)} and sets {_shown(totals.home_sets)}-"
+               f"{_shown(totals.away_sets)} total the {len(sets)} set rows as Match "
+               f"Centre counts them under {under}: {what}")
+
+
 def _totals_check(sets: Sequence[ParsedSet], totals: Totals, *,
-                  forfeited_by: str | None) -> CrossCheck:
+                  forfeited_by: str | None,
+                  walkover_by: str | None = None,
+                  scored: bool = True) -> CrossCheck:
     """The printed ``TOTAL`` row against the sum of the set rows.
 
     A whole-match forfeit whose rows give no result (:func:`_left_blank`) may
@@ -2948,11 +3425,17 @@ def _totals_check(sets: Sequence[ParsedSet], totals: Totals, *,
     validate. One that totals neither the rows nor any award disagrees, and says
     why the rows alone fault it. No report is named: ``totals-mismatch`` reports
     what this faults, but not on a card its Match Cancelled box calls off, which F6
-    asks of it instead.
+    asks of it instead. A walkover's (:func:`walkover_side`) is held to the
+    walkover, by :func:`_walkover_totals`. A row that totals neither the rows as
+    printed nor a box's award may total them as Match Centre counts them, a rubber
+    not played out awarded (:func:`_scored_totals`); ``scored=False`` holds rows
+    already so counted to themselves alone.
     """
     if not totals.present:
         return CrossCheck("totals", False,
                           detail="the card prints no TOTAL row")
+    if walkover_by is not None:
+        return _walkover_totals(sets, totals, walkover_by)
     home_games = sum(s.home_games for s in sets)
     away_games = sum(s.away_games for s in sets)
     home_claim, away_claim = _row_claims(sets)
@@ -2987,19 +3470,28 @@ def _totals_check(sets: Sequence[ParsedSet], totals: Totals, *,
                         f"to {came} as a love set")
         return CrossCheck("totals", True, agrees=False, held_to=_box(forfeited_by),
                           detail="; ".join(problems))
+    # Or the rows as Match Centre counts them, a rubber not played out awarded
+    # (4.421, 4.422): the TOTAL row is its arithmetic. Not of rows already scored.
+    awarded = _scored_totals(sets, totals, forfeited_by) if problems and scored \
+        else None
+    if awarded is not None and awarded.agrees:
+        return awarded
+    if awarded is not None:
+        problems.append(awarded.detail)
     if problems:
         return CrossCheck("totals", True, agrees=False,
                           detail="; ".join(problems))
     return CrossCheck(
         "totals", True,
         detail=f"printed games {_shown(totals.home_games)}-"
-               f"{_shown(totals.away_games)} and sets "
-               f"{_shown(totals.home_sets)}-{_shown(totals.away_sets)} match the "
-               f"{len(sets)} set rows")
+               f"{_shown(totals.away_games)} match the {len(sets)} set rows, and "
+               f"sets {_shown(totals.home_sets)}-{_shown(totals.away_sets)} are "
+               f"within the {home_claim}-{away_claim} they allow")
 
 
 def _verb_check(sets: Sequence[ParsedSet], verb: str, *,
-                forfeited_by: str | None) -> CrossCheck:
+                forfeited_by: str | None,
+                walkover_by: str | None = None) -> CrossCheck:
     """The result verb printed between the team names against the set rows.
 
     Read through ``card.verb_side``, the one reading validate asks too, so a word
@@ -3010,7 +3502,9 @@ def _verb_check(sets: Sequence[ParsedSet], verb: str, *,
     naming the side that turned up agrees. A draw, or the side that forfeited,
     disagrees, and ``verb-mismatch``, which holds every forfeit's verb to the box
     through the same reading, reports it, so here it names that report rather
-    than make a second one.
+    than make a second one. A walkover's verb (:func:`walkover_side`, which reads
+    one only where the verb names the side that came) is held to the walkover,
+    and restates it.
     """
     claim = verb_side(verb)
     if claim is None:
@@ -3025,6 +3519,11 @@ def _verb_check(sets: Sequence[ParsedSet], verb: str, *,
         else:
             detail = "the card prints no result verb"
         return CrossCheck("verb", False, detail=detail, unusable=unusable)
+    if walkover_by is not None:
+        return CrossCheck("verb", True, held_to=_walkover(walkover_by),
+                          detail=f"{_walkover_text(walkover_by)}, so {verb!r} is "
+                                 "held to the walkover rather than to the rows, "
+                                 "and restates it")
     if _left_blank(sets, forfeited_by):
         held = (f"{_forfeit_text(forfeited_by)}, so {verb!r} is held to the box "
                 "rather than to the rows")
@@ -3035,7 +3534,7 @@ def _verb_check(sets: Sequence[ParsedSet], verb: str, *,
                 else "names the side that forfeited")
         return CrossCheck("verb", True, agrees=False, reported_by="verb-mismatch",
                           detail=f"{held}, and {said}", held_to=_box(forfeited_by))
-    if _supported(claim, sets):
+    if _supported(claim, sets, forfeited_by=forfeited_by):
         return CrossCheck("verb", True,
                           detail=f"{verb!r} agrees with the set rows")
     said = ("the match a draw" if claim == "draw"
@@ -3060,18 +3559,23 @@ def names_nobody(text: str) -> bool:
 
 def _winner_tick_check(sets: Sequence[ParsedSet], winner: str | None,
                        boxes: Sequence[_Box], grid: _Grid, *,
-                       forfeited_by: str | None, verb: str) -> CrossCheck:
+                       forfeited_by: str | None, verb: str,
+                       walkover_by: str | None = None) -> CrossCheck:
     """The ``Match Winner`` checkbox against the set rows.
 
     On a whole-match forfeit whose rows give no result (:func:`_left_blank`) the
-    tick is held to the Match Forfeited box, as the verb is. A tick for the side
-    that turned up restates the box and agrees. One for the side that forfeited
+    tick is held to the Match Forfeited box, as the verb is, and the box is asked
+    first, as the verb check asks it: rows some set rule gives a result are not
+    rows that give none (4.425). A tick for the side that turned up restates the
+    box and agrees. One for the side that forfeited
     disagrees with it. When the verb names the same side, read through
     ``card.verb_side`` as the verb check reads it, ``verb-mismatch`` reports the
     verb and so the tick. When it does not, this check reports it. On rows
     the verb already disagrees with for the side that turned up, a tick for that
     side is the same contradiction, and the verb check reports it. Any other tick
-    is held to the rows.
+    is held to the rows. A walkover's tick (:func:`walkover_side`, which reads
+    one only where the tick names the side that came) restates the walkover,
+    whatever the rows say.
 
     Asked only of a card whose two Match Winner boxes are both named: by
     :func:`read_page` of one that reads, and by :func:`describe` of any card it
@@ -3086,10 +3590,10 @@ def _winner_tick_check(sets: Sequence[ParsedSet], winner: str | None,
         return CrossCheck("winner-tick", True, agrees=False,
                           detail="both Match Winner boxes are ticked, so the "
                                  "card does not say who won")
-    if _supported(winner, sets):
-        return CrossCheck("winner-tick", True,
-                          detail=f"the {winner} Match Winner tick agrees with "
-                                 "the set rows")
+    if walkover_by is not None:
+        return CrossCheck("winner-tick", True, held_to=_walkover(walkover_by),
+                          detail=f"the {winner} Match Winner tick restates the "
+                                 f"walkover: {_walkover_text(walkover_by)}")
     turned_up = forfeit_match_winner(forfeited_by)
     if _left_blank(sets, forfeited_by):
         if winner == turned_up:
@@ -3108,6 +3612,10 @@ def _winner_tick_check(sets: Sequence[ParsedSet], winner: str | None,
                                  f"the {forfeited_by} Match Forfeited box is "
                                  f"ticked, giving the match to {turned_up}, and "
                                  "the set rows give no result")
+    if _supported(winner, sets, forfeited_by=forfeited_by):
+        return CrossCheck("winner-tick", True,
+                          detail=f"the {winner} Match Winner tick agrees with "
+                                 "the set rows")
     if winner == turned_up and verb_side(verb) == winner:
         return CrossCheck("winner-tick", True, agrees=False,
                           reported_by="the verb cross-check",

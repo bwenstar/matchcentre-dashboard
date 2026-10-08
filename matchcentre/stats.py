@@ -79,7 +79,9 @@ __all__ = ["PRECISION", "match_sort_key", "chronological", "rounds_present",
            "NOT_COUNTED_FINALS", "NOT_COUNTED_NAMES",
            "PointsLedger", "points_ledger", "round_points", "head_to_head",
            "h2h_key", "ladder",
-           "ladder_history", "ladder_complete", "team_stats", "player_stats",
+           "ladder_history", "ladder_counts", "ladder_state_of", "ladder_state",
+           "ladder_played", "rounds_credited", "ladder_detail",
+           "ladder_complete", "ladder_leader", "team_stats", "player_stats",
            "player_names", "is_fill_in", "contribution_gaps", "ContributionGap",
            "PointsBreakdown", "SideRecord",
            "SlotRecord", "DisciplineRecord", "PlayerSlotRecord", "Streak",
@@ -307,7 +309,7 @@ class ContributionGap:
     of this record's own: both are :func:`ladder_matches`, so a caption printing one
     beside the other cannot contradict the table it is under.
 
-    The four counts are the four reasons the rows and the total disagree, counted as a
+    The five counts are the five reasons the rows and the total disagree, counted as a
     reader would go and look at them -- per rubber, once, however many names in it are
     strangers, and per *night* for the last, because two cards describing one Tuesday
     are one night and the data health section names them as the pair of files they are.
@@ -319,6 +321,10 @@ class ContributionGap:
     Zeroes rather than ``None`` for a team whose column adds up, the ``share_pct`` of a
     team that won no games excepted, as above: every field is written for every team,
     so nothing downstream has to tell "nothing wrong" from "nothing written".
+
+    ``rubbers_nobody_played`` counts a team's rubbers won by a forfeit nobody played,
+    a love set to the side that came (4.421): the team's games, and nobody's in it,
+    since nobody took the court (:meth:`~matchcentre.model.Match.nobody_played`).
     """
 
     games: float
@@ -327,6 +333,7 @@ class ContributionGap:
     rubbers_with_outsiders: int
     rubbers_short_a_name: int
     rubbers_overfull: int
+    rubbers_nobody_played: int
     nights_not_credited: int
 
 
@@ -387,7 +394,9 @@ class TeamStats:
     points: float
     points_average: float | None
     points_breakdown: PointsBreakdown
-    position: int
+    # None while the ladder has not started (`ladder_state`): nothing counted is no
+    # order, and a place given by name was moved out of by the next build (4.428).
+    position: int | None
     games_won: int
     games_lost: int
     games_diff: int
@@ -426,7 +435,11 @@ class PlayerStats:
     rating: dict[str, float | None]
     rating_history: list[RatingPoint]
     matches: int
-    available: int
+    # The nights the player's team played and how many of `matches` were on its
+    # side, the rest being nights lent to another. None for a player on no team's
+    # roster, who has no team's nights to be out of.
+    available: int | None
+    team_matches: int | None
     sets_played: int
     sets_won: int
     sets_lost: int
@@ -468,13 +481,18 @@ def _scoreline(match: Match) -> tuple:
     Each row's two ``Forfeit`` ticks are in it because they decide who won a
     forfeited rubber, and two cards alike in every figure but which side gave up
     which singles do not agree about the night. Compared as ticked rather than as
-    the winner they imply, as the row's status is.
+    the winner they imply, as the row's status is. So are its ``Retired`` ticks, and
+    the games each row prints beside the games it is scored: two cards scoring a
+    forfeited rubber the same love set over different games on court do not agree
+    about what was played (4.421, 4.422).
     """
     return (match.status, match.forfeited_by, match.winner,
             match.home_games, match.away_games,
             match.home_sets, match.away_sets,
             tuple((s.slot.key, s.home_games, s.away_games, s.status,
-                   s.home_forfeit, s.away_forfeit)
+                   s.home_forfeit, s.away_forfeit,
+                   s.printed_home_games, s.printed_away_games,
+                   s.home_retired, s.away_retired)
                   for s in match.sets))
 
 
@@ -1362,6 +1380,97 @@ def _ranked(matches: Sequence[Match], competition: Competition) -> list[str]:
     return sorted(teams, key=functools.cmp_to_key(rank))
 
 
+def _counts(matches: Sequence[Match], teams: Iterable[str]) -> dict[str, int]:
+    """Each team's counted matches, of a list :func:`ladder_matches` has built."""
+    return {slug: points_ledger(matches, slug).counted for slug in teams}
+
+
+def ladder_counts(matches: Sequence[Match],
+                  competition: Competition) -> dict[str, int]:
+    """Each team's counted matches: what the ladder's average divides by (F10).
+
+    The same set of matches the ladder itself is built from, finals excluded, or
+    two teams meeting in a semi-final would report the table as unsettled for the
+    rest of time: they have played one more match than everybody else and always
+    will have. A card exported twice is the same trap in reverse -- it would read
+    as a team a match ahead of the field. Two cards that disagree about the result
+    leave the pair of them a match behind it instead, and two that agree about the
+    result and not about the names are counted once like anybody else -- which does
+    put that pair a match ahead, correctly: they played, and the teams either side
+    of them have not.
+    """
+    return _counts(ladder_matches(matches, competition), competition.teams)
+
+
+def ladder_state_of(counts: Mapping[str, int]) -> str:
+    """Rule F10, of the teams' counted matches: one of three states, by one rule.
+
+    ``"empty"`` while nobody has counted a match, which is no ladder at all: no
+    order to present and nobody placed (4.428). ``"complete"`` when every team has
+    counted the same number, which is a settled order. ``"in-progress"`` otherwise,
+    which is a snapshot, a team on nought among teams on more included. A
+    competition with no teams has nothing counted, so it has not started either.
+    """
+    values = set(counts.values())
+    if not values or values == {0}:
+        return "empty"
+    return "complete" if len(values) == 1 else "in-progress"
+
+
+def ladder_state(matches: Sequence[Match], competition: Competition) -> str:
+    """:func:`ladder_state_of` the competition's :func:`ladder_counts`."""
+    return ladder_state_of(ladder_counts(matches, competition))
+
+
+def ladder_played(matches: Sequence[Match],
+                  competition: Competition) -> dict[str, int]:
+    """Each team's matches decided, of the matches :func:`ladder_counts` counts.
+
+    The ladder's ``P`` column: what :func:`ladder_counts` counts less the rounds
+    credited the team's own average. The two are the same figure under
+    ``unplayed = "zero"``, and wherever no team has had a week off.
+    """
+    ordered = ladder_matches(matches, competition)
+    return {slug: points_ledger(ordered, slug).decided for slug in competition.teams}
+
+
+def rounds_credited(counts: Mapping[str, int], played: Mapping[str, int]) -> bool:
+    """Whether any team's counted matches are more than it played (4.459).
+
+    True only under ``unplayed = "average"`` and only once some team has been
+    credited a round, a bye or a washout. The page asks its rows the same thing
+    before it shows its Counted column, and the report before it prints ``cnt``.
+    """
+    return any(n > played[slug] for slug, n in counts.items())
+
+
+def ladder_detail(counts: Mapping[str, int], played: Mapping[str, int]) -> str:
+    """What :func:`ladder_state_of` compared, said of *counts* (4.458).
+
+    F10 compares counted matches. Where every team's counted is its ``P`` that is
+    matches played, and the sentence says so; where a round has been credited
+    somewhere it is not, and the sentence names the count, or it says ``every team
+    has played the same number`` over a ``P`` column that does not read the same
+    for every team. One function for the report, F10 and both pages, so that no
+    two of them can say it differently.
+    """
+    state = ladder_state_of(counts)
+    if state == "empty":
+        return "no regular-season match has been counted yet"
+    credited = rounds_credited(counts, played)
+    if state == "complete":
+        if credited:
+            # At least two apiece: a round is credited an average, and an average
+            # needs a match decided.
+            return (f"every team has {next(iter(counts.values()))} matches counted, "
+                    f"byes and washouts credited their average")
+        return "every team has played the same number"
+    if credited:
+        return ("teams have unequal numbers of matches counted, byes and washouts "
+                "included")
+    return "teams have played unequal numbers of matches"
+
+
 def ladder_complete(matches: Sequence[Match], competition: Competition) -> bool:
     """Rule F10: whether the ladder is a settled order or a snapshot.
 
@@ -1371,22 +1480,25 @@ def ladder_complete(matches: Sequence[Match], competition: Competition) -> bool:
     without a single wrong number in it.
 
     A competition where nothing has been counted yet is not complete either: an
-    empty ladder is not a settled one.
+    empty ladder is not a settled one, and it is not one in progress either, which
+    is why the answer is :func:`ladder_state`'s and this is one of its three.
     """
-    if not competition.teams:
-        return False
-    # The same set of matches the ladder itself is built from, finals excluded, or
-    # two teams meeting in a semi-final would report the table as unsettled for the
-    # rest of time: they have played one more match than everybody else and always
-    # will have. A card exported twice is the same trap in reverse -- it would read
-    # as a team a match ahead of the field. Two cards that disagree about the result
-    # leave the pair of them a match behind it instead, and two that agree about the
-    # result and not about the names are counted once like anybody else -- which does
-    # put that pair a match ahead, correctly: they played, and the teams either side
-    # of them have not.
-    matches = ladder_matches(matches, competition)
-    counts = {points_ledger(matches, slug).counted for slug in competition.teams}
-    return len(counts) == 1 and counts != {0}
+    return ladder_state(matches, competition) == "complete"
+
+
+def ladder_leader(table: Mapping[str, TeamStats], state: str) -> TeamStats | None:
+    """The team that leads *table*, :func:`team_stats`'s: a settled ladder's top.
+
+    Only a complete ladder has a leader. The top row of one in progress is the team
+    whose card arrived first, and of one not started, nobody (F10, 4.209). Asked
+    here once, so the front page and the overview cannot crown two teams (4.438).
+    A leader leads on its average, so a top row with none leads nobody: no ladder
+    the state calls complete has one, and the pages are never handed no figure.
+    """
+    if state != "complete":
+        return None
+    return next((row for row in table.values()
+                 if row.position == 1 and row.points_average is not None), None)
 
 
 def through_round(matches: Iterable[Match], number: str) -> list[Match]:
@@ -1414,6 +1526,10 @@ def ladder_history(matches: Sequence[Match],
     matches = ladder_matches(matches, competition)
     for number in rounds_present(matches):
         seen = through_round(matches, number)
+        # A round that left nothing counted is no ladder to have a place on (4.428):
+        # a washed-out first round drew every team at a place given by name.
+        if ladder_state_of(_counts(seen, competition.teams)) == "empty":
+            continue
         for position, slug in enumerate(_ranked(seen, competition), start=1):
             average = points_ledger(seen, slug).average
             history[slug].append(LadderEntry(round=number, position=position,
@@ -1439,8 +1555,12 @@ def team_stats(matches: Sequence[Match],
     # the same three steps here by hand is how a row and its table come to describe
     # different sets of matches.
     ordered = chronological(ladder_matches(matches, competition))
-    positions = {slug: i for i, slug in enumerate(_ranked(ordered, competition),
-                                                 start=1)}
+    # Nobody is placed on a ladder that has not started (4.428): `_ranked` puts a
+    # team with nothing counted last and orders those by name, which with every
+    # team on nothing is the alphabet given as places.
+    positions = ({} if ladder_state_of(_counts(ordered, teams)) == "empty" else
+                 {slug: i for i, slug in enumerate(_ranked(ordered, competition),
+                                                   start=1)})
     # From the cards, as `ordered` is. Handed `ordered`, it would build that list
     # again out of one with none of the cards the first build set aside.
     history = ladder_history(matches, competition)
@@ -1481,7 +1601,7 @@ def team_stats(matches: Sequence[Match],
             points=round_stored(ledger.total),
             points_average=round_stored(ledger.average),
             points_breakdown=ledger.breakdown(),
-            position=positions[slug],
+            position=positions.get(slug),
             games_won=counts.games_won,
             games_lost=counts.games_lost,
             games_diff=counts.games_won - counts.games_lost,
@@ -1490,7 +1610,7 @@ def team_stats(matches: Sequence[Match],
             sets_diff=counts.sets_won - counts.sets_lost,
             win_pct=set_win_pct(counts.sets_won, counts.sets_lost),
             # What the ladder's average divides by, so the dashboard can say *why*
-            # the order is provisional when `ladder_complete` is false (F10).
+            # the order is provisional when `ladder_state` is not complete (F10).
             counted=ledger.counted,
             home=_side_record(played, slug, "home"),
             away=_side_record(played, slug, "away"),
@@ -1605,6 +1725,7 @@ class _GapTally:
     outsiders: int = 0
     short: int = 0
     crowded: int = 0
+    nobody: int = 0
     nights: int = 0
 
 
@@ -1666,6 +1787,13 @@ def _share_walk(matches: Sequence[Match], competition: Competition) -> _Shares:
             continue
         rosters = {"home": match.home_roster, "away": match.away_roster}
         for result in match.sets:
+            if match.nobody_played(result):
+                # A rubber won by a forfeit nobody played: its love set is the
+                # team's, and no player's, since nobody took the court (4.421).
+                for side, team in teams.items():
+                    if team in tally and result.games_for(side):
+                        tally[team].nobody += 1
+                continue
             for side, team in teams.items():
                 players = result.players_for(side)
                 earners = [slug for slug in players
@@ -1713,6 +1841,7 @@ def _share_walk(matches: Sequence[Match], competition: Competition) -> _Shares:
             rubbers_with_outsiders=team_tally.outsiders,
             rubbers_short_a_name=team_tally.short,
             rubbers_overfull=team_tally.crowded,
+            rubbers_nobody_played=team_tally.nobody,
             nights_not_credited=team_tally.nights,
         )
     return _Shares(per_player=dict(per_player), per_team=gaps)
@@ -1741,6 +1870,8 @@ class _PlayerAccumulator:
     games_won: int = 0
     games_lost: int = 0
     match_ids: list[tuple[str, str, str]] = field(default_factory=list)
+    # The keys of `match_ids` played on the side of the team that registers them.
+    team_match_ids: set[tuple[str, str, str]] = field(default_factory=set)
     results: list[str] = field(default_factory=list)
     fill_ins: set[tuple[str, str, str]] = field(default_factory=set)
     singles: list[tuple[str | None, int, int]] = field(default_factory=list)
@@ -1815,6 +1946,10 @@ def player_stats(matches: Sequence[Match],
             # claim about who took a court.
             continue
         for result in match.sets:
+            if match.nobody_played(result):
+                # Nobody took the court, so nobody named on the row played it: no
+                # match, set or games from it (4.289, 4.421).
+                continue
             sides = {"home": result.home_players, "away": result.away_players}
             for side, players in sides.items():
                 other = "away" if side == "home" else "home"
@@ -1836,6 +1971,13 @@ def player_stats(matches: Sequence[Match],
                         entry.results.append(verdict)
                     if key not in entry.match_ids:
                         entry.match_ids.append(key)
+                    # Asked of the registration alone: a night for their own side
+                    # is their team's whatever that card's roster block printed.
+                    # Since 4.443 is_fill_in asks a registered player's squad the
+                    # same way, and the block only of a name no squad registers.
+                    own = index.get(slug)
+                    if own is not None and own.team == sides_team[side]:
+                        entry.team_match_ids.add(key)
                     if is_fill_in(slug, index.get(slug), rosters[side],
                                   sides_team[side]):
                         entry.fill_ins.add(key)
@@ -1862,10 +2004,11 @@ def player_stats(matches: Sequence[Match],
         team = teams.get(team_slug) if team_slug else None
         # Matches the player could have been picked for: a cancelled round is not
         # one, so "played 2 of 3" counts the same three nights the association's
-        # sheet counts.
+        # sheet counts. A team's nights, so a player on no team has none, and None
+        # says so where their own count would be a team's figure for no team.
         available = (sum(1 for m in ordered
                          if m.involves(team_slug) and m.counts_as_played)
-                     if team_slug else len(entry.match_ids))
+                     if team_slug else None)
         rating_history = [
             RatingPoint(round=number, singles=values[0], doubles=values[1])
             for number, values in sorted(entry.ratings.items(),
@@ -1887,6 +2030,7 @@ def player_stats(matches: Sequence[Match],
             rating_history=rating_history,
             matches=len(entry.match_ids),
             available=available,
+            team_matches=len(entry.team_match_ids) if team_slug else None,
             sets_played=entry.sets_played,
             sets_won=entry.sets_won,
             sets_lost=entry.sets_lost,
@@ -1916,12 +2060,16 @@ def is_fill_in(slug: str, registered: Player | None, roster: Sequence[str],
                side_team: str) -> bool:
     """A fill-in is someone playing for a side they do not belong to.
 
-    Two independent signals, because either source can be missing: the card's own
-    roster block, and the team a player is registered to. Either one flagging is
-    enough.
+    The squad that registers a player says which side that is, whatever one card's
+    roster block prints: a player their own card leaves off its block still
+    belongs to the side, which the report calls off-roster, a card's omission, and
+    their games are their own row's share. The block is asked only about a player
+    no squad registers, a stranger or somebody from another competition, who is a
+    fill-in where the block was read and leaves them out, and nothing where it was
+    not read.
     """
-    if registered is not None and registered.team != side_team:
-        return True
+    if registered is not None:
+        return registered.team != side_team
     return bool(roster) and slug not in roster
 
 
