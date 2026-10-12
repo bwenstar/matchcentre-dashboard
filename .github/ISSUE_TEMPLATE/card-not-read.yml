@@ -52,7 +52,7 @@ body:
     attributes:
       label: The first line of the build.py report
       description: >
-        It looks like `matchcentre-dashboard 0.1.0  (python 3.12.3 on linux)`.
+        It looks like `matchcentre-dashboard 0.2.0-rc.1  (python 3.12.3 on linux)`.
         This is the whole of what says which build and which Python produced what
         you are describing.
     validations:

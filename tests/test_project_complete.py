@@ -1425,7 +1425,7 @@ class TestTheVersionNumberIsOneNumber(unittest.TestCase):
                          f"changelog entry says {released[0]}")
 
     def test_every_example_of_the_report_line_quotes_the_version_in_the_code(self):
-        # `matchcentre-dashboard 0.1.0 (python 3.12.3 on linux)` is written out by
+        # `matchcentre-dashboard 0.2.0-rc.1 (python 3.12.3 on linux)` is written out by
         # hand in the issue forms, because a form has nothing to interpolate. This
         # is what makes bumping the version notice them.
         stale = []

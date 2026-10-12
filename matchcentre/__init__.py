@@ -46,7 +46,7 @@ from pathlib import Path
 #: anywhere read the constant, so there was no run in which the disagreement could
 #: show up. A test now requires this to equal the newest version the changelog
 #: documents.
-__version__ = "0.1.0"
+__version__ = "0.2.0-rc.1"
 __all__ = ["__version__", "NAME", "REQUIRES_PYTHON", "version_line", "WINDOWS",
            "pasteable", "pasteable_path"]
 

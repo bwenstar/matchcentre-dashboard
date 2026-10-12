@@ -10,6 +10,8 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
+## [0.2.0-rc.1] — 2026-10-12
+
 ### Fixed
 
 - A card is filed under the night its competition line names (`Tuesday Night
