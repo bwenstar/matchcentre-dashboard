@@ -61,7 +61,7 @@ from .competition import (DRAW_DECLARED, Competition, Player, Round,
 from .format import MatchFormat
 from .model import NO_OPPONENT, Match, MatchStatus, Outcome
 from .scope import in_words
-from .scoring import LADDER_KEYS
+from .scoring import LADDER_KEYS, Ruleset
 from .slugs import unslug
 
 __all__ = ["PRECISION", "match_sort_key", "chronological", "rounds_present",
@@ -80,6 +80,9 @@ __all__ = ["PRECISION", "match_sort_key", "chronological", "rounds_present",
            "PointsLedger", "points_ledger", "round_points", "head_to_head",
            "h2h_key", "ladder",
            "ladder_history", "ladder_counts", "ladder_state_of", "ladder_state",
+           "ordered_on_the_average", "level_on_unequal_counts",
+           "ladder_levels", "order_stands", "LEVEL_AT_THE_TOP",
+           "level_at_the_top",
            "ladder_played", "rounds_credited", "ladder_detail",
            "ladder_complete", "ladder_leader", "team_stats", "player_stats",
            "player_names", "is_fill_in", "contribution_gaps", "ContributionGap",
@@ -1408,13 +1411,135 @@ def ladder_state_of(counts: Mapping[str, int]) -> str:
     ``"empty"`` while nobody has counted a match, which is no ladder at all: no
     order to present and nobody placed (4.428). ``"complete"`` when every team has
     counted the same number, which is a settled order. ``"in-progress"`` otherwise,
-    which is a snapshot, a team on nought among teams on more included. A
-    competition with no teams has nothing counted, so it has not started either.
+    a team on nought among teams on more included. Whether an order in progress
+    is a snapshot or already stands is :func:`order_stands`'s question, of the
+    ruleset and the rows together, and not this state's. A competition with
+    no teams has nothing counted, so it has not started either.
     """
     values = set(counts.values())
     if not values or values == {0}:
         return "empty"
     return "complete" if len(values) == 1 else "in-progress"
+
+
+def ordered_on_the_average(rules: Ruleset) -> bool:
+    """Whether *rules* order the ladder on the average: fair on unequal counts.
+
+    An order on ``points_average`` divides each team's points by its own
+    counted matches. A bye, a washout or a card not yet in then neither lifts
+    a team nor drops it, so while the counts are unequal the order already
+    stands wherever the average decides it, and its top row leads by the
+    competition's own measure (4.523).
+    An order on a total, ``points`` first as ``simple``, ``sets-first`` and
+    ``rubbers`` are, puts the team with the most matches on top as much as the
+    team with the best record, and it is a snapshot until every team has
+    counted the same number. Asked of the first key alone, the one that
+    decides the order wherever two teams' averages differ. Where two are
+    level on it the next key decides, and under ``games-bonus`` that is
+    ``points``, a total, so whether the order stands on the counts it has is
+    :func:`order_stands`'s question, which asks this one first. Asked here
+    once, for :func:`order_stands`, :func:`ladder_leader`, F10 and the
+    document's ``meta.ordered_on_average``, which is how the pages know it.
+    """
+    return rules.ladder_by[0] == "points_average"
+
+
+def level_on_unequal_counts(order: Sequence[str],
+                            averages: Mapping[str, float | None],
+                            counts: Mapping[str, int]) -> list[list[str]]:
+    """The runs of teams level on the average whose counts are not all one.
+
+    *order* is the ladder's, and each run keeps it. Level is the ladder's own
+    level, at :data:`PRECISION`, as :func:`_ranked` compares. A team with no
+    average is in no run: it is placed last for want of a match. Teams level
+    on the same count are no run either, their order between them owing
+    nothing to the count. Within a run the average decides nothing, and on
+    an order on the average the next key does, which under ``games-bonus`` is
+    ``points``: the team that has counted more is placed above the team that
+    has counted fewer, for those matches alone (4.523).
+    """
+    runs: dict[float, list[str]] = {}
+    for slug in order:
+        if averages[slug] is not None:
+            runs.setdefault(round(averages[slug], PRECISION), []).append(slug)
+    return [run for run in runs.values()
+            if len({counts[slug] for slug in run}) > 1]
+
+
+def ladder_levels(matches: Sequence[Match],
+                  competition: Competition) -> list[list[str]]:
+    """:func:`level_on_unequal_counts` of the cards, for F10.
+
+    Asked of :func:`team_stats`'s own rows, so F10 names the runs the ladder
+    shows, and the rounds are put in order where the ladder puts them.
+    """
+    return _table_levels(team_stats(matches, competition))
+
+
+def _table_levels(table: Mapping[str, TeamStats]) -> list[list[str]]:
+    """:func:`level_on_unequal_counts` of :func:`team_stats`'s rows."""
+    order = sorted((slug for slug, row in table.items()
+                    if row.position is not None),
+                   key=lambda slug: table[slug].position)
+    return level_on_unequal_counts(
+        order, {slug: table[slug].points_average for slug in order},
+        {slug: table[slug].counted for slug in order})
+
+
+def order_stands(table: Mapping[str, TeamStats], state: str,
+                 rules: Ruleset) -> bool:
+    """Whether the order of *table*, in *state*, stands on the counts it has.
+
+    A complete ladder's does: every team has counted the same number. One not
+    started has no order to stand. One in progress stands only where *rules*
+    order it on the average (:func:`ordered_on_the_average`) and no two teams
+    are level on that average on unequal counts
+    (:func:`level_on_unequal_counts`): between two that are, the next key
+    decides, and under ``games-bonus`` that is points, a total, which the
+    team that has counted more leads for those matches alone (4.523). The
+    document's ``meta.order_stands``, so the ladder's note says the order
+    stands only where it does.
+    """
+    if state != "in-progress":
+        return state == "complete"
+    return ordered_on_the_average(rules) and not _table_levels(table)
+
+
+# Why a ladder in progress ordered on the average names nobody, where
+# :func:`level_at_the_top` says so: the document's ``meta.leader_withheld``,
+# which the front page and the overview's hero give in place of the counts.
+LEVEL_AT_THE_TOP = ("the teams on top are level on the average with "
+                    "different numbers of matches counted")
+
+
+def level_at_the_top(table: Mapping[str, TeamStats], state: str,
+                     rules: Ruleset) -> bool:
+    """Whether *table*'s top row is level on the average across counts.
+
+    Asked of a ladder in progress that *rules* order on the average
+    (:func:`ordered_on_the_average`), the one kind that is led while the
+    counts are unequal. Its top row is then the leader unless it is level on
+    the average with a team on another count (:func:`level_on_unequal_counts`):
+    the next key, under ``games-bonus`` points, a total, puts the team that
+    has counted more on top for those matches alone. So this is the one
+    reason such a ladder names nobody, and the pages say it, where the counts
+    alone are not why: a division beside it on unequal counts is led (4.523).
+    False of every other ladder, whose leader the state and the rules decide.
+    Asked here once, for :func:`ladder_leader` and the document's
+    ``meta.leader_withheld``.
+    """
+    if state != "in-progress" or not ordered_on_the_average(rules):
+        return False
+    top = _top_row(table)
+    return top is not None and any(top.slug in run
+                                   for run in _table_levels(table))
+
+
+def _top_row(table: Mapping[str, TeamStats]) -> TeamStats | None:
+    """The row placed first with an average to lead on, if any."""
+    return next((row for row in table.values()
+                 if row.position == 1 and row.points_average is not None),
+                None)
 
 
 def ladder_state(matches: Sequence[Match], competition: Competition) -> str:
@@ -1472,12 +1597,16 @@ def ladder_detail(counts: Mapping[str, int], played: Mapping[str, int]) -> str:
 
 
 def ladder_complete(matches: Sequence[Match], competition: Competition) -> bool:
-    """Rule F10: whether the ladder is a settled order or a snapshot.
+    """Rule F10: whether every team has counted the same number of matches.
 
     True only when every team has the same number of counted matches. Mid-round,
-    with one card of three in, the leaders are simply the teams whose card arrived
-    — and presenting that as a table of positions is how a dashboard tells a lie
-    without a single wrong number in it.
+    with one card of three in, the leaders of a ladder ordered on a total are
+    simply the teams whose card arrived -- and presenting that as a settled
+    table of positions is how a dashboard tells a lie without a single wrong
+    number in it. A ladder ordered on the average is not misled that way
+    wherever the average decides its order; whether its order stands on the
+    counts it has, between teams level on it too, is :func:`order_stands`'s
+    question, not this one's (4.523).
 
     A competition where nothing has been counted yet is not complete either: an
     empty ladder is not a settled one, and it is not one in progress either, which
@@ -1486,19 +1615,34 @@ def ladder_complete(matches: Sequence[Match], competition: Competition) -> bool:
     return ladder_state(matches, competition) == "complete"
 
 
-def ladder_leader(table: Mapping[str, TeamStats], state: str) -> TeamStats | None:
-    """The team that leads *table*, :func:`team_stats`'s: a settled ladder's top.
+def ladder_leader(table: Mapping[str, TeamStats], state: str,
+                  rules: Ruleset) -> TeamStats | None:
+    """The team that leads *table*, :func:`team_stats`'s, under *rules*.
 
-    Only a complete ladder has a leader. The top row of one in progress is the team
-    whose card arrived first, and of one not started, nobody (F10, 4.209). Asked
-    here once, so the front page and the overview cannot crown two teams (4.438).
-    A leader leads on its average, so a top row with none leads nobody: no ladder
-    the state calls complete has one, and the pages are never handed no figure.
+    A ladder that has not started has no leader: nothing counted is no order
+    (4.428). A complete one has its top row. One in progress has its top row
+    when *rules* order it on the average (:func:`ordered_on_the_average`): that
+    order is fair across unequal counts, so a team a bye or a washout behind
+    leads or trails on its own matches, and a club with a bye every round is
+    told who leads all season (4.523). Not while the top row is level on the
+    average with a team on another count (:func:`level_at_the_top`): the next
+    key, under ``games-bonus`` points, a total, puts the team that has
+    counted more on top for those matches alone. A tie below the top leaves
+    the top its own. One in progress ordered on a total has none, its top row
+    being the team whose card arrived first as much as the best record (F10,
+    4.209). Asked here once, so the front page and the overview cannot crown
+    two teams (4.438). A leader leads on its average, so a top row with none
+    leads nobody, and the pages are never handed no figure.
     """
-    if state != "complete":
+    if state == "empty":
         return None
-    return next((row for row in table.values()
-                 if row.position == 1 and row.points_average is not None), None)
+    top = _top_row(table)
+    if state == "complete" or top is None:
+        return top
+    if (not ordered_on_the_average(rules)
+            or level_at_the_top(table, state, rules)):
+        return None
+    return top
 
 
 def through_round(matches: Iterable[Match], number: str) -> list[Match]:
@@ -1610,7 +1754,7 @@ def team_stats(matches: Sequence[Match],
             sets_diff=counts.sets_won - counts.sets_lost,
             win_pct=set_win_pct(counts.sets_won, counts.sets_lost),
             # What the ladder's average divides by, so the dashboard can say *why*
-            # the order is provisional when `ladder_state` is not complete (F10).
+            # the counts are unequal when `ladder_state` is in progress (F10).
             counted=ledger.counted,
             home=_side_record(played, slug, "home"),
             away=_side_record(played, slug, "away"),

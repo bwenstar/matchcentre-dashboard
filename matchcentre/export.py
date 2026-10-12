@@ -16,7 +16,9 @@ distinguish "six teams" from "six teams that happened to have cards", or "a
 ten-round season three rounds in" from "a three-round season". So this document
 carries its own epistemics: ``meta.provenance`` says where each kind of identity
 came from, ``meta.rounds_total`` is null unless a human declared it (F3),
-``meta.ladder_state`` says whether the positions mean anything yet (F10), and
+``meta.ladder_state`` says whether the ladder has started and every team has
+counted the same number, and ``meta.order_stands`` whether its order stands on
+the counts it has (F10, 4.523), and
 ``meta.cards_seen``/``cards_scored``/``cards_rejected`` plus
 ``validation.rejected`` account for every PDF found (F4).
 
@@ -50,17 +52,19 @@ from .slugs import unslug
 __all__ = ["build_season", "published", "season_json", "write_season",
            "SEASON_FORMAT"]
 
-# Bumped when a key changes meaning, or when the page comes to need a key an older
-# document lacks, so a dashboard opened against an older season.json can say so
-# instead of rendering blanks. 2 is the first whose matches carry counts_as_played,
-# 3 the first whose cards, fixtures and rounds carry the key the page finds a card by,
-# 4 the first whose rounds say whether the build read their label as a number, and
-# whose rounds and fixtures no longer list a card by the id it printed. A key a page
-# of format 4 reads and an older build of it did not write, `meta.regular_fixtures`,
-# and since 4.428 `meta.ladder_state` and `meta.leader`, and 4.458's
-# `meta.ladder_detail`, the page prints as unknown rather than bumping the format a
-# second time, and so `players[].team_matches`, by printing no line under a player's
-# Matches figure; and `rounds[].cards_played` it reads as that build's rounds were
+# Bumped when a key changes meaning, or when the page comes to need a key an
+# older document lacks, so a dashboard opened against an older season.json can
+# say so instead of rendering blanks. 2 is the first whose matches carry
+# counts_as_played, 3 the first whose cards, fixtures and rounds carry the key
+# the page finds a card by, 4 the first whose rounds say whether the build read
+# their label as a number, and whose rounds and fixtures no longer list a card
+# by the id it printed. A key a page of format 4 reads and an older build of it
+# did not write, `meta.regular_fixtures`, and since 4.428 `meta.ladder_state`
+# and `meta.leader`, 4.458's `meta.ladder_detail` and 4.523's
+# `meta.ordered_on_average`, `meta.order_stands` and `meta.leader_withheld`,
+# the page prints as unknown rather than bumping the format a second time, and
+# so `players[].team_matches`, by printing no line under a player's Matches
+# figure; and `rounds[].cards_played` it reads as that build's rounds were
 # read, a round with a card played.
 SEASON_FORMAT = 4
 
@@ -117,9 +121,14 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
                               strays=strays)
     team_rows = stats.team_stats(ordered, competition)
     # The ladder's state and its leader, each asked once, for the report, the front
-    # page and the overview alike (4.428, 4.438).
+    # page and the overview alike (4.428, 4.438). The leader is the ruleset's
+    # as well: an order on the average is led while counts are unequal,
+    # unless its top row is level on it with a team on another count
+    # (4.523).
     state = stats.ladder_state(ordered, competition)
-    top = stats.ladder_leader(team_rows, state)
+    top = stats.ladder_leader(team_rows, state, competition.rules)
+    # And why it is nobody, where the counts alone are not why.
+    level_top = stats.level_at_the_top(team_rows, state, competition.rules)
     # And the words the state is said in, played or counted, by what F10 compared,
     # for the same three and F10 (4.458).
     detail = stats.ladder_detail(stats.ladder_counts(ordered, competition),
@@ -162,6 +171,12 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
                       ladder_state=state, ladder_detail=detail,
                       leader=({"slug": top.slug, "value": top.points_average}
                               if top else None),
+                      ordered_on_average=stats.ordered_on_the_average(
+                          competition.rules),
+                      order_stands=stats.order_stands(team_rows, state,
+                                                      competition.rules),
+                      leader_withheld=(stats.LEVEL_AT_THE_TOP if level_top
+                                       else None),
                       matches_played=_matches_played(ordered, totals)),
         "teams": [_plain(team_rows[slug]) for slug in sorted(team_rows)],
         "players": _players(player_rows, competition, club),
@@ -269,7 +284,9 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
           cards: Sequence[Card], rejected: Sequence[Rejection],
           seasons_mode: str, length_refused: bool = False,
           regular_fixtures: dict, ladder_state: str, ladder_detail: str,
-          leader: dict | None, matches_played: int) -> dict:
+          leader: dict | None, ordered_on_average: bool,
+          order_stands: bool, leader_withheld: str | None,
+          matches_played: int) -> dict:
     played = stats.rounds_present(matches, competition.rounds)
     unlisted = sum(1 for r in rejected if r.folder)
     return {
@@ -327,11 +344,15 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         # so the dashboard must not present its fixture list as a schedule (F2).
         "draw_source": competition.draw_source,
         "teams_declared": competition.teams_declared,
-        # "empty" while no regular-season match has been counted, and nobody is
-        # placed; "in-progress" while teams have counted unequal numbers, a
-        # snapshot and not a standing; "complete" otherwise (F10, 4.428).
-        # `ladder_complete` is the last of the three, kept for the pages that read
-        # it, and `leader` the top of a complete ladder and null on the others.
+        # "empty" while no regular-season match has been counted, and nobody
+        # is placed; "in-progress" while teams have counted unequal numbers;
+        # "complete" otherwise (F10, 4.428). `ladder_complete` is the last of
+        # the three, kept for the pages that read it. `leader` is the top of a
+        # complete ladder, and of one in progress ordered on the average; null
+        # on one not started, on one in progress ordered on a total, which is
+        # a snapshot and not a standing until the counts are level, and on one
+        # whose top row is level on the average with a team on another count,
+        # which `leader_withheld` says (4.523).
         "ladder_state": ladder_state,
         # The state as a clause, "teams have played unequal numbers of matches"
         # where every team's counted is its P and counted matches where a round was
@@ -339,6 +360,33 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         "ladder_detail": ladder_detail,
         "ladder_complete": ladder_state == "complete",
         "leader": leader,
+        # Why `leader` is null where the counts are not why, as a clause the
+        # front page and the overview's hero both give: "the teams on top are
+        # level on the average with different numbers of matches counted",
+        # `stats.LEVEL_AT_THE_TOP`, on a ladder in progress ordered on the
+        # average whose top row is level on it with a team on another count
+        # (`stats.level_at_the_top`). Null on every other ladder, whose
+        # reason is its state and `ladder_detail`, as in a document from
+        # before 4.523, where it is absent.
+        "leader_withheld": leader_withheld,
+        # Whether the ladder is ordered on the average, which divides each
+        # team's points by its own counted matches, so that its order stands
+        # while the counts are unequal wherever the average decides it.
+        # Python's answer, `stats.ordered_on_the_average`, so that the page
+        # does not read it off `rules.ladder_by` a second time.
+        "ordered_on_average": ordered_on_average,
+        # Whether the order stands on the counts it has, `stats.order_stands`:
+        # true of a complete ladder, and of one in progress ordered on the
+        # average where no two teams are level on it on unequal counts, whom
+        # the next key, a total, puts in order for the matches the one has
+        # counted more. Of a ladder in progress, the overview's note says the
+        # order stands where this is true; where it is false on a ladder
+        # ordered on the average it says the tie goes to the next key, so
+        # there the order is a snapshot; and it calls the order a snapshot on
+        # a ladder ordered on a total or, in a document from before 4.523,
+        # where both keys are absent. A complete ladder's note gives its basis
+        # alone, and an empty one's says nothing has been counted.
+        "order_stands": order_stands,
         "rules": _rules(competition),
         "provenance": _provenance(competition),
         # Coerced because callers naturally hold this as a Path, and a Path in the

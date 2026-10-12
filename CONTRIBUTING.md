@@ -130,21 +130,64 @@ an empty diff.
 
 What each of the three numbers promises a club is in the README's [versions and
 upgrading](README.md#versions-and-upgrading) section; that decides which one moves.
-Then, in this order:
+Each change goes into `CHANGELOG.md`'s `[Unreleased]` section as it is made, under
+`Added`, `Changed` or `Fixed`. A corrected reading goes under `Fixed` and says out
+loud that figures will move, because that is the one patch a club has to look at
+rather than take. A release is then a pushed tag, in this order:
 
-1. Bump `__version__` in `matchcentre/__init__.py`. Nothing else holds the number —
-   the report, `season.json`, both footers and `--version` all read it from there.
-2. Write the entry in `CHANGELOG.md`, newest first, under `Added`, `Changed` or
-   `Fixed`. A corrected reading goes under `Fixed` and says out loud that figures
-   will move, because that is the one patch a club has to look at rather than take.
-3. Run the whole suite. It fails on a half-done release: the version in the code has
-   to be the newest one the changelog describes, and every example of the report's
-   first line that is written out by hand — the issue forms — has to quote it.
-4. Regenerate the screenshots if anything visible changed, with the command in the
-   section above. They are pinned to a seed and a date, so an unrelated release
-   leaves them byte-identical and the diff stays empty.
-5. `git tag` it, last. A tag is the one step other people may already have fetched
-   by the time you notice it was premature.
+1. `python3 tools/release.py prepare X.Y.Z` writes the version into
+   `matchcentre/__init__.py`, where the report, `season.json`, both footers and
+   `--version` all read it; moves the `[Unreleased]` section under
+   `## [X.Y.Z] — YYYY-MM-DD`, dated today unless `--date` says otherwise; and
+   rewrites every example of the report's first line that is written out by hand,
+   the issue forms among them. It refuses a version that is not newer, an empty
+   `[Unreleased]` or a date that does not exist, and writes nothing then. It commits
+   nothing, and ends by printing the steps below. A final release that follows its
+   own pre-releases, `X.Y.Z` after `X.Y.Z-rc.1`, also gathers their changes under
+   its heading, subsection by subsection after whatever `[Unreleased]` holds, so
+   that its notes say everything since the last final. The pre-releases' own
+   sections stay where they are, below it, as their releases stay on GitHub.
+2. Read the new section: `python3 tools/release.py notes` prints it as the release
+   page will show it, each wrapped paragraph and item on one line.
+3. Run the whole suite, and regenerate the screenshots if anything visible changed,
+   with the command in the section above. They are pinned to a seed and a date, so
+   an unrelated release leaves them byte-identical and the diff stays empty.
+4. Commit, then `git tag -a vX.Y.Z -m "matchcentre-dashboard X.Y.Z"`.
+5. `git push origin main`, and last `git push origin vX.Y.Z`. A tag is the one step
+   other people may already have fetched by the time you notice it was premature.
+
+Pushing the tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which needs nothing enabled. Its first job runs `tools/release.py check` on the tag,
+and fails in seconds when the tag is not `v` and the version in the code, when the
+changelog's newest section is not that version, is undated or empty, or when
+`[Unreleased]` still holds something the notes would leave out. Then the whole suite
+runs, as `tests.yml` runs it on every push. Then `publish` zips the tagged tree with
+`git archive` as `matchcentre-dashboard-X.Y.Z.zip` and makes the GitHub Release with
+`gh`: the changelog's section is its notes, followed by the zip's SHA-256 and a link
+to the run that tested it. A version with a pre-release part, `X.Y.Z-rc.1`, is
+published as a pre-release.
+
+To see it first, `python3 tools/release.py check vX.Y.Z` runs the first job's check
+on your copy, before you tag, and after tagging
+`python3 tools/release.py publish vX.Y.Z --dry-run` writes the zip and the notes
+into `dist/`, which git ignores, and prints each `gh` command instead of running it.
+Without `--dry-run` it runs them, and refuses to unless `GH_REPO=OWNER/REPO` names
+the repository, as the workflow sets it: otherwise `gh` chooses, and in a fork's
+clone it chooses the parent.
+
+A re-run from the run's page runs the same tagged commit again, so it mends only a
+cause outside that commit: a runner that failed, an outage, a setting or a token,
+or a `publish` that stopped half way, which it finishes, since `publish` updates a
+release it finds already there and publishes it if it is a draft. A cause in the
+commit — a test that fails, the changelog, the version, the tag pushed before the
+bump or on the wrong commit — is not mended by re-running. Commit the fix, then
+delete the tag, here with `git tag -d vX.Y.Z` and on GitHub with
+`git push origin :refs/tags/vX.Y.Z`, and tag the new commit and push it again.
+Deleting the tag of a release already made turns that release into a draft, which
+the next run's `publish` updates and publishes again. Cancel a run of the old tag
+that is still going before you delete it. If one is left going, or re-run later,
+its `publish` fails rather than publishing the old commit: it asks GitHub which
+commit the tag is now, and refuses when that is not the one it tested.
 
 ## What is not in the repository
 

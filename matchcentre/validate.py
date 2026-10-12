@@ -12,7 +12,7 @@ may be, wrong: the card's own ``TOTAL`` row contradicts its set rows, two cards
 claim the same fixture, a regular round is marked finals and has been dropped out of
 the ladder. A ``warning`` means something deserves a human's eye but the numbers
 stand: a fill-in, a roster the card printed differently from the club's records, a
-finals result left out of the ladder, a ladder that is honest but not yet settled.
+finals result left out of the ladder, a ladder with a team a match behind.
 
 **Absence of evidence is never silence.** This is the failure the whole project
 exists to prevent, and a validator is where it is most tempting: a check that
@@ -53,9 +53,10 @@ from .sheet import (AHEAD, COMPARED, Comparison, TeamCheck, at_places, by_weeks,
 from .scope import echoed, in_words
 from .slugs import did_you_mean, unslug
 from .stats import (card_against_rest, chronological, fixtures_without_cards,
-                    ladder_counts, ladder_detail, ladder_matches, ladder_played,
-                    ladder_state_of, rests_standing, rounds_present, same_result,
-                    same_scoreline, unlisted_words)
+                    ladder_counts, ladder_detail, ladder_levels,
+                    ladder_matches, ladder_played, ladder_state_of,
+                    ordered_on_the_average, rests_standing, rounds_present,
+                    same_result, same_scoreline, unlisted_words)
 from .stats import duplicates
 
 __all__ = ["Issue", "Report", "validate", "ERROR", "WARNING"]
@@ -2542,9 +2543,15 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
     """Rule F10. Whether the ladder is an order, a snapshot or none, and who is short.
 
     A warning, always: the points are right, and what is at stake is the claim the
-    dashboard makes about them. Mid-round, the team on top is the team whose card
-    arrived, and the label has to say so. The state is :func:`stats.ladder_state_of`'s,
-    the one rule the document's ``meta.ladder_state`` is written by too (4.428).
+    dashboard makes about them. Mid-round, on a ladder ordered on a total, the
+    team on top is the team whose card arrived, and the label has to say so. On
+    one ordered on the average (:func:`stats.ordered_on_the_average`) the order
+    stands, and the finding says so, still naming the teams short, since one of
+    them may be a card not yet in (4.523), and naming apart a team short and
+    level on the average with a team that has counted more, which the next key
+    places below it (:func:`stats.ladder_levels`). The state is
+    :func:`stats.ladder_state_of`'s, the one rule the document's
+    ``meta.ladder_state`` is written by too (4.428).
     """
     issues: list[Issue] = []
     comp = ctx.competition
@@ -2582,14 +2589,66 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
     if state == "in-progress":
         most = max(counted.values())
         short = sorted(slug for slug, n in counted.items() if n < most)
+        fewer = (f"{in_words(short)} {'has' if len(short) == 1 else 'have'} "
+                 f"fewer than the {most} counted by the rest")
+        if ordered_on_the_average(comp.rules):
+            costs = _what_fewer_costs(short, counted,
+                                      ladder_levels(ctx.matches, comp),
+                                      comp.rules.ladder_by[1])
+            message = (f"the ladder is in progress — {detail}. {fewer}; the "
+                       f"ladder is ordered on the average{costs}.")
+        else:
+            message = (f"the ladder is in progress — {detail}, so the order "
+                       f"is not settled. {fewer}.")
         issues.append(Issue(
-            rule="F10", severity=WARNING,
-            message=f"the ladder is in progress — {detail}, so the order is not "
-                    f"settled. {in_words(short)} "
-                    f"{'has' if len(short) == 1 else 'have'} fewer than the "
-                    f"{most} counted by the rest.",
+            rule="F10", severity=WARNING, message=message,
             detail="; ".join(f"{slug} {counted[slug]}" for slug in sorted(counted))))
     return issues
+
+
+def _what_fewer_costs(short: list[str], counted: dict[str, int],
+                      levels: list[list[str]], next_key: str) -> str:
+    """What being short costs *short* on a ladder ordered on the average.
+
+    Nothing, to a team with a match counted: its average is its own (4.523).
+    Unless it is level on that average with a team that has counted more and
+    is placed above it, one of *levels* (:func:`stats.ladder_levels`): the
+    tie goes to *next_key*, under ``games-bonus`` points, a total, so having
+    counted fewer places it below, by one match or more. A team with none has
+    no average, and is placed below every team with one until it has (4.428),
+    so the clause says that of it rather than telling it the fewer matches
+    cost it nothing. The kinds are named apart where more than one is short;
+    where the only kind is the teams with a match counted, by a pronoun, the
+    sentence before having named them. Returned with its own opening
+    punctuation, to follow "the ladder is ordered on the average".
+    """
+    tied = sorted(slug for run in levels for at, slug in enumerate(run)
+                  if slug in short
+                  and any(counted[above] > counted[slug]
+                          for above in run[:at]))
+    behind = [slug for slug in short if counted[slug] and slug not in tied]
+    unplaced = [slug for slug in short if not counted[slug]]
+    if behind and not tied and not unplaced:
+        return (f", so that costs {'it' if len(behind) == 1 else 'them'} "
+                f"no place")
+    clauses = []
+    if behind:
+        clauses.append(f", so that costs {in_words(behind)} no place")
+    if tied:
+        one = len(tied) == 1
+        clauses.append(
+            f"{'; but ' if clauses else ', but '}{in_words(tied)} "
+            f"{'is' if one else 'are'} level on it with a team that has "
+            f"counted more, and the tie goes to {next_key.replace('_', ' ')}, "
+            f"so having counted fewer places {'it' if one else 'them'} "
+            f"below")
+    if unplaced:
+        one = len(unplaced) == 1
+        clauses.append(
+            f"{'; and ' if tied else ', and '}{in_words(unplaced)} "
+            f"{'has' if one else 'have'} no match counted yet, so "
+            f"{'is' if one else 'are'} placed last")
+    return "".join(clauses)
 
 
 # --- the association's sheet -------------------------------------------------

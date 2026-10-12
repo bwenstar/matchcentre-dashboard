@@ -7387,9 +7387,10 @@ class TestNoClubSpecificsLeaked(unittest.TestCase):
     # fixture is the likeliest place for a real player's name to survive. `data/`
     # and `site/` are a club's own inputs and generated output, neither tracked,
     # and so is `reports/`, what tools/scheduled.py kept of each build, and so are
-    # the `public/` and `reports-public/` of the README's copy without names.
+    # the `public/` and `reports-public/` of the README's copy without names,
+    # and `dist/`, a release's archive and its notes, a changelog section.
     SKIP_DIRS = {".git", "__pycache__", "notes", "data", "site", "reports",
-                 "public", "reports-public"}
+                 "public", "reports-public", "dist"}
     # `.yml` covers `.github/`: the issue templates quote example names, and an
     # example is exactly where a real one gets copied in by accident.
     SHIPPED_SUFFIXES = {".py", ".js", ".css", ".html", ".md", ".toml", ".yml"}

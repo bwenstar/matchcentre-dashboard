@@ -137,6 +137,7 @@ _CLASSES = {
         meta.{cards_rejected,cards_scored,cards_seen,draw_source,generated}
         meta.{ladder_complete,matches_total,rounds_played,rounds_total}
         meta.{ladder_detail,ladder_state,leader,matches_played} meta.leader.value
+        meta.ordered_on_average meta.order_stands meta.leader_withheld
         meta.{seasons_mode,teams_declared,teams_total,version,players}
         meta.players_detail meta.rounds_present[]
         meta.folders_unlisted

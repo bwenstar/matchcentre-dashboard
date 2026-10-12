@@ -1,0 +1,94 @@
+# A release, made from a pushed tag: check it, run the suite, publish it.
+#
+# Pushing a tag that starts with v runs three jobs. `check` runs
+# tools/release.py check on the tag, and fails in seconds on a tag the code and
+# the changelog do not both describe as released: the version in
+# matchcentre/__init__.py, the changelog's newest section and its date, and
+# nothing left under [Unreleased]. `tests` is tests.yml itself, called, so a
+# release is tested by the matrix every push is, and the two cannot drift.
+# `publish`, once both have passed, runs tools/release.py publish, which zips
+# the tagged tree with git archive and makes the GitHub Release with gh, the
+# changelog's section, unwrapped, as its notes.
+#
+# There is nothing to enable. gh is on every GitHub-hosted runner, and it signs
+# in with the GITHUB_TOKEN every run is given; contents: write, which making a
+# release needs, is granted to the publish job and to no other. A fork's tags
+# make the fork's releases once its owner has turned its workflows on, on its
+# Actions tab, which GitHub leaves off in a new fork.
+#
+# A re-run from the run's page runs the same tagged commit again, so it mends
+# only a cause outside it: a runner, an outage, a setting or a token, or a
+# publish that stopped half way, since publish updates a release it finds
+# already there and publishes it if it is a draft. A cause in the commit, such
+# as a failing test or the changelog, needs the fix committed and the tag
+# moved to it: deleted, with `git tag -d vX.Y.Z` and
+# `git push origin :refs/tags/vX.Y.Z`, then tagged and pushed again. Deleting
+# a released tag turns its release into a draft, which the next run publishes.
+# A run whose tag has moved since it began, still going or re-run, publishes
+# nothing: actions/checkout makes the runner's tag the commit the run began
+# at, so publish asks origin with git ls-remote which commit the tag is now,
+# and fails when it is another. CONTRIBUTING.md's "Making a release" has the
+# steps.
+name: release
+
+on:
+  push:
+    # Every tag starting with v, not only the ones shaped like a version: a
+    # filter is a glob, which cannot say "a semantic version", and a tag that
+    # is not one should fail `check` out loud rather than run nothing at all.
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# One release of a tag at a time, and none stopped half way: a second push of
+# the same tag waits for the first run rather than cancelling it between making
+# the release and uploading its archive. The first then fails at publish, its
+# tag having moved, and the second publishes the tag as it is.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # First and alone, so that a tag pushed before the version was bumped fails
+    # in seconds rather than after the 25 minutes the suite takes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: the tag, the version and the changelog agree
+        run: python tools/release.py check "$GITHUB_REF_NAME"
+
+  tests:
+    needs: check
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    needs: [check, tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # A tag push's checkout has the tag at any depth, at the commit the
+          # run began at. The whole history is fetched only so that the tag
+          # and its commit are certainly local, whatever checkout's defaults
+          # become; publish reads no history and no other tag. It asks
+          # origin itself which commit the tag is now.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: the archive, the notes and the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python tools/release.py publish "$GITHUB_REF_NAME"

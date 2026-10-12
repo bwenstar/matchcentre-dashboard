@@ -1829,6 +1829,10 @@ def _entry(comp: Competition | None, season: dict | None, comp_id: str, *,
         "ladder_state": meta.get("ladder_state"),
         # And the state in words, played or counted, as the report says it (4.458).
         "ladder_detail": meta.get("ladder_detail", ""),
+        # Why nobody leads where the counts are not why: a top row level on the
+        # average with a team on another count (4.523). Empty from an earlier
+        # release, whose card says the state as it did.
+        "leader_withheld": meta.get("leader_withheld") or "",
         "draw_source": meta.get("draw_source", ""),
         # The competition's own errors. Its refused cards are `rejected` below,
         # and flagged once as cards that could not be read.
@@ -1981,10 +1985,14 @@ def _href(comp_id: str, meta: dict, *, multi: bool) -> str:
 def _leader(season: dict | None) -> dict | None:
     """The team the document names its leader, with the figure it leads on.
 
-    ``meta.leader``, which the build names on a settled ladder only (F10, 4.209):
-    with unequal games played the top row is a snapshot, and the picker says so
-    instead of crowning anyone. Read here and not worked out again, so the front
-    page and the overview crown the same team or nobody (4.438).
+    ``meta.leader``, which the build names on a complete ladder, and on one in
+    progress ordered on the average unless its top row is level on it with a
+    team on another count (4.523). On one in progress ordered on a total the
+    top row is a snapshot, so the build names nobody (F10, 4.209), and nor
+    does it on a top row level so; on both the picker says the ladder is in
+    progress instead of crowning anyone, and why, ``meta.leader_withheld`` on
+    the second. Read here and not worked out again, so the front page and the
+    overview crown the same team or nobody (4.438).
     """
     leader = (season or {}).get("meta", {}).get("leader")
     if not leader:
@@ -2138,8 +2146,12 @@ def _card_html(entry: dict) -> str:
                      'been counted yet</span>')
     elif entry["cards"]:
         # The document's words for what F10 compared, which are counted matches
-        # where a round was credited (4.458); none from an earlier release.
-        detail = entry["ladder_detail"]
+        # where a round was credited (4.458); none from an earlier release. Or,
+        # on a ladder ordered on the average, its words for the tie at the top
+        # that withholds the leader, which the overview's hero gives too: the
+        # counts are not why, a division beside it on unequal counts being led
+        # (4.523).
+        detail = entry["leader_withheld"] or entry["ladder_detail"]
         lines.append('        <span class="pick-lead">Ladder in progress'
                      + (f' &mdash; {html.escape(detail)}' if detail else '')
                      + '</span>')

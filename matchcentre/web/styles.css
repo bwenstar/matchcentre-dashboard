@@ -547,9 +547,12 @@ a .provenance-flag, th .provenance-flag { text-decoration: none; }
   color: var(--text-secondary);
   font-size: 12.5px;
 }
-/* Teams have played unequal numbers of counted matches, so the order is a
- * snapshot (F10). Amber, and the text steps up to full contrast, because this
- * one changes how the numbers beside it should be read. */
+/* Teams have played unequal numbers of counted matches on a ladder ordered on
+ * a total, so the order is a snapshot, or nothing has been counted (F10). Amber,
+ * and the text steps up to full contrast, because this one changes how the
+ * numbers beside it should be read. A ladder ordered on the average keeps the
+ * plain note on unequal counts where its order stands, and is amber where two
+ * teams are level on the average on different counts (4.523). */
 .ladder-note--incomplete {
   border-left-color: var(--warning);
   color: var(--text-primary);

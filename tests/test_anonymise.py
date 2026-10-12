@@ -3235,7 +3235,9 @@ class TestTheLaddersStateItsLeaderAndTheNightsPlayedAreThePrograms(unittest.Test
                 self.assertEqual(anonymise.classify(field), cls)
 
     def test_a_season_that_names_no_leader_is_classed_too(self):
-        # Null where the ladder is not settled, so the field is a leaf of its own.
+        # Null where nobody leads: a ladder not started, one in progress on a
+        # total, or one whose top row is level on the average with a team on
+        # another count (4.523). So the field is a leaf of its own.
         self.assertEqual(anonymise.classify("meta.leader"), anonymise.PROGRAM)
 
 
@@ -3253,6 +3255,49 @@ class TestTheLaddersSentenceIsTheProgramsToo(unittest.TestCase):
                                documents(demo() / "named") + documents(edge() / "named")))
         self.assertIn("meta.ladder_detail", leaves)
         self.assertEqual(anonymise.classify("meta.ladder_detail"), anonymise.PROGRAM)
+
+
+class TestWhetherTheLadderIsOrderedOnTheAverageIsTheProgramsToo(
+        unittest.TestCase):
+    """The ladder's three keys of 4.523 in ``meta``, each the program's.
+
+    ``meta.ordered_on_average`` is the build's answer from the ruleset,
+    ``stats.ordered_on_the_average``, as ``meta.ladder_state`` is its answer
+    from the counts, so it is classed with it and kept;
+    ``meta.order_stands`` is its answer from both,
+    ``stats.order_stands``, and ``meta.leader_withheld`` its words for a top
+    row level on the average across counts, ``stats.level_at_the_top``.
+    Rejected: leaving them unclassed, read as free text.
+    """
+
+    def test_it_is_classed_as_the_program_s_own(self):
+        leaves = set().union(*(_leaf_patterns(doc) for doc in
+                               documents(demo() / "named")
+                               + documents(edge() / "named")))
+        self.assertIn("meta.ordered_on_average", leaves)
+        self.assertEqual(anonymise.classify("meta.ordered_on_average"),
+                         anonymise.PROGRAM)
+
+    def test_and_so_is_whether_its_order_stands(self):
+        # meta.order_stands, the build's answer from the ruleset and the
+        # counts together (4.523), is classed with the two it is made of.
+        leaves = set().union(*(_leaf_patterns(doc) for doc in
+                               documents(demo() / "named")
+                               + documents(edge() / "named")))
+        self.assertIn("meta.order_stands", leaves)
+        self.assertEqual(anonymise.classify("meta.order_stands"),
+                         anonymise.PROGRAM)
+
+    def test_and_so_is_why_a_leader_is_withheld(self):
+        # meta.leader_withheld, the build's clause for a top row level on the
+        # average with a team on another count, and null otherwise (4.523):
+        # the program's words, as meta.ladder_detail is.
+        leaves = set().union(*(_leaf_patterns(doc) for doc in
+                               documents(demo() / "named")
+                               + documents(edge() / "named")))
+        self.assertIn("meta.leader_withheld", leaves)
+        self.assertEqual(anonymise.classify("meta.leader_withheld"),
+                         anonymise.PROGRAM)
 
 
 if __name__ == "__main__":

@@ -880,8 +880,8 @@ class TestEveryArtefactSaysWhichBuildMadeIt(CliCase):
     def test_the_flag_alone_prints_the_line_the_report_starts_with(self):
         # The fourth place, for the copy that cannot reach any of the other three:
         # a run that never found data/, or a folder nobody has run yet. It is worth
-        # having only if it is the *same* line -- a flag that prints `0.1.0` while
-        # the report prints `matchcentre-dashboard 0.1.0  (python 3.12.3 on linux)`
+        # having only if it is the *same* line -- a flag that prints `X.Y.Z` while
+        # the report prints `matchcentre-dashboard X.Y.Z  (python 3.12.3 on linux)`
         # means the answer to "paste the version" depends on which one a club found,
         # and the maintainer's next message is a question rather than a fix.
         # Compared against a real report and not against a restatement of the
@@ -8323,6 +8323,7 @@ class TestEveryCommandsParserKeepsToTheWidth(unittest.TestCase):
                             ("--page", WINDOWS, "card.pdf")),
         "tools/fetch.py": ((), ("--from", "index.toml", "--into", "data", SPACED)),
         "tools/screenshots.py": ((SPACED,), ("--width", "x")),
+        "tools/release.py": ((SPACED,), ()),
     }
 
     def run_(self, tool: str, *argv: str) -> subprocess.CompletedProcess:
@@ -17392,10 +17393,12 @@ class TestTheReportsListsAfterAColonOrOpeningASentenceAreSentences(CliCase):
                 for index in gone:
                     self.cards[index].unlink(missing_ok=True)
                 run = self.build()
+                # On the average, which costs them no place (4.523).
                 self.assertIn(
                     f"{self.COMP}: the ladder is in progress — teams have played "
-                    f"unequal numbers of matches, so the order is not settled. "
-                    f"{behind} have fewer than the 3 counted by the rest.",
+                    f"unequal numbers of matches. {behind} have fewer than "
+                    f"the 3 counted by the rest; the ladder is ordered on the "
+                    f"average, so that costs them no place.",
                     flat("\n".join(printed_finding(self, run.out, "F10"))))
                 if len(gone) == 1:
                     self.assertIn(
@@ -28153,6 +28156,11 @@ class TestTheFrontPageAndTheOverviewNameOneLeaderOrNone(CliCase):
     (``test_web_assets``). Rejected: the front page testing ``ladder_complete`` and
     finding position 1 itself, which is the second copy of the rule that let the
     two pages disagree.
+
+    With that match missing the ladder is in progress, and from 4.523 a ladder
+    ordered on the average, as the default is, names its top all the same: the
+    Rockets on 6.30, on both pages. A ladder ordered on a total still names
+    nobody until the counts are equal (``TestTheSameNightOrderedOnPoints...``).
     """
 
     COMP = "tuesday-division-b"
@@ -28167,11 +28175,14 @@ class TestTheFrontPageAndTheOverviewNameOneLeaderOrNone(CliCase):
         self.assertEqual(pick_leads(page), ["<strong>Riverside Rockets</strong> "
                                             f"lead on {leader['value']:.2f}"])
 
-    def test_a_ladder_with_a_match_still_to_come_names_none_on_either(self):
+    def test_a_ladder_with_a_match_still_to_come_names_one_on_both(self):
         self.cards[4].unlink()
         self.build()
-        self.assertIsNone(self.season()["meta"]["leader"])
-        self.assertIsNone(picker_entries(self.cwd / "site")[self.COMP]["leader"])
+        self.assertEqual(self.season()["meta"]["leader"],
+                         {"slug": "riverside-rockets", "value": 6.3})
+        self.assertEqual(
+            picker_entries(self.cwd / "site")[self.COMP]["leader"],
+            {"name": "Riverside Rockets", "value": 6.3})
 
     def test_the_front_page_names_the_team_the_document_names(self):
         # Not one it works out again: a document naming the Aces is the Aces, whoever
@@ -28417,6 +28428,11 @@ class TestAReportCountingAWashedOutRoundSaysCountedWhereItSaidPlayed(CliCase):
     them as ``cnt``. Rejected: rewording the report's line alone, which leaves F10
     and the front page saying it the old way; and counted in place of P, which takes
     the matches decided out of a table whose W, L and D add up to them.
+
+    From 4.523 this ladder, ordered on the average, names its leader: F10 says
+    the two teams short lose no place by it, and the front page names the
+    Rockets. The front page says the counts are unequal where the order is on
+    a total, which is ``scoring = "simple"`` here.
     """
 
     COMP = "tuesday-division-b"
@@ -28438,12 +28454,20 @@ class TestAReportCountingAWashedOutRoundSaysCountedWhereItSaidPlayed(CliCase):
     def test_f10_says_it_in_the_same_words(self):
         self.assertIn(
             f"{self.COMP}: the ladder is in progress — teams have unequal numbers of "
-            f"matches counted, byes and washouts included, so the order is not "
-            f"settled. hilltop-aces and parkview-wanderers have fewer than the 2 "
-            f"counted by the rest.",
+            f"matches counted, byes and washouts included. hilltop-aces and "
+            f"parkview-wanderers have fewer than the 2 counted by the rest; "
+            f"the ladder is ordered on the average, so that costs them no "
+            f"place.",
             flat("\n".join(printed_finding(self, self.run_.out, "F10"))))
 
     def test_the_front_page_says_it_too(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page),
+                         ["<strong>Riverside Rockets</strong> lead on 6.40"])
+        # On a total it names nobody, and says why in the same words (4.523).
+        on_a_total = SIMPLE + 'unplayed = "average"\n'
+        (self.cwd / "config.toml").write_text(on_a_total, encoding="utf-8")
+        self.build()
         page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
         self.assertEqual(pick_leads(page),
                          ["Ladder in progress &mdash; teams have unequal numbers of "
@@ -28809,6 +28833,102 @@ class TestABuildTellsANightWithNothingOnItOnce(unittest.TestCase):
         season = json.loads(found[0].read_text(encoding="utf-8"))
         notes = {m["id"]: m["warnings"] for m in season["matches"]}
         self.assertEqual((notes["4100049"], notes["41000410"]), ([], []))
+
+
+# --- 4.523: a ladder ordered on the average is led on unequal counts -------
+
+SIMPLE = '[rules]\nscoring = "simple"\n'
+
+
+class TestAMatchCalledOffNamesTheSameLeaderOnBothPages(CliCase):
+    """Round 3's Rockets v Wanderers rained off, under the default order.
+
+    The default is ``games-bonus``, ordered on the average, and the average
+    leaves the night out for both teams, so the Rockets lead on 12.6 over 2.
+    Measured on the base (/tmp/mcf/lead/scratch/build/before.txt, six-cancel
+    and demo, the same shape): the front page's ``Ladder in progress &mdash;
+    teams have played unequal numbers of matches`` and the overview's ``No
+    leader while teams have played unequal numbers of matches``. Now the card
+    names the Rockets on 6.30, and the picker's entry, which the overview's
+    hero is held to (``test_web_assets``), names them from the same
+    ``meta.leader``. The report's ``ladder  in progress`` line stays, being
+    true. Rejected: counting the called-off night as played, which is
+    ``unplayed = "average"`` and the club's to choose.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def setUp(self):
+        super().setUp()
+        self.cards[4].unlink()
+        write_washout(self.cwd / "data", "3", "riverside-rockets",
+                      "parkview-wanderers", index=5)
+        self.run_ = self.build()
+
+    def test_the_front_page_names_the_rockets_on_their_average(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page),
+                         ["<strong>Riverside Rockets</strong> lead on 6.30"])
+
+    def test_the_picker_names_the_leader_the_document_names(self):
+        meta = self.season()["meta"]
+        self.assertEqual(meta["leader"],
+                         {"slug": "riverside-rockets", "value": 6.3})
+        self.assertEqual(
+            picker_entries(self.cwd / "site")[self.COMP]["leader"],
+            {"name": "Riverside Rockets", "value": 6.3})
+
+    def test_the_report_still_says_the_ladder_is_in_progress(self):
+        self.assertIn("  ladder       in progress: teams have played unequal "
+                      "numbers of matches",
+                      self.section(self.run_.out, self.COMP).splitlines())
+
+    def test_f10_says_the_matches_short_cost_no_place(self):
+        self.assertIn(
+            f"{self.COMP}: the ladder is in progress — teams have played "
+            f"unequal numbers of matches. parkview-wanderers and "
+            f"riverside-rockets have fewer than the 3 counted by the rest; "
+            f"the ladder is ordered on the average, so that costs them no "
+            f"place.",
+            flat("\n".join(printed_finding(self, self.run_.out, "F10"))))
+
+
+class TestTheSameNightOrderedOnPointsNamesNobody(CliCase):
+    """The night called off under ``scoring = "simple"``, ordered on points.
+
+    Kept as it was (before.txt, six-simple): a total puts the team with more
+    matches on top as much as the better record, so the card says the ladder
+    is in progress, the picker names nobody, and F10 says the order is not
+    settled. Rejected: naming the top of every ladder in progress, which on
+    a total can crown a team for the match more it played.
+    """
+
+    COMP = "tuesday-division-b"
+
+    def setUp(self):
+        super().setUp()
+        self.cards[4].unlink()
+        write_washout(self.cwd / "data", "3", "riverside-rockets",
+                      "parkview-wanderers", index=5)
+        (self.cwd / "config.toml").write_text(SIMPLE, encoding="utf-8")
+        self.run_ = self.build()
+
+    def test_the_front_page_says_the_ladder_is_in_progress(self):
+        page = (self.cwd / "site" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(pick_leads(page),
+                         ["Ladder in progress &mdash; teams have played "
+                          "unequal numbers of matches"])
+        self.assertIsNone(self.season()["meta"]["leader"])
+        self.assertIsNone(
+            picker_entries(self.cwd / "site")[self.COMP]["leader"])
+
+    def test_f10_says_the_order_is_not_settled(self):
+        self.assertIn(
+            f"{self.COMP}: the ladder is in progress — teams have played "
+            f"unequal numbers of matches, so the order is not settled. "
+            f"parkview-wanderers and riverside-rockets have fewer than the 3 "
+            f"counted by the rest.",
+            flat("\n".join(printed_finding(self, self.run_.out, "F10"))))
 
 
 if __name__ == "__main__":

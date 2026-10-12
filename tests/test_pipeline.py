@@ -13411,12 +13411,16 @@ class TestADisputedNameCostsThePlayersTheNightAndNotTheTeams(SeasonCase):
         self.assertEqual(stats.ladder(self.matches, self.competition),
                          EXPECTED_LADDER)
 
-    def test_and_the_ladder_now_says_it_is_a_snapshot(self):
-        # The honest consequence of counting it: two teams have played four matches
-        # and two have played three, so the table is a mid-round picture and F10
-        # says so. Counting nothing would have kept the flag true by keeping the
-        # field level -- tidier, and a round further from what happened.
+    def test_and_the_ladder_is_now_in_progress(self):
+        # The honest consequence of counting it: two teams have counted four
+        # matches and two three, so the ladder is in progress and F10 names the
+        # two short; ordered on the average, the order stands (4.523). Counting
+        # nothing would have kept the field level -- tidier, and a round
+        # further from what happened.
         self.assertFalse(self.season["meta"]["ladder_complete"])
+        self.assertEqual((self.season["meta"]["ladder_state"],
+                          self.season["meta"]["order_stands"]),
+                         ("in-progress", True))
         self.assertTrue(stats.ladder_complete(
             [m for m in self.matches if m.key[0] != self.ROUND],
             self.competition))
@@ -22318,14 +22322,25 @@ class TestAFinalAloneHasNotStartedTheLadder(CardsAloneCase):
                          [(validate.WARNING, NOT_STARTED, "0 counted matches")])
 
 
-class TestTheLeaderIsTheTopOfASettledLadderAndNobodyElse(SeasonCase):
+class TestTheLeaderIsTheTopRowUnlessTheCountsPutItThere(SeasonCase):
     """``meta.leader``: the one answer to who leads, for the front page and overview.
 
     The front page's card named a leader only on a settled ladder (``site._leader``,
     4.209) and the overview's hero took the top row of whatever order it was given
     (``ladder[0]``), so the two pages disagreed about the same season (4.438). The
     rule is now ``stats.ladder_leader``, exported, and both pages read it. On the
-    suite's three complete rounds the leader is the Rockets on their average.
+    suite's three complete rounds the leader is the Rockets on their average. A
+    ladder in progress has a leader too where the counts did not put its top
+    row there: it is ordered on the average, as this one is, and its top row
+    is level on it with no team on another count (4.523). One ordered on a
+    total is asked of below, and one whose top row is level on the average
+    across counts at
+    ``TestTwoTeamsLevelOnTheAverageAtTheTopOnUnequalCountsNameNoLeader``. The
+    leader is not asked of ``stats.order_stands``: a tie below the top leaves
+    the order there to the next key and the top row its own
+    (``TestATieBelowTheTopOnUnequalCountsLeavesTheLeaderAndNotTheOrder``).
+    It was ``TestTheLeaderIsTheTopOfASettledLadderAndNobodyElse`` before
+    4.523, a name the new rule makes untrue.
     """
 
     def test_a_settled_ladder_is_led_by_the_team_placed_first_on_its_average(self):
@@ -22337,13 +22352,36 @@ class TestTheLeaderIsTheTopOfASettledLadderAndNobodyElse(SeasonCase):
         self.assertAlmostEqual(rockets["points_average"],
                                EXPECTED_POINTS["riverside-rockets"] / 3, places=6)
 
-    def test_the_rule_names_the_top_only_of_a_ladder_that_is_complete(self):
+    def test_a_complete_order_stands_whatever_it_is_ordered_on(self):
         table = stats.team_stats(self.matches, self.competition)
-        self.assertIs(stats.ladder_leader(table, "complete"),
+        self.assertIs(self.season["meta"]["order_stands"], True)
+        for preset in ("games-bonus", "simple"):
+            with self.subTest(preset=preset):
+                self.assertIs(stats.order_stands(
+                    table, "complete", scoring.ruleset(preset)), True)
+                self.assertIs(stats.order_stands(
+                    table, "empty", scoring.ruleset(preset)), False)
+
+    def test_the_rule_names_the_top_of_a_ladder_that_has_started(self):
+        # 4.523 moved this: an order on the average is led while in progress.
+        table = stats.team_stats(self.matches, self.competition)
+        rules = self.competition.rules
+        for state in ("complete", "in-progress"):
+            with self.subTest(state=state):
+                self.assertIs(stats.ladder_leader(table, state, rules),
+                              table["riverside-rockets"])
+        self.assertIsNone(stats.ladder_leader(table, "empty", rules))
+
+    def test_and_on_a_total_only_the_top_of_a_ladder_that_is_complete(self):
+        table = stats.team_stats(self.matches, self.competition)
+        rules = dataclasses.replace(
+            self.competition.rules,
+            ladder_by=("points", "points_average", "name"))
+        self.assertIs(stats.ladder_leader(table, "complete", rules),
                       table["riverside-rockets"])
         for state in ("in-progress", "empty"):
             with self.subTest(state=state):
-                self.assertIsNone(stats.ladder_leader(table, state))
+                self.assertIsNone(stats.ladder_leader(table, state, rules))
 
     def test_and_a_top_row_with_no_average_leads_nobody(self):
         # No complete ladder has one, every team on it having counted the same number
@@ -22352,23 +22390,29 @@ class TestTheLeaderIsTheTopOfASettledLadderAndNobodyElse(SeasonCase):
         table = stats.team_stats(self.matches, self.competition)
         table["riverside-rockets"] = dataclasses.replace(table["riverside-rockets"],
                                                          points_average=None)
-        self.assertIsNone(stats.ladder_leader(table, "complete"))
+        for state in ("complete", "in-progress"):
+            with self.subTest(state=state):
+                self.assertIsNone(stats.ladder_leader(table, state,
+                                                      self.competition.rules))
 
 
-class TestALadderWithAMatchStillToComeNamesNoLeader(SeasonCase):
-    """The Rockets top a ladder they have played a match fewer on, and lead nothing.
+class TestALadderWithAMatchStillToComeIsLedOnItsAverage(SeasonCase):
+    """The Rockets top a ladder they have played a match fewer on, and lead it.
 
     The suite's season less round 3's Rockets v Wanderers: the Rockets and the
-    Wanderers have 2 counted, the others 3. Measured on the base (/tmp/mcf/scratch/
-    EMPTY/before.txt, prog): the front page's card said the ladder was in progress
-    and its entry named no leader, and the overview's hero said ``6.30 | Riverside
-    Rockets · 12.6 points from 2 matches``. Now there is one answer, nobody, and the
-    Rockets keep the place the table gives them.
-
-    The cost, recorded: a division with a bye every round names no leader for most of
-    its season, as its front-page card already did. Rejected: crowning an
-    in-progress ladder on both pages, a 2-match team over 3-match ones, which is what
-    F10 is there to stop.
+    Wanderers have 2 counted, the others 3. Measured on the base
+    (/tmp/mcf/scratch/EMPTY/before.txt, prog): the front page's card said the
+    ladder was in progress and its entry named no leader, and the overview's
+    hero said ``6.30 | Riverside Rockets · 12.6 points from 2 matches``. 4.438
+    made it one answer, nobody, and recorded the cost: a division with a bye
+    every round named no leader for most of its season. 4.523 makes it the
+    other answer on both pages: the ladder is ordered on the average, which is
+    the Rockets' own 12.6 over their own 2, so the order stands and they lead
+    it on 6.30. A ladder ordered on a total still names nobody
+    (``TestTheSameNightsOrderedOnPointsStillNameNobody``), a 2-match team over
+    3-match ones there being what F10 is there to stop. Rejected: waiting for
+    equal counts, as 4.438 did, when the order on the average already divides
+    by each team's own.
     """
 
     @classmethod
@@ -22380,8 +22424,10 @@ class TestALadderWithAMatchStillToComeNamesNoLeader(SeasonCase):
         top = next(row for row in self.season["teams"] if row["position"] == 1)
         self.assertEqual((top["slug"], top["counted"]), ("riverside-rockets", 2))
 
-    def test_and_names_no_leader(self):
-        self.assertIsNone(self.season["meta"]["leader"])
+    def test_and_names_them_its_leader(self):
+        # 4.523 moved this: it was None.
+        self.assertEqual(self.season["meta"]["leader"],
+                         {"slug": "riverside-rockets", "value": 6.3})
 
 
 class TestTheNightsPlayedAreTheOnesEveryTotalCountsFinalsIn(SeasonCase):
@@ -22547,8 +22593,8 @@ class TestAByeCreditedEveryRoundIsAnEqualCountOverUnequalPlayed(ByeSeasonCase):
     leader. The flag was right and the sentence was not. It now says ``every team
     has 4 matches counted, byes and washouts credited their average``. Rejected:
     basing F10 on P, which holds this ladder in progress though every team has a
-    figure for every round, and names no leader all season in a division with a bye
-    every round.
+    figure for every round, and on a ladder ordered on points names no leader
+    all season in a division with a bye every round.
     """
 
     UNPLAYED = "average"
@@ -22604,11 +22650,15 @@ class TestAWashoutBesideACardNotYetInIsUnequalCountsOverEqualPlayed(CardsAloneCa
                           "hilltop-aces": (1, 1), "parkview-wanderers": (1, 1)})
 
     def test_f10_says_the_counts_are_unequal_and_not_the_matches_played(self):
+        # 4.523 moved this: games-bonus is ordered on the average, so the
+        # finding says the two short lose no place by it, where it said the
+        # order was not settled.
         self.assertEqual(self.f10(), [(
             validate.WARNING,
-            f"the ladder is in progress — {CREDITED_IN_PROGRESS}, so the order is "
-            f"not settled. hilltop-aces and parkview-wanderers have fewer than the 2 "
-            f"counted by the rest.",
+            f"the ladder is in progress — {CREDITED_IN_PROGRESS}. "
+            f"hilltop-aces and parkview-wanderers have fewer than the 2 "
+            f"counted by the rest; the ladder is ordered on the average, so "
+            f"that costs them no place.",
             "hilltop-aces 1; lakeside-spinners 2; parkview-wanderers 1; "
             "riverside-rockets 2")])
 
@@ -22687,10 +22737,12 @@ class TestTheSentencesPLeavesOutAFinalAndACardExportedTwice(CardsAloneCase):
         meta = self.season["meta"]
         self.assertEqual((meta["ladder_state"], meta["ladder_detail"]),
                          ("in-progress", CREDITED_IN_PROGRESS))
+        # 4.523 moved this, as it moved the class above.
         self.assertEqual([message for _, message, _ in self.f10()], [
-            f"the ladder is in progress — {CREDITED_IN_PROGRESS}, so the order is "
-            f"not settled. hilltop-aces and parkview-wanderers have fewer than the 2 "
-            f"counted by the rest."])
+            f"the ladder is in progress — {CREDITED_IN_PROGRESS}. "
+            f"hilltop-aces and parkview-wanderers have fewer than the 2 "
+            f"counted by the rest; the ladder is ordered on the average, so "
+            f"that costs them no place."])
 
 
 # The Spinners beat the Rockets in the one match they play, and rest twice.
@@ -22785,6 +22837,833 @@ class TestAveragingCanReorderALadderRankedOnPointsFirst(unittest.TestCase):
         self.assertEqual(
             self.order("level", scoring="games-bonus", unplayed="average"),
             ["riverside-rockets", "lakeside-spinners", "hilltop-aces"])
+
+
+# --- 4.523: a ladder ordered on the average is led on unequal counts -------
+
+
+def write_season_with_a_night_called_off(data: Path) -> None:
+    """The suite's season with round 3's Rockets v Wanderers rained off.
+
+    The other five cards as they are, so the Rockets and the Wanderers have 2
+    counted and the Aces and the Spinners 3: the shape one match called off
+    leaves a division of an even number of teams in.
+    """
+    write_season_cards(data)
+    (data / "Round3" / "RiversideRockets-ParkviewWanderers.pdf").unlink()
+    write_washout(data, "3", "riverside-rockets", "parkview-wanderers",
+                  index=5)
+
+
+# F10 over the night called off, by what the ladder is ordered on.
+CALLED_OFF_SHORT = "parkview-wanderers and riverside-rockets"
+CALLED_OFF_ON_THE_AVERAGE = (
+    f"the ladder is in progress — teams have played unequal numbers of "
+    f"matches. {CALLED_OFF_SHORT} have fewer than the 3 counted by the rest; "
+    f"the ladder is ordered on the average, so that costs them no place.")
+CALLED_OFF_NOT_SETTLED = (
+    f"the ladder is in progress — teams have played unequal numbers of "
+    f"matches, so the order is not settled. {CALLED_OFF_SHORT} have fewer "
+    f"than the 3 counted by the rest.")
+CALLED_OFF_COUNTS = ("hilltop-aces 3; lakeside-spinners 3; "
+                     "parkview-wanderers 2; riverside-rockets 2")
+
+
+class TestWhetherTheLadderIsOrderedOnTheAverageIsAskedOfItsFirstKey(
+        unittest.TestCase):
+    """``stats.ordered_on_the_average``: whether the club's order is fair.
+
+    F10 held every ladder in progress leaderless, whatever it was ordered on.
+    An order on ``points_average`` divides each team's points by its own
+    counted matches, so a bye, a washout or a card not yet in neither lifts a
+    team nor drops it wherever the average decides the order, and its top row
+    leads by the competition's own measure. An order on a total does not: its
+    top is the team with the most matches as much as the best record. One
+    function asks it, of the rules, for the leader, for F10 and for the
+    document's ``meta.ordered_on_average``. Where two teams are level on the
+    average on unequal counts the next key decides between them, so whether
+    the order stands on the counts it has is ``stats.order_stands``'s, of the
+    rules and the rows
+    (``TestTwoTeamsLevelOnTheAverageAtTheTopOnUnequalCountsNameNoLeader``,
+    ``TestATieBelowTheTopOnUnequalCountsLeavesTheLeaderAndNotTheOrder``).
+    Rejected: a config switch of its own, where the order the club chose
+    already says whether unequal counts are fair.
+    """
+
+    def test_games_bonus_is_ordered_on_the_average(self):
+        self.assertTrue(
+            stats.ordered_on_the_average(scoring.ruleset("games-bonus")))
+
+    def test_the_presets_ordered_on_a_total_are_not(self):
+        for preset in ("sets-first", "rubbers", "simple"):
+            with self.subTest(preset=preset):
+                self.assertFalse(
+                    stats.ordered_on_the_average(scoring.ruleset(preset)))
+
+    def test_a_custom_order_is_asked_of_its_first_key_alone(self):
+        simple = scoring.ruleset("simple")
+        bonus = scoring.ruleset("games-bonus")
+        self.assertTrue(stats.ordered_on_the_average(dataclasses.replace(
+            simple, ladder_by=("points_average", "points", "name"))))
+        self.assertFalse(stats.ordered_on_the_average(dataclasses.replace(
+            bonus, ladder_by=("points", "points_average", "name"))))
+
+
+class TestAMatchCalledOffLeavesTheCountsUnequalAndTheLadderLed(
+        CardsAloneCase):
+    """Round 3's Rockets v Wanderers rained off, and the Rockets lead anyway.
+
+    A club's own season named no leader for most of its divisions, every one
+    ordered on the average, over a cancelled match or a bye. Measured on the
+    base (/tmp/mcf/lead/scratch/build/before.txt, six-cancel and demo):
+    ``meta.leader`` null, F10's ``so the order is not settled``, the front
+    page's ``Ladder in progress — teams have played unequal numbers of
+    matches`` and the overview's ``No leader while teams have played unequal
+    numbers of matches``, over an order every figure of which was already fair:
+    the average leaves the night out for both teams. Now
+    ``stats.ladder_leader`` names the top of a ladder in progress that is
+    ordered on the average, here the Rockets on 6.4 and 6.2, 12.6 over 2, 6.30,
+    and F10 stays a warning naming the two teams short, since a card may be
+    missing. Rejected: counting the cancelled match as played, or crediting it
+    the team's average by default. That is ``unplayed = "average"``, the
+    club's to choose; it changes the figures, and does nothing for a division
+    with byes under the default.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_season_with_a_night_called_off(data)
+
+    def test_the_night_called_off_is_counted_for_neither_team(self):
+        self.assertEqual(stats.ladder_counts(self.matches, self.competition),
+                         {"riverside-rockets": 2, "parkview-wanderers": 2,
+                          "hilltop-aces": 3, "lakeside-spinners": 3})
+        self.assertEqual(self.season["meta"]["ladder_state"], "in-progress")
+
+    def test_the_rockets_lead_on_their_average(self):
+        top = next(row for row in self.season["teams"]
+                   if row["position"] == 1)
+        self.assertEqual(top["slug"], "riverside-rockets")
+        self.assertEqual(self.season["meta"]["leader"],
+                         {"slug": "riverside-rockets", "value": 6.3})
+
+    def test_the_document_says_the_order_is_on_the_average(self):
+        self.assertIs(self.season["meta"]["ordered_on_average"], True)
+
+    def test_and_that_it_stands_on_these_counts(self):
+        # No two teams level on the average on unequal counts.
+        self.assertEqual(stats.ladder_levels(self.matches, self.competition),
+                         [])
+        self.assertIs(self.season["meta"]["order_stands"], True)
+        table = stats.team_stats(self.matches, self.competition)
+        self.assertIs(stats.order_stands(table, "in-progress",
+                                         self.competition.rules), True)
+
+    def test_the_rule_names_the_top_of_a_ladder_in_progress(self):
+        table = stats.team_stats(self.matches, self.competition)
+        rules = self.competition.rules
+        self.assertIs(stats.ladder_leader(table, "in-progress", rules),
+                      table["riverside-rockets"])
+
+    def test_f10_names_the_two_short_and_says_it_costs_them_no_place(self):
+        self.assertEqual(self.f10(), [(validate.WARNING,
+                                       CALLED_OFF_ON_THE_AVERAGE,
+                                       CALLED_OFF_COUNTS)])
+
+
+class TestTheSameNightsOrderedOnPointsStillNameNobody(CardsAloneCase):
+    """The night called off under ``scoring = "simple"``, ordered on points.
+
+    Kept as it was. A ladder ordered on a total puts the team with the most
+    matches on top as much as the team with the best record, and its leader's
+    figure, an average, could disagree with its place: a team second on points
+    can have the better average. So it names nobody while the counts are
+    unequal, and F10 still says the order is not settled. Measured on the base
+    (before.txt, six-simple): the same words as the order on the average, which
+    is what this row parts. Rejected: naming the top of every ladder in
+    progress, which on an order by points is a match in hand below the top, the
+    lie F10 was written against.
+    """
+
+    @classmethod
+    def make_config(cls):
+        return config_mod.Config(path=cls.root / "config.toml",
+                                 scoring="simple")
+
+    @classmethod
+    def write_cards(cls, data):
+        write_season_with_a_night_called_off(data)
+
+    def test_the_ladder_is_in_progress_and_names_no_leader(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["leader"],
+                          meta["ordered_on_average"], meta["order_stands"]),
+                         ("in-progress", None, False, False))
+
+    def test_and_the_front_page_says_the_counts_are_why(self):
+        # Not a tie at the top, which only an order on the average withholds
+        # a leader for (4.523).
+        self.assertIsNone(self.season["meta"]["leader_withheld"])
+        self.assertEqual(pick_leads(self),
+                         ["Ladder in progress &mdash; teams have played "
+                          "unequal numbers of matches"])
+
+    def test_the_rule_names_its_top_only_once_it_is_complete(self):
+        table = stats.team_stats(self.matches, self.competition)
+        rules = self.competition.rules
+        self.assertIsNone(stats.ladder_leader(table, "in-progress", rules))
+        top = next(row for row in table.values() if row.position == 1)
+        self.assertIs(stats.ladder_leader(table, "complete", rules), top)
+
+    def test_f10_still_says_the_order_is_not_settled(self):
+        self.assertEqual(self.f10(), [(validate.WARNING,
+                                       CALLED_OFF_NOT_SETTLED,
+                                       CALLED_OFF_COUNTS)])
+
+
+# Two teams beside BYE_TEAMS' three: a division of five, a bye every round.
+FIVE_EXTRA = {
+    "hollow-wrens": ("HOLLOW WRENS",
+                     ("Vik Oduya", "Wil Lassiter", "Xan Petrou")),
+    "ironbark-owls": ("IRONBARK OWLS",
+                      ("Yara Quist", "Zed Holloway", "Abi Tran")),
+}
+# Three rounds, a team resting in each. The Owls rest first and win both their
+# matches; the Larks play all three and lose one, to the Owls.
+FIVE_FIXTURES = (
+    ("1", "sundown-larks", "tollgate-moths",
+     ((6, 3), (6, 4), (4, 6), (6, 2))),                  # 22-15, larks
+    ("1", "verge-newts", "hollow-wrens",
+     ((6, 4), (6, 3), (3, 6), (6, 2))),                  # 21-15, newts
+    ("2", "sundown-larks", "ironbark-owls",
+     ((1, 6), (2, 6), (0, 6), (3, 6))),                  # 6-24,  owls
+    ("2", "tollgate-moths", "verge-newts",
+     ((6, 3), (6, 4), (4, 6), (6, 2))),                  # 22-15, moths
+    ("3", "hollow-wrens", "ironbark-owls",
+     ((2, 6), (1, 6), (0, 6), (4, 6))),                  # 7-24,  owls
+    ("3", "sundown-larks", "verge-newts",
+     ((6, 3), (6, 4), (4, 6), (6, 2))),                  # 22-15, larks
+)
+# Worked out on paper from games-bonus (win 4, loss 2, a tenth per game won):
+#
+#   owls   win 24 -> 6.4 | win 24 -> 6.4                  = 12.8 / 2 -> 6.40
+#   larks  win 22 -> 6.2 | loss 6 -> 2.6 | win 22 -> 6.2  = 15.0 / 3 -> 5.00
+#   moths  loss 15 -> 3.5 | win 22 -> 6.2                 =  9.7 / 2 -> 4.85
+#   newts  win 21 -> 6.1 | loss 15 -> 3.5 | loss 15 -> 3.5 = 13.1 / 3 -> 4.37
+#   wrens  loss 15 -> 3.5 | loss 7 -> 2.7                 =  6.2 / 2 -> 3.10
+FIVE_POINTS = {"ironbark-owls": 12.8, "sundown-larks": 15.0,
+               "tollgate-moths": 9.7, "verge-newts": 13.1,
+               "hollow-wrens": 6.2}
+
+
+class FiveTeamCase(ByeSeasonCase):
+    """BYE_TEAMS and FIVE_EXTRA declared, and the cards of ``FIXTURES``."""
+
+    EXTRA_TEAMS = tuple(name for name, _ in FIVE_EXTRA.values())
+    FIXTURES = FIVE_FIXTURES
+
+    @classmethod
+    def write_cards(cls, data):
+        teams = {**BYE_TEAMS, **FIVE_EXTRA}
+        for index, (rnd, home, away, scores) in enumerate(cls.FIXTURES,
+                                                          start=1):
+            folder = data / f"Round{rnd}"
+            folder.mkdir(parents=True, exist_ok=True)
+            home_name, home_players = teams[home]
+            away_name, away_players = teams[away]
+            cw.write_card_file(folder / f"{home}-{away}.pdf", cw.CardSpec(
+                date=BYE_DATES[rnd], round_label=rnd, division="C",
+                court=f"{index:02d}", match_id=f"523{index:04d}",
+                home_name=home_name, away_name=away_name,
+                rows=rows_for(scores, home_players, away_players),
+                home_roster=tuple(
+                    cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                 captain=(i == 0))
+                    for i, n in enumerate(home_players)),
+                away_roster=tuple(
+                    cw.RosterRow(name=n, singles=2.5, doubles=2.5,
+                                 captain=(i == 0))
+                    for i, n in enumerate(away_players))))
+
+    def f10(self) -> list[str]:
+        return [w["message"] for w in self.season["validation"]["warnings"]
+                if w["rule"] == "F10"]
+
+
+class TestAFiveTeamDivisionWithAByeEveryRoundIsLedOnItsAverage(
+        FiveTeamCase):
+    """Five declared teams, three rounds, a bye in each, under ``zero``.
+
+    A division of an odd number of teams has a team resting every round, so
+    under the default ``unplayed = "zero"`` its counts are unequal after most
+    rounds, and the base named no leader for most of its season (before.txt,
+    five-byes: ``meta.leader`` null and ``No leader while teams have played
+    unequal numbers of matches`` over a ladder ordered on the average). Here
+    the Owls, resting in round 1, lead on 6.40 from 2 matches, above the
+    Larks' 5.00 from 3, though the Larks have more points, 15.0 to 12.8. The
+    average is the order and the leader both; a total would crown the Larks
+    for the match more they have played. Rejected: crediting the bye the
+    team's average by default, which changes every figure and is
+    ``unplayed = "average"``, already the club's to choose.
+    """
+
+    def test_a_team_rests_in_every_round_and_the_counts_are_unequal(self):
+        self.assertEqual(self.resting(), {"1": ["ironbark-owls"],
+                                          "2": ["hollow-wrens"],
+                                          "3": ["tollgate-moths"]})
+        self.assertEqual({slug: row["counted"]
+                          for slug, row in self.team.items()},
+                         {"ironbark-owls": 2, "sundown-larks": 3,
+                          "tollgate-moths": 2, "verge-newts": 3,
+                          "hollow-wrens": 2})
+        self.assertEqual(self.season["meta"]["ladder_state"], "in-progress")
+
+    def test_the_points_are_the_ones_worked_out_on_paper(self):
+        for slug, points in FIVE_POINTS.items():
+            with self.subTest(team=slug):
+                self.assertAlmostEqual(self.team[slug]["points"], points,
+                                       places=6)
+
+    def test_the_owls_lead_on_their_average_from_a_match_fewer(self):
+        self.assertEqual(self.season["meta"]["leader"],
+                         {"slug": "ironbark-owls", "value": 6.4})
+        self.assertIsNone(self.season["meta"]["leader_withheld"])
+        self.assertEqual(self.team["ironbark-owls"]["position"], 1)
+        self.assertGreater(self.team["sundown-larks"]["points"],
+                           self.team["ironbark-owls"]["points"])
+
+    def test_f10_names_the_three_short_and_says_it_costs_them_no_place(self):
+        self.assertEqual(self.f10(), [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hollow-wrens, ironbark-owls and tollgate-moths have "
+            "fewer than the 3 counted by the rest; the ladder is ordered on "
+            "the average, so that costs them no place."])
+
+
+class TestATeamYetToPlayIsToldItIsPlacedLastAndNotThatItLosesNothing(
+        FiveTeamCase):
+    """The five-team division after round 1, the Owls rested and on none.
+
+    Every division of an odd number of teams is here after its first night.
+    The Owls have no match counted, so no average, and are placed last below
+    every team with one (4.428): the fewer matches do cost them the place, and
+    F10 says so of them in the singular instead of saying it costs them
+    nothing. The four who played lead on their averages, the Larks first.
+    Measured on the base (/tmp/mcf/lead/scratch/build/new-tests-before.txt):
+    no leader, and F10's ``so the order is not settled`` of the whole ladder.
+    Rejected: telling the Owls, as the rest, that the match fewer costs them
+    no place, which is untrue of a team with no average to be placed on.
+    """
+
+    FIXTURES = FIVE_FIXTURES[:2]
+
+    def test_the_owls_are_placed_last_and_the_larks_lead(self):
+        self.assertEqual(self.team["ironbark-owls"]["position"], 5)
+        self.assertEqual(self.season["meta"]["leader"],
+                         {"slug": "sundown-larks", "value": 6.2})
+
+    def test_f10_says_the_owl_is_placed_last_until_it_has_a_match(self):
+        self.assertEqual(self.f10(), [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. ironbark-owls has fewer than the 1 counted by the "
+            "rest; the ladder is ordered on the average, and ironbark-owls "
+            "has no match counted yet, so is placed last."])
+
+
+class TestTeamsBehindAndTeamsYetToPlayAreToldApart(FiveTeamCase):
+    """Round 2 of the five with one card in: three resting, the Owls on none.
+
+    The Moths and the Wrens are a match behind on an average of their own,
+    which costs them no place; the Owls have none and are placed last. F10
+    says each of them, by name, in its own clause. Measured on the base
+    (/tmp/mcf/lead/scratch/build/new-tests-before.txt): one clause for all
+    three, ``so the order is not settled``. Rejected: one clause for the
+    three, which says either that the Owls' place stands or that the others'
+    does not.
+    """
+
+    FIXTURES = FIVE_FIXTURES[:2] + (
+        ("2", "sundown-larks", "verge-newts",
+         ((6, 3), (6, 4), (4, 6), (6, 2))),)
+
+    def test_f10_says_which_cost_nothing_and_which_is_placed_last(self):
+        self.assertEqual(self.f10(), [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hollow-wrens, ironbark-owls and tollgate-moths have "
+            "fewer than the 2 counted by the rest; the ladder is ordered on "
+            "the average, so that costs hollow-wrens and tollgate-moths no "
+            "place, and ironbark-owls has no match counted yet, so is "
+            "placed last."])
+
+
+class TestOneTeamAMatchBehindIsToldItLosesNoPlace(ByeSeasonCase):
+    """The three-team season and a round 4, the Larks resting, under ``zero``.
+
+    The Moths and the Newts have 3 counted and the Larks 2: one team a match
+    behind on an average of its own, as a division of three or five teams is
+    after every round the byes do not come out even. F10 says it of one team
+    in the singular. No test held the singular, and a mutant giving it the
+    plural passed every file that mentions F10
+    (/tmp/mcf/lead/scratch/review-tests-r1/mutants.txt, M3). Rejected:
+    asserting only that the Larks are named, which the mutant passed.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_bye_season_cards(data)
+        with mock.patch.dict(BYE_DATES, {"4": "2026-09-07"}):
+            write_bye_card(data, 4, "4", "tollgate-moths", "verge-newts",
+                           ((6, 4), (6, 3), (3, 6), (6, 2)))
+
+    def test_f10_says_it_costs_the_larks_no_place(self):
+        self.assertEqual(
+            [w["message"] for w in self.season["validation"]["warnings"]
+             if w["rule"] == "F10"],
+            ["the ladder is in progress — teams have played unequal numbers "
+             "of matches. sundown-larks has fewer than the 3 counted by the "
+             "rest; the ladder is ordered on the average, so that costs it no "
+             "place."])
+
+
+class TestTwoTeamsYetToPlayAreToldTheyArePlacedLast(CardsAloneCase):
+    """Round 1 played on one court and rained off on the other.
+
+    The Spinners and the Wanderers have no match counted, so no average, and
+    are placed last. F10 names them in the plural. No test held the plural,
+    and mutants giving it the singular passed every file that mentions F10
+    (review-tests-r1/mutants.txt, M4 and M5). Rejected: a test of the
+    helper's wording alone, which would pass with the message unassembled.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_fixture_card(data, "1", "riverside-rockets", "hilltop-aces",
+                           WIN_24_6, index=1)
+        write_washout(data, "1", "lakeside-spinners", "parkview-wanderers",
+                      index=2)
+
+    def test_f10_names_the_two_and_says_they_are_placed_last(self):
+        self.assertEqual([message for _, message, _ in self.f10()], [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. lakeside-spinners and parkview-wanderers have fewer "
+            "than the 1 counted by the rest; the ladder is ordered on the "
+            "average, and lakeside-spinners and parkview-wanderers have no "
+            "match counted yet, so are placed last."])
+
+
+class TestSeveralBehindAndSeveralYetToPlayAreToldApart(FiveTeamCase):
+    """The five's round 1 Larks v Moths and round 2 Larks v Owls alone.
+
+    The Owls and the Moths are a match behind the Larks on an average of their
+    own, and the Wrens and the Newts have none. F10 names each pair in its own
+    clause, in the plural. No test held the plural of the second clause
+    (review-tests-r1/mutants.txt, M6 and M7). Rejected: one team of each
+    kind, which holds the clauses apart and not their number.
+    """
+
+    FIXTURES = (FIVE_FIXTURES[0], FIVE_FIXTURES[2])
+
+    def test_f10_says_which_cost_nothing_and_which_are_placed_last(self):
+        self.assertEqual(self.f10(), [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hollow-wrens, ironbark-owls, tollgate-moths and "
+            "verge-newts have fewer than the 2 counted by the rest; the "
+            "ladder is ordered on the average, so that costs ironbark-owls "
+            "and tollgate-moths no place, and hollow-wrens and verge-newts "
+            "have no match counted yet, so are placed last."])
+
+
+# Three of the suite's scorelines, in games-bonus points to the winner: 6.4,
+# 6.4 and 6.2, and to the loser 2.6, 3.5 and 3.5.
+WIN_24_6 = ((6, 1), (6, 2), (6, 0), (6, 3))
+WIN_24_15 = ((6, 4), (6, 4), (6, 4), (6, 3))
+WIN_22_15 = ((6, 3), (6, 4), (4, 6), (6, 2))
+# Why a ladder ordered on the average names nobody while its top row is level
+# on it with a team on another count, in the document's words for both pages.
+LEVEL_AT_THE_TOP = ("the teams on top are level on the average with "
+                    "different numbers of matches counted")
+
+
+def pick_leads(case: SeasonCase) -> list[str]:
+    """What the front page's card for *case*'s season says about who leads."""
+    from matchcentre import site
+    card = site._card_html(site._entry(case.competition, case.season,
+                                       case.comp_id, config=case.config))
+    return re.findall(r'<span class="pick-lead">(.*?)</span>', card)
+
+
+class TestTeamsLevelAcrossCountsAndATeamYetToPlayAreToldApart(FiveTeamCase):
+    """The Larks and the Owls on 6.40, the Moths and the Newts on 2.60.
+
+    Round 1's Larks v Moths, and round 2's Owls v Moths and Larks v Newts,
+    all 24-6: each pair level on the average from 2 and from 1, and the
+    Wrens on none. F10 opens the clause for the Wrens with a semicolon after
+    the clause for the teams level, which has a comma of its own. No test
+    reached that joiner, and a mutant giving it the comma passed every test
+    in test_pipeline (/tmp/mcf/lead/scratch/review-tests-r2, V1). Rejected:
+    asserting that the Wrens are named, which the mutant passes.
+    """
+
+    FIXTURES = (
+        ("1", "sundown-larks", "tollgate-moths", WIN_24_6),
+        ("2", "ironbark-owls", "tollgate-moths", WIN_24_6),
+        ("2", "sundown-larks", "verge-newts", WIN_24_6),
+    )
+
+    def test_f10_says_the_tie_then_the_team_placed_last(self):
+        self.assertEqual(self.f10(), [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hollow-wrens, ironbark-owls and verge-newts have "
+            "fewer than the 2 counted by the rest; the ladder is ordered on "
+            "the average, but ironbark-owls and verge-newts are level on it "
+            "with a team that has counted more, and the tie goes to points, "
+            "so having counted fewer places them below; and hollow-wrens has "
+            "no match counted yet, so is placed last."])
+
+    def test_and_nobody_leads_a_top_row_level_across_counts(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["leader"], meta["leader_withheld"]),
+                         (None, LEVEL_AT_THE_TOP))
+
+
+class TestTwoTeamsLevelOnTheAverageAtTheTopOnUnequalCountsNameNoLeader(
+        CardsAloneCase):
+    """The Rockets and the Spinners on 6.40 each, from 2 matches and from 1.
+
+    Round 1 and round 2's Rockets v Wanderers won 24-6, and round 2's Aces v
+    Spinners rained off; below them the Wanderers and the Aces are level on
+    2.60, from 2 and from 1. An order on the average stands across unequal
+    counts only where the average decides it. Between two teams level on it
+    the next key does, and under games-bonus that is points, a total, which
+    the team with the match more leads. Measured on the tree before this
+    (/tmp/mcf/lead/scratch/fix-r1/before.txt, tie): ``meta.leader`` the
+    Rockets, on top for the match more they played, F10's ``so that costs
+    them no place`` of the Spinners and the Aces, whom it cost the place, and
+    the front page's ``Riverside Rockets lead on 6.40``. The base said the
+    order was not settled and named nobody, which was true. Now
+    ``stats.order_stands`` asks the counts as well as the rules: the leader is
+    nobody while the top row is level on the average with a team on another
+    count, and F10 says the tie goes to points. Rejected: naming the Rockets
+    and saying the two are level, which still crowns a team for the match
+    more it played.
+
+    4.523's review measured the reason the pages gave for it
+    (/tmp/mcf/lead/scratch/review-rule-r2, tie-top): the front page's
+    ``Ladder in progress — teams have played unequal numbers of matches`` and
+    the hero's ``No leader while teams have played unequal numbers of
+    matches``, the sentence the maintainer reported, beside a division on the
+    same page led on unequal counts. The document now says why,
+    ``meta.leader_withheld``, from ``stats.level_at_the_top``, and both pages
+    say it. Rejected: the pages inferring the tie from
+    ``meta.ordered_on_average`` and a null leader, a second copy of the rule in
+    the language the suite cannot run.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_fixture_card(data, "1", "riverside-rockets", "hilltop-aces",
+                           WIN_24_6, index=1)
+        write_fixture_card(data, "1", "lakeside-spinners",
+                           "parkview-wanderers", WIN_24_6, index=2)
+        write_fixture_card(data, "2", "riverside-rockets",
+                           "parkview-wanderers", WIN_24_6, index=3)
+        write_washout(data, "2", "hilltop-aces", "lakeside-spinners",
+                      index=4)
+
+    def table(self):
+        return stats.team_stats(self.matches, self.competition)
+
+    def test_the_rockets_are_placed_first_on_points_for_the_match_more(self):
+        self.assertEqual(
+            {row["slug"]: (row["position"], row["counted"],
+                           row["points_average"])
+             for row in self.season["teams"]},
+            {"riverside-rockets": (1, 2, 6.4),
+             "lakeside-spinners": (2, 1, 6.4),
+             "parkview-wanderers": (3, 2, 2.6),
+             "hilltop-aces": (4, 1, 2.6)})
+
+    def test_the_teams_level_on_unequal_counts_are_found_in_ladder_order(self):
+        self.assertEqual(stats.ladder_levels(self.matches, self.competition),
+                         [["riverside-rockets", "lakeside-spinners"],
+                          ["parkview-wanderers", "hilltop-aces"]])
+
+    def test_the_order_does_not_stand_on_these_counts(self):
+        self.assertIs(stats.order_stands(self.table(), "in-progress",
+                                         self.competition.rules), False)
+        meta = self.season["meta"]
+        self.assertEqual((meta["ordered_on_average"], meta["order_stands"]),
+                         (True, False))
+
+    def test_nobody_leads_it_on_either_page(self):
+        from matchcentre import site
+        self.assertIsNone(stats.ladder_leader(self.table(), "in-progress",
+                                              self.competition.rules))
+        self.assertIsNone(self.season["meta"]["leader"])
+        self.assertIsNone(site._leader(self.season))
+
+    def test_the_rule_says_the_top_row_is_level_across_counts(self):
+        self.assertIs(stats.level_at_the_top(self.table(), "in-progress",
+                                             self.competition.rules), True)
+        self.assertEqual(self.season["meta"]["leader_withheld"],
+                         LEVEL_AT_THE_TOP)
+
+    def test_the_front_page_says_so_and_not_that_the_counts_are_unequal(self):
+        self.assertEqual(pick_leads(self),
+                         ["Ladder in progress &mdash; " + LEVEL_AT_THE_TOP])
+
+    def test_f10_says_the_tie_goes_to_points_and_costs_them_the_place(self):
+        self.assertEqual([message for _, message, _ in self.f10()], [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hilltop-aces and lakeside-spinners have fewer than "
+            "the 2 counted by the rest; the ladder is ordered on the "
+            "average, but hilltop-aces and lakeside-spinners are level on it "
+            "with a team that has counted more, and the tie goes to points, "
+            "so having counted fewer places them below."])
+
+    def test_a_document_from_before_4_523_gives_the_counts_as_it_did(self):
+        # An earlier release wrote none of 4.523's keys, and named nobody here
+        # either, so its card says the counts in the document's own sentence,
+        # and not the tie. No test read the card off such a document, and a
+        # mutant reading the absent leader_withheld as the tie passed every
+        # class (mutate646).
+        from matchcentre import site
+        season = json.loads(json.dumps(self.season))
+        for key in ("ordered_on_average", "order_stands", "leader_withheld"):
+            del season["meta"][key]
+        card = site._card_html(site._entry(self.competition, season,
+                                           self.comp_id, config=self.config))
+        self.assertEqual(
+            re.findall(r'<span class="pick-lead">(.*?)</span>', card),
+            ["Ladder in progress &mdash; teams have played unequal numbers "
+             "of matches"])
+
+
+class TestTheSameTieOrderedOnPointsIsNoReasonOfItsOwn(CardsAloneCase):
+    """The tie at the top of the class above, under ``scoring = "simple"``.
+
+    The Rockets on 3.00 from 2 and the Spinners on 3.00 from 1, the Rockets
+    first on points. ``meta.leader_withheld`` is the reason a ladder ordered
+    on the average names nobody, and only such a ladder: one ordered on a
+    total names nobody while the counts are unequal, whoever is level with
+    whom, and its card says the counts are why. No test held that, and a
+    mutant asking ``stats.level_at_the_top`` of a ladder ordered on a total
+    passed every class (mutate646). Rejected: the tie as the reason here too,
+    which tells a club on points that a tie it does not order by withholds
+    its leader.
+    """
+
+    @classmethod
+    def make_config(cls):
+        return config_mod.Config(path=cls.root / "config.toml",
+                                 scoring="simple")
+
+    @classmethod
+    def write_cards(cls, data):
+        TestTwoTeamsLevelOnTheAverageAtTheTopOnUnequalCountsNameNoLeader \
+            .write_cards.__func__(cls, data)
+
+    def test_the_rockets_top_it_level_on_the_average_with_the_spinners(self):
+        rows = {row["slug"]: (row["position"], row["counted"],
+                              row["points_average"])
+                for row in self.season["teams"]}
+        self.assertEqual(
+            (rows["riverside-rockets"], rows["lakeside-spinners"]),
+            ((1, 2, 3.0), (2, 1, 3.0)))
+
+    def test_the_counts_are_why_and_not_the_tie(self):
+        table = stats.team_stats(self.matches, self.competition)
+        self.assertIs(stats.level_at_the_top(table, "in-progress",
+                                             self.competition.rules), False)
+        self.assertEqual((self.season["meta"]["leader"],
+                          self.season["meta"]["leader_withheld"]),
+                         (None, None))
+        self.assertEqual(pick_leads(self),
+                         ["Ladder in progress &mdash; teams have played "
+                          "unequal numbers of matches"])
+
+
+class TestATieBelowTheTopOnUnequalCountsLeavesTheLeaderAndNotTheOrder(
+        CardsAloneCase):
+    """The Wanderers and the Aces on 3.50 each, below the Rockets' 6.40.
+
+    Round 1's Rockets v Aces and round 2's Rockets v Wanderers won 24-15,
+    round 1's Spinners v Wanderers 22-15, and round 2's Aces v Spinners rained
+    off. The Wanderers, 7.0 from 2, are placed above the Aces, 3.5 from 1, on
+    points. Measured on the tree before this (fix-r1/before.txt, tiebelow):
+    F10's ``so that costs them no place`` of the Aces. The Rockets lead on an
+    average nobody shares, so they are still named; the order below does not
+    stand between the two level, and F10 says so of the Aces alone, and that
+    the Spinners' match fewer costs them nothing. Rejected: naming nobody
+    for a tie anywhere on the ladder, which would take the leader from a
+    team whose lead the counts do not touch.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_fixture_card(data, "1", "riverside-rockets", "hilltop-aces",
+                           WIN_24_15, index=1)
+        write_fixture_card(data, "1", "lakeside-spinners",
+                           "parkview-wanderers", WIN_22_15, index=2)
+        write_fixture_card(data, "2", "riverside-rockets",
+                           "parkview-wanderers", WIN_24_15, index=3)
+        write_washout(data, "2", "hilltop-aces", "lakeside-spinners",
+                      index=4)
+
+    def test_the_wanderers_are_placed_above_the_aces_on_points(self):
+        self.assertEqual(
+            {row["slug"]: (row["position"], row["counted"],
+                           row["points_average"])
+             for row in self.season["teams"]},
+            {"riverside-rockets": (1, 2, 6.4),
+             "lakeside-spinners": (2, 1, 6.2),
+             "parkview-wanderers": (3, 2, 3.5),
+             "hilltop-aces": (4, 1, 3.5)})
+
+    def test_the_rockets_still_lead_on_their_own_average(self):
+        self.assertEqual(self.season["meta"]["leader"],
+                         {"slug": "riverside-rockets", "value": 6.4})
+        self.assertEqual(pick_leads(self),
+                         ["<strong>Riverside Rockets</strong> lead on 6.40"])
+
+    def test_and_no_leader_is_withheld_for_a_tie_below_the_top(self):
+        table = stats.team_stats(self.matches, self.competition)
+        self.assertIs(stats.level_at_the_top(table, "in-progress",
+                                             self.competition.rules), False)
+        self.assertIsNone(self.season["meta"]["leader_withheld"])
+
+    def test_the_order_does_not_stand_between_the_two_level(self):
+        self.assertEqual(stats.ladder_levels(self.matches, self.competition),
+                         [["parkview-wanderers", "hilltop-aces"]])
+        self.assertIs(self.season["meta"]["order_stands"], False)
+
+    def test_f10_says_the_spinners_lose_nothing_and_the_aces_the_place(self):
+        self.assertEqual([message for _, message, _ in self.f10()], [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hilltop-aces and lakeside-spinners have fewer than "
+            "the 2 counted by the rest; the ladder is ordered on the "
+            "average, so that costs lakeside-spinners no place; but "
+            "hilltop-aces is level on it with a team that has counted more, "
+            "and the tie goes to points, so having counted fewer places it "
+            "below."])
+
+
+class TestATeamTwoMatchesBehindAndLevelOnTheAverageIsNotCalledOneBehind(
+        CardsAloneCase):
+    """The Rockets on 6.40 from 3, the Spinners on 6.40 from 1.
+
+    Every result 24-6. The Spinners won round 1 and were washed out in
+    rounds 2 and 3; the Aces and the Wanderers lost twice each, on 2.60 from
+    2. Measured on 4.523's second draft
+    (/tmp/mcf/lead/scratch/review-rule-r2/twogap.py): F10's ``so the match
+    fewer places it below`` of the Spinners, two matches behind, in a message
+    that had just said they have fewer than the 3 counted by the rest. Now
+    the clause says having counted fewer places them below, whatever the gap.
+    Rejected: counting the gap into the sentence, which says again what the
+    sentence before it has said.
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_fixture_card(data, "1", "riverside-rockets", "hilltop-aces",
+                           WIN_24_6, index=1)
+        write_fixture_card(data, "1", "lakeside-spinners",
+                           "parkview-wanderers", WIN_24_6, index=2)
+        write_fixture_card(data, "2", "riverside-rockets",
+                           "parkview-wanderers", WIN_24_6, index=3)
+        write_washout(data, "2", "hilltop-aces", "lakeside-spinners",
+                      index=4)
+        write_fixture_card(data, "3", "riverside-rockets", "hilltop-aces",
+                           WIN_24_6, index=5)
+        write_washout(data, "3", "lakeside-spinners", "parkview-wanderers",
+                      index=6)
+
+    def test_the_spinners_are_two_behind_and_level_with_the_rockets(self):
+        self.assertEqual(
+            {row["slug"]: (row["position"], row["counted"],
+                           row["points_average"])
+             for row in self.season["teams"]
+             if row["slug"] in ("riverside-rockets", "lakeside-spinners")},
+            {"riverside-rockets": (1, 3, 6.4),
+             "lakeside-spinners": (2, 1, 6.4)})
+        self.assertIsNone(self.season["meta"]["leader"])
+
+    def test_f10_says_having_counted_fewer_places_it_below(self):
+        self.assertEqual([message for _, message, _ in self.f10()], [
+            "the ladder is in progress — teams have played unequal numbers "
+            "of matches. hilltop-aces, lakeside-spinners and "
+            "parkview-wanderers have fewer than the 3 counted by the rest; "
+            "the ladder is ordered on the average, so that costs "
+            "hilltop-aces and parkview-wanderers no place; but "
+            "lakeside-spinners is level on it with a team that has counted "
+            "more, and the tie goes to points, so having counted fewer "
+            "places it below."])
+
+
+class TestTeamsLevelOnTheAverageAreAskedOfTheStoredFigure(unittest.TestCase):
+    """``stats.level_on_unequal_counts``: runs left to the next key.
+
+    Level is the ladder's own level, at ``PRECISION``, so that a figure and
+    its float noise are one average; a team with none is in no run, being
+    placed last for want of a match; and teams level on the same count are
+    no run, their order owing nothing to the count. The defect it serves:
+    4.523's first draft had no such question, and named the
+    Rockets the leader on 6.40 from 2 over the Spinners on 6.40 from 1
+    (/tmp/mcf/lead/scratch/fix-r1/before.txt, tie). Rejected: comparing the
+    raw floats, which would part an average from its own float noise.
+    """
+
+    def test_a_run_is_level_at_the_stored_precision_on_unequal_counts(self):
+        # 4.523's review: 6.4 and 6.4000000000000004 are one double, so
+        # the comparison passed with the rounding taken out
+        # (review-tests-r2/mutants-full-pipeline.txt, S1). The mean of two
+        # games-bonus figures is real noise.
+        noisy = (6.2 + 6.4) / 2
+        self.assertNotEqual(noisy, 6.3)
+        self.assertEqual(stats.level_on_unequal_counts(
+            ["a", "b", "c", "d", "e"],
+            {"a": 6.3, "b": noisy, "c": 5.0, "d": 5.0, "e": None},
+            {"a": 2, "b": 1, "c": 2, "d": 2, "e": 0}), [["a", "b"]])
+
+    def test_a_run_keeps_the_ladder_s_order(self):
+        # An order that is not the alphabet's: in x, y, z the run passed with
+        # its slugs sorted (mutate646).
+        self.assertEqual(stats.level_on_unequal_counts(
+            ["z", "x", "y"], {"x": 3.0, "y": 3.0, "z": 3.0},
+            {"z": 3, "x": 3, "y": 2}), [["z", "x", "y"]])
+
+    def test_an_average_apart_in_the_sixth_place_is_no_run(self):
+        self.assertEqual(stats.level_on_unequal_counts(
+            ["a", "b"], {"a": 6.400001, "b": 6.4}, {"a": 2, "b": 1}), [])
+
+
+class TestALadderNotStartedNamesNobodyWhateverItIsOrderedOn(CardsAloneCase):
+    """Round 1 rained off on both courts, under the order on the average.
+
+    An order on the average is fair across unequal counts wherever the average
+    decides it, and no count at all is no order (4.428): nothing counted has
+    no average to lead on. Kept as it was: on the base
+    (/tmp/mcf/lead/scratch/build/new-tests-before.txt) nobody led, and the
+    document had no ``ordered_on_average``. Rejected: naming the top row of
+    a ladder not started because it is ordered on the average, when its rows
+    are in name order (4.428).
+    """
+
+    @classmethod
+    def write_cards(cls, data):
+        write_washed_out_round(data)
+
+    def test_the_ladder_has_not_started_and_nobody_leads_it(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["ladder_state"], meta["leader"],
+                          meta["ordered_on_average"], meta["order_stands"],
+                          meta["leader_withheld"]),
+                         ("empty", None, True, False, None))
+        table = stats.team_stats(self.matches, self.competition)
+        self.assertIsNone(stats.ladder_leader(table, "empty",
+                                              self.competition.rules))
+        self.assertIs(stats.level_at_the_top(table, "empty",
+                                             self.competition.rules), False)
 
 
 # --- a card that records no result and no play is told so once (4.424) ---------

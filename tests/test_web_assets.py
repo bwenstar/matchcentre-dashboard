@@ -68,7 +68,9 @@ DOM_CONTRACT = (
     ("provenance-flag", "class"),
     # Only present in multi-season mode; the single-season page must not show it.
     ("season-picker", "id"),
-    # Says the ladder is a snapshot because teams have played unequal matches.
+    # Says whether the ladder's order stands while teams have played unequal
+    # matches: a snapshot on a total, standing on the average, and a snapshot
+    # there too between teams level on it on unequal counts.
     ("ladder-note", "class"),
     # Whether the season validated, and how many cards it was built from. Listed
     # here rather than left to the getElementById sweep below, which catches it
@@ -12776,6 +12778,18 @@ class TestTheOverviewsHeroCrownsTheLeaderTheDocumentNames(WebAssetCase):
     crowning on both surfaces, which with five of the owner's ten divisions of five
     teams, a bye every round, names a leader on unequal counts all season against
     F10; and the page asking ``ladder_complete`` itself, a second copy of the rule.
+
+    From 4.523 Python names the top of a ladder in progress ordered on the
+    average, unless its top row is level on it with a team on another count, so
+    the hero names it too. The in-progress reason is reached for one ordered on
+    a total and for a document from before 4.523; one whose top row is level on
+    the average with a team on another count is given the document's reason for
+    that, ``meta.leader_withheld``. 4.523's review measured the hero giving
+    ``No leader while teams have played unequal numbers of matches``, the
+    sentence the maintainer reported, there instead, beside a division led on
+    unequal counts (/tmp/mcf/lead/scratch/review-pages-r2/mixed.txt).
+    Rejected: the hero inferring the tie from ``meta.ordered_on_average`` and
+    a null leader, a second copy of Python's rule.
     """
 
     def hero(self) -> str:
@@ -12791,7 +12805,8 @@ class TestTheOverviewsHeroCrownsTheLeaderTheDocumentNames(WebAssetCase):
         self.assertRegex(self.hero(), r"text: top\s*\?\s*top\.name \+[^:]*"
                                       r":\s*noLeaderReason\(m\) \}")
 
-    def test_a_ladder_in_progress_names_none_until_the_counts_are_level(self):
+    def test_a_ladder_in_progress_with_no_leader_says_the_counts_are_unequal(
+            self):
         # 4.458 moved this: the reason is the document's sentence for what F10
         # compared, played or counted, and not played whatever it compared; a
         # document without the sentence falls through to No leader named.
@@ -12799,6 +12814,16 @@ class TestTheOverviewsHeroCrownsTheLeaderTheDocumentNames(WebAssetCase):
             self.guard_for("noLeaderReason", "'No leader while ' + m.ladder_detail",
                            emits="return"),
             "m.ladder_state === 'in-progress' && m.ladder_detail")
+
+    def test_a_top_row_level_across_counts_says_so_and_not_the_counts(self):
+        self.assertEqual(
+            self.guard_for("noLeaderReason",
+                           "'No leader while ' + m.leader_withheld",
+                           emits="return"),
+            "m.ladder_state === 'in-progress' && m.leader_withheld")
+        code = jslint.without_comments(self.body("noLeaderReason"))
+        self.assertLess(code.index("m.leader_withheld"),
+                        code.index("m.ladder_detail"))
 
     def test_a_ladder_not_started_says_nothing_has_been_counted(self):
         self.assertEqual(
@@ -12908,8 +12933,13 @@ class TestTheLadderNoteAndTheHeroSayWhatPythonCompared(WebAssetCase):
 
     def test_the_note_reads_the_document_s_sentence(self):
         code = jslint.without_comments(self.body("ladderNote"))
+        # The snapshot's own branch: 4.523's tie branch is spelt the same, and
+        # satisfied this with the snapshot's sentence dropped (round 2 of the
+        # fixes, review-tests-r2).
+        snapshot = code[code.rindex("' In progress'"):]
+        self.assertIn("so this order is a snapshot", snapshot)
         self.assertIn("' In progress' + (m.ladder_detail ? ' — ' + m.ladder_detail "
-                      ": '') +", code)
+                      ": '') +", snapshot)
         self.assertNotIn("unequal numbers", code)
 
     def test_the_hero_reads_it_too(self):
@@ -12942,6 +12972,200 @@ class TestTheProgressFootCountsMatchesPlayedAndTheChipCardsScored(WebAssetCase):
     def test_the_chip_keeps_cards_scored(self):
         self.assertIn("' ' + plural(m.cards_seen || 0, 'card') + ' scored'",
                       jslint.without_comments(self.body("renderHealth")))
+
+
+# --- 4.523: a ladder ordered on the average is led on unequal counts -------
+
+
+class TestTheLadderNoteSaysAnOrderOnTheAverageStands(WebAssetCase):
+    """The note's sentence for a ladder in progress, by what it is ordered on.
+
+    An order on the average divides each team's points by its own counted
+    matches, so while teams have counted unequal numbers its order stands
+    wherever the average decides it, and the note said otherwise. Measured on
+    the base in headless Chrome (/tmp/mcf/lead/scratch/build/before.txt, demo,
+    five-byes and six-cancel): ``! In progress — teams have played unequal
+    numbers of matches, so this order is a snapshot and not a standing.`` over
+    a ladder ordered on the average. The document says whether the order
+    stands on the counts it has, ``meta.order_stands``, from
+    ``stats.order_stands``: true where the ladder is ordered on the average
+    and no two teams are level on it on unequal counts. The note reads it:
+    the counts in the document's sentence, and that the order stands, with no
+    warning mark. Where two teams are level so, the note says that much is a
+    snapshot
+    (``TestTheLadderNoteSaysATieOnTheAverageAcrossCountsIsASnapshot``).
+    A ladder ordered on a total, and a document from a release before the
+    keys, keep the snapshot sentence. Rejected: the page reading
+    ``rules.ladder_by[0]`` itself, a second copy of the rule in the language
+    the suite cannot run (4.112).
+    """
+
+    def note(self) -> str:
+        return jslint.without_comments(self.body("ladderNote"))
+
+    def test_the_order_stands_only_where_the_document_says_so(self):
+        # 4.523's review moved this: an order on the average stands where
+        # no two teams are level on it on unequal counts, which is Python's
+        # meta.order_stands and not the ruleset's meta.ordered_on_average.
+        self.assertEqual(
+            self.guard_for("ladderNote", "so the order stands",
+                           emits="return"),
+            "m.order_stands")
+
+    def test_it_says_the_counts_in_the_document_s_sentence(self):
+        code = self.note()
+        branch = code[code.index("if (m.order_stands)"):
+                      code.index("so the order stands")]
+        # The whole clause: the guard alone holds the key's name, and passed
+        # with the sentence dropped (4.523's review, review-tests-r2, J5).
+        self.assertIn("(m.ladder_detail ? ' — ' + m.ladder_detail : '')",
+                      " ".join(branch.split()))
+        self.assertNotIn("unequal", branch)
+        self.assertNotIn("ladder-note--incomplete", branch)
+        self.assertNotIn("'!'", branch)
+        # And the order it is on, as the snapshot gives it: the sentence
+        # passed with basis dropped (mutate646).
+        tail = code[code.index("so the order stands"):
+                    code.index("if (m.ordered_on_average)")]
+        self.assertIn("unplacedNote() + ' ' + basis }", " ".join(tail.split()))
+
+    def test_a_ladder_not_started_is_said_first(self):
+        code = self.note()
+        self.assertLess(code.index("m.ladder_state === 'empty'"),
+                        code.index("m.order_stands"))
+
+    def test_any_other_ladder_in_progress_is_still_a_snapshot(self):
+        # A document from a release before the keys has neither order_stands
+        # nor ordered_on_average, so it reaches the sentence it was shown
+        # before this row.
+        code = self.note()
+        self.assertLess(code.index("so the order stands"),
+                        code.index("so this order is a snapshot and not a "
+                                   "standing"))
+
+    def test_the_page_asks_no_rule_of_its_own(self):
+        # The note reads ladder_by for its "Ordered by" line, and asks nothing
+        # of its first key.
+        note = self.note()
+        for asked in ("ladder_by[0]", "'points_average'"):
+            with self.subTest(asked=asked):
+                self.assertNotIn(asked, note)
+        # The hero names whom meta.leader names, whatever the order.
+        for fn in ("noLeaderReason", "renderOverview"):
+            code = jslint.code_only(self.body(fn))
+            for asked in ("ladder_by", "ordered_on_average", "order_stands"):
+                with self.subTest(fn=fn, asked=asked):
+                    self.assertNotIn(asked, code)
+
+
+class TestTheLadderNoteSaysATieOnTheAverageAcrossCountsIsASnapshot(
+        WebAssetCase):
+    """The note where two teams are level on the average on unequal counts.
+
+    Between two teams level on the average the next key decides, and under
+    games-bonus that is points, a total, which the team that has counted more
+    leads. Measured on 4.523's first draft
+    (/tmp/mcf/lead/scratch/fix-r1/before.txt, tie and tiebelow): the note said
+    ``so the order stands`` with no warning mark over the Rockets on 6.40 from
+    2 above the Spinners on 6.40 from 1. Python says whether the order stands
+    on these counts, ``meta.order_stands``, and where it does not on a ladder
+    ordered on the average the note says the tie goes to the next thing the
+    ladder is ordered by, named from ``rules.ladder_by`` as F10 names it, so
+    there the order is a snapshot, with the warning mark. Round 2 of the
+    fixes took out ``the next key decides between them``, the code's word
+    for it and no other page string's (review-pages-r2). Rejected: the page
+    finding the level teams in the rows itself, a second copy of Python's
+    rule.
+    """
+
+    PHRASE = "the tie goes to ' + order[1]"
+
+    def note(self) -> str:
+        return jslint.without_comments(self.body("ladderNote"))
+
+    def test_it_is_said_of_a_ladder_ordered_on_the_average(self):
+        self.assertEqual(self.guard_for("ladderNote", self.PHRASE,
+                                        emits="return"),
+                         "m.ordered_on_average")
+
+    def test_after_the_order_that_stands_and_before_the_snapshot(self):
+        code = self.note()
+        self.assertLess(code.index("so the order stands"),
+                        code.index(self.PHRASE))
+        self.assertLess(code.index(self.PHRASE),
+                        code.index("so this order is a snapshot and not a "
+                                   "standing"))
+
+    def test_with_the_warning_mark_and_the_document_s_sentence(self):
+        code = self.note()
+        branch = code[code.index("if (m.ordered_on_average)"):
+                      code.index(self.PHRASE)]
+        self.assertIn("ladder-note--incomplete", branch)
+        self.assertIn("'!'", branch)
+        # The whole clause, as the order that stands is held (J7).
+        self.assertIn("(m.ladder_detail ? ' — ' + m.ladder_detail : '')",
+                      " ".join(branch.split()))
+        # And the order it is on, which the sentence passed without
+        # (mutate646).
+        tail = code[code.index(self.PHRASE):
+                    code.index("so this order is a snapshot and not a "
+                               "standing")]
+        self.assertIn("unplacedNote() + ' ' + basis }", " ".join(tail.split()))
+
+    def test_it_names_the_next_thing_the_ladder_is_ordered_by(self):
+        code = " ".join(self.note().split())
+        self.assertIn("'with different numbers of matches counted, the tie "
+                      "goes to ' + order[1] + ', so there the order is a "
+                      "snapshot.'", code)
+        self.assertNotIn("next key", code)
+
+
+class TestTheLadderNoteSaysATeamWithNoMatchCountedIsPlacedLast(WebAssetCase):
+    """Where the order on the average stands, a team on nought is said apart.
+
+    A team with no match counted has no average, and the ladder places it
+    last for want of one, by name among others on none (4.428), not on its
+    record. Measured on 4.523's first draft
+    (/tmp/mcf/lead/scratch/review-pages-r1/after.txt, six teams in round 1,
+    one card cancelled): ``so the order stands`` over ``5 | Ashgrove Owls |
+    0 | ... | —`` and ``6 | Fernlea Voles | 0 | ... | —``, while F10 said of
+    them that they are placed last. The note now says so too, in a sentence
+    of its own, asked of the rows' averages as ``averagedRoundsCounted`` asks
+    of their counts. Rejected: a document key of its own, for a fact the rows
+    already carry.
+    """
+
+    def test_both_sentences_on_the_average_say_it(self):
+        code = jslint.without_comments(self.body("ladderNote"))
+        stands = code[code.index("if (m.order_stands)"):
+                      code.index("if (m.ordered_on_average)")]
+        level = code[code.index("if (m.ordered_on_average)"):
+                     code.index("so this order is a snapshot")]
+        for name, branch in (("stands", stands), ("level", level)):
+            with self.subTest(branch=name):
+                self.assertIn("unplacedNote()", branch)
+        self.assertNotIn("unplacedNote()",
+                         code[code.index("so this order is a snapshot"):])
+
+    def test_it_is_asked_of_the_rows_with_no_average(self):
+        code = jslint.code_only(self.body("unplacedNote"))
+        self.assertIn("IDX.ladder", code)
+        self.assertIn("points_average === null", code)
+        self.assertNotIn("counted", code)
+        self.assertNotIn("ladder_by", code)
+
+    def test_in_the_singular_and_the_plural_and_not_at_all_with_none(self):
+        code = jslint.without_comments(self.body("unplacedNote"))
+        self.assertIn("A team with no match counted has no average yet, so it "
+                      "is placed last until it has one.", code)
+        self.assertIn("Teams with no match counted have no average yet, so "
+                      "they are placed last until they have one.", code)
+        self.assertRegex(code, r"if \(!none\) return '';")
+        # Which goes with which count, and the space before each: the two
+        # swapped, or run on from the sentence before, passed the above
+        # (4.523's review, review-tests-r2, J1 and J8).
+        self.assertRegex(code, r"return none === 1\s*\?\s*' A team with no "
+                               r"match[^']*'\s*:\s*' Teams with no match")
 
 
 if __name__ == "__main__":

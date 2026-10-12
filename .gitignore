@@ -52,6 +52,11 @@
 /demo-seasons/
 /demo-seasons.toml
 
+# What `python3 tools/release.py publish` writes: a release's archive and its
+# notes. The workflow makes them afresh from the tag every time, and the archive
+# is the whole project, so nothing in here is anything to commit.
+/dist/
+
 # Design and development notes. Working documents, not part of the product.
 /notes/
 

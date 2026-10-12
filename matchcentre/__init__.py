@@ -47,8 +47,15 @@ from pathlib import Path
 #: show up. A test now requires this to equal the newest version the changelog
 #: documents.
 __version__ = "0.1.0"
-__all__ = ["__version__", "REQUIRES_PYTHON", "version_line", "WINDOWS",
+__all__ = ["__version__", "NAME", "REQUIRES_PYTHON", "version_line", "WINDOWS",
            "pasteable", "pasteable_path"]
+
+#: The project's name, as the version line and a release's archive spell it.
+#: ``tools/release.py`` names the zip it publishes ``NAME-X.Y.Z.zip`` and
+#: finds every example of the version line by it, and an entry point may not
+#: spell the line out for itself, so the name is read from here as the format
+#: is.
+NAME = "matchcentre-dashboard"
 
 #: The oldest Python this code runs on. Set by ``tomllib``, which arrived in 3.11
 #: and is how ``config.py`` reads a club's ``config.toml``; ``slots=True`` on the
@@ -93,8 +100,7 @@ def version_line() -> str:
     the imports of one module by another that have no interest in the line.
     """
     python = ".".join(str(part) for part in sys.version_info[:3])
-    return (f"matchcentre-dashboard {__version__}  "
-            f"(python {python} on {sys.platform})")
+    return f"{NAME} {__version__}  (python {python} on {sys.platform})"
 
 
 #: Whether the lines this package quotes for a club to paste are for Windows, where

@@ -514,11 +514,12 @@ sanity-check it against the one your association publishes:
 
 Two teams show `4` in the `P` column and the rest show `5`, because the demo's
 round 5 includes a match called off — which is what the `in progress` note is
-saying. That is the `unplayed = zero` line above doing its job: a round nobody
-played adds nothing to either team, so until that match is rescheduled and its
-card copied in, the ladder's order is not settled. `avg` is the column to compare
-in the meantime; it is points per match counted, so it is fair across an unequal
-`P`.
+saying. That is the `unplayed = zero` line above doing its job: a match nobody
+played adds nothing to either team, and is not counted for either. The ladder is
+ordered on `avg`, points per match counted, which is fair across an unequal `P`,
+so the order stands and the Bunyips are named the leader all the same. The note
+goes once every team has the same number counted, as it will when that match is
+played and its card copied in.
 
 Then a review list of everything it worked out rather than being told, each with
 the exact lines to paste into `config.toml` if you want to confirm it. Then any
@@ -2821,22 +2822,49 @@ played.
 
 ### The ladder says "in progress"
 
-That is not an error. It means teams have different numbers of matches counted, so
-the order is a snapshot rather than a settled table. It goes away by itself once
-every team has the same number counted. Under the default `unplayed = "zero"` the
-matches counted are the matches played, and that is what the report and the pages
-say; under `average` a bye or a washout credited the team's average is counted as
-well, and where one has been they say counted instead.
+That is not an error. It means teams have different numbers of matches counted. It
+goes away by itself once every team has the same number counted. Under the default
+`unplayed = "zero"` the matches counted are the matches played, and that is what the
+report and the pages say; under `average` a bye or a washout credited the team's
+average is counted as well, and where one has been they say counted instead.
 
-Until then nobody is named the leader: the front page says the ladder is in
-progress, and the top of the overview says "No leader while teams have played
-unequal numbers of matches" where it would name the team on top. The two always
-name the same team or nobody. This costs something in a division with an odd number
-of teams: one team sits out every round, so unless your rules credit that bye
+What it means for the order depends on what the ladder is ordered on. `games-bonus`,
+the default, orders it on the points average first: each team's points divided by
+its own matches counted. Under the default `unplayed = "zero"` a team a bye, a washout
+or a missing card behind is neither lifted nor dropped by that, so the order stands
+and the team on top is named the leader all the same. The front page says `<team>
+lead on <average>`, the top of the overview names the same team, and the note under
+the ladder says the order stands. The F10 warning still names the teams with fewer
+matches counted, in case one of them is a card you have not copied in yet. A team
+with no match counted at all has no average yet, so it is placed last until it has
+one, and the warning and the note say that of it instead.
+
+One exception: two teams level on the average with different numbers counted. The
+tie goes to the next thing the ladder is ordered by, and under `games-bonus` that is
+points, a total, which the team that has counted more leads. There the warning says
+the tie goes to points and having counted fewer places the team below, by one match
+or more, and the note says that part of the order is a snapshot. If the team on top
+is level so, nobody is named the leader, as on a ladder ordered on a total, and the
+front page and the top of the overview say why: the teams on top are level on the
+average with different numbers of matches counted. Level lower down, the leader is
+still named. `season.json` says whether the order stands as `meta.order_stands`, and
+why a leader is withheld for a tie at the top as `meta.leader_withheld`.
+
+A ladder ordered on a total is different. `sets-first`, `rubbers` and `simple` order
+it on points first. There the team on top may be there because it has played a match
+more, so until every team has the same number counted the order is a snapshot rather
+than a settled table, and nobody is named the leader. The front page says the ladder
+is in progress, and the top of the overview says "No leader while teams have played
+unequal numbers of matches" where it would name the team on top. Naming the top row
+anyway would crown whoever happened to be on top with a match in hand somewhere
+below them. Either way, the two pages always name the same team or nobody.
+
+This costs something in a division with an odd number of teams on a ladder ordered
+on a total: one team sits out every round, so unless your rules credit that bye
 (`unplayed = "average"`, with the byes in the draw), the counts are unequal after
 every round but the ones where the byes have come out even, and only those name a
-leader. Naming the top row anyway would crown whoever happened to be on top with a
-match in hand somewhere below them.
+leader. Ordered on the average, the same division names its leader every round
+but one whose team on top is level on the average with a team on another count.
 
 Before any regular-season match has been counted, say the first round was washed
 out or the only card is a final, the ladder has not started. The report says
@@ -3500,6 +3528,23 @@ python3 tools/scheduled.py --reports /some/folder
                                         # keep the reports somewhere else
 python3 tools/scheduled.py --timeout 20 # give a big archive longer (default
                                         # 10 minutes)
+
+python3 tools/release.py prepare X.Y.Z  # a maintainer's: write the version and
+                                        # move the changelog's [Unreleased]
+python3 tools/release.py prepare X.Y.Z --date 2026-10-08
+                                        # the same, dated that day, not today
+python3 tools/release.py check vX.Y.Z   # is this tag ready to release?
+python3 tools/release.py notes X.Y.Z    # the release's notes, as GitHub shows
+                                        # them
+python3 tools/release.py notes X.Y.Z --archive FILE --run-url URL
+                                        # the same, closed by the file's SHA-256
+                                        # and the run that tested it
+python3 tools/release.py publish vX.Y.Z --out DIR --dry-run
+                                        # write the zip and the notes into DIR,
+                                        # from where it is run (default the
+                                        # project's dist/), and print each gh
+                                        # command; without --dry-run, and with
+                                        # GH_REPO=OWNER/REPO, run them
 ```
 
 Every command takes `--help`.
@@ -3780,6 +3825,7 @@ being quietly wrong:
 | `test_status.py` | The sentence a failed build puts on the front page — that it names no path and never creates a site |
 | `test_scheduled.py` | `tools/scheduled.py` — that it builds only when something changed, keeps every report, and stops a build that hangs |
 | `test_careers.py` | The careers page — that every total is the rows above it added up, every row opens the season or competition it came from, and nothing is written by a build that withholds players' names |
+| `test_release.py` | `tools/release.py` and the release workflow — that a tag is released only when the code and the changelog agree on it, that the notes are the changelog's own words, and that the archive is exactly the tagged files |
 
 A single file runs on its own, which is quicker while you are working:
 
@@ -3789,11 +3835,13 @@ python3 tests/test_foundation.py          # one line per test, and a name that
 ```
 
 The same command runs on every push here, on Python 3.11, 3.12 and 3.13, in
-[`.github/workflows/tests.yml`](.github/workflows/tests.yml). There is no
-`pip install` step in that file either, which is how the "Python is the whole list"
-promise above stays true rather than merely intended: a dependency creeping in
-fails the workflow on the import. If you fork this, the same workflow runs on your
-branches for free.
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml), and again before every
+release, which [`.github/workflows/release.yml`](.github/workflows/release.yml)
+publishes only once it has passed. There is no `pip install` step in tests.yml
+either, which is how the "Python is the whole list" promise above stays true rather
+than merely intended: a dependency creeping in fails the workflow on the import. If
+you fork this and turn its workflows on, on your fork's Actions tab (GitHub leaves
+them off in a new fork), tests.yml runs on your branches for free.
 
 ---
 
@@ -3878,7 +3926,10 @@ config.toml    your settings
 ```
 
 So an upgrade is: download the new release, copy those two into it, and run a
-build.
+build. A release is on the repository's **Releases** page, as
+`matchcentre-dashboard-X.Y.Z.zip` under the version's notes, which say what changed
+and close with the zip's SHA-256 and the run that tested it; it unzips into a folder
+of its own name.
 
 ```bash
 python3 build.py --check     # reads and validates everything, writes nothing

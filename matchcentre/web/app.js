@@ -16,7 +16,8 @@
  *    round total was treated as "as many rounds as have been played". Here,
  *    meta.rounds_total === null means the meter and every percentage derived from
  *    it are not drawn at all (F3), meta.ladder_state labels the ladder a snapshot
- *    or not started rather than a standing (F10), and meta.provenance marks
+ *    or not started rather than a standing (F10), unless meta.order_stands
+ *    says its order stands on unequal counts (4.523), and meta.provenance marks
  *    every derived identity with a visible flag and a one-line instruction for
  *    correcting it (F7).
  * 2. A scorecard that was seen and not scored disappearing. validation.rejected
@@ -2540,8 +2541,11 @@ function renderOverview(main) {
   main.appendChild(head);
 
   // Hero: the one number the season leads with, for the team Python named the
-  // leader (meta.leader) and nobody else, as the front page does: the top row of a
-  // ladder in progress or not started is no leader (4.438).
+  // leader (meta.leader) and nobody else, as the front page does (4.438). Python
+  // names the top of a complete ladder, and of one in progress ordered on the
+  // average unless its top row is level on it with a team on another count
+  // (4.523); the top row of one ordered on a total while in progress, of one
+  // level so at the top, or of one not started, is no leader.
   var top = m.leader ? teamOf(m.leader.slug) : null;
   var hero = el('div', { class: 'card hero' });
   hero.appendChild(el('div', { class: 'hero-figure' }, [
@@ -2611,9 +2615,18 @@ function renderOverview(main) {
 
 /* Why the hero names nobody, by F10's state as Python gave it (meta.ladder_state).
  * In progress, in Python's words for what it compared, meta.ladder_detail: matches
- * played, or counted where a round was credited (4.458). A document built before
- * the keys names no leader either, and says no more than that. */
+ * played, or counted where a round was credited (4.458). Python names a leader of
+ * a ladder in progress ordered on the average (4.523), unless its top row is
+ * level on it with a team on another count, and then says so in its own words,
+ * meta.leader_withheld, which the front page gives too: the counts are not why,
+ * a division beside it on unequal counts being led. So the counts' reason is
+ * reached for one ordered on a total and for a document from before 4.523. A
+ * document built before the keys names no leader either, and says no more than
+ * that. */
 function noLeaderReason(m) {
+  if (m.ladder_state === 'in-progress' && m.leader_withheld) {
+    return 'No leader while ' + m.leader_withheld;
+  }
   if (m.ladder_state === 'in-progress' && m.ladder_detail) {
     return 'No leader while ' + m.ladder_detail;
   }
@@ -2748,7 +2761,17 @@ function ladderHeadToHeadNote() {
  * is the failure this rule exists to stop. In Python's words, meta.ladder_detail,
  * which say played where every team's count is its P and counted where a round was
  * credited (4.458); a document written before the key is said to be in progress
- * and no more. */
+ * and no more. A ladder ordered on the average is not misled by the counts:
+ * each team's average is its own points over its own matches, so where Python
+ * says in meta.order_stands that no two teams are level on it on unequal
+ * counts, the note says the order stands, with no warning mark. Where two are,
+ * which meta.ordered_on_average without meta.order_stands says, the tie goes to
+ * the next thing it is ordered by, named from rules.ladder_by as F10 names it,
+ * under games-bonus points, a total, which the team that has counted more
+ * leads, so the note says that much of the order is a snapshot.
+ * A ladder ordered on a total, and a document from before those keys, are a
+ * snapshot (4.523). Either sentence on the average says a team with no match
+ * counted is placed last for want of one, unplacedNote. */
 function ladderNote() {
   var m = meta();
   var order = (rules().ladder_by || []).map(function (k) { return k.replace(/_/g, ' '); });
@@ -2765,11 +2788,46 @@ function ladderNote() {
         'is no ladder: the teams are listed by name.' })
     ]);
   }
+  // Unequal counts on an order they cannot mislead (4.523).
+  if (m.order_stands) {
+    return el('p', { class: 'ladder-note', text: 'In progress' +
+      (m.ladder_detail ? ' — ' + m.ladder_detail : '') + ', and the ladder is ' +
+      'ordered on the average, which divides each team’s points by its own ' +
+      'matches counted, so the order stands.' + unplacedNote() + ' ' + basis });
+  }
+  // On the average, with two teams level on it on unequal counts: the next key
+  // puts them in order, and it can be a total (4.523). It is order[1], since
+  // Python's ladder_by always ends with name after the key it is ordered on.
+  if (m.ordered_on_average) {
+    return el('p', { class: 'ladder-note ladder-note--incomplete' }, [
+      el('span', { class: 'ico', 'aria-hidden': 'true', text: '!' }),
+      el('span', { text: ' In progress' + (m.ladder_detail ? ' — ' + m.ladder_detail : '') +
+        ', and the ladder is ordered on the average, but where teams are level on it ' +
+        'with different numbers of matches counted, the tie goes to ' + order[1] +
+        ', so there the order is a snapshot.' +
+        unplacedNote() + ' ' + basis })
+    ]);
+  }
   return el('p', { class: 'ladder-note ladder-note--incomplete' }, [
     el('span', { class: 'ico', 'aria-hidden': 'true', text: '!' }),
     el('span', { text: ' In progress' + (m.ladder_detail ? ' — ' + m.ladder_detail : '') +
       ', so this order is a snapshot and not a standing. ' + basis })
   ]);
+}
+
+/* The sentence for the teams with no match counted, where the note says the
+ * order on the average stands or nearly does. Such a team has no average, and
+ * the ladder places it last for want of one, by name among any others on none
+ * (4.428), not on its record, as F10 says of it too. Asked of the exported rows'
+ * averages, as averagedRoundsCounted asks of their counts. */
+function unplacedNote() {
+  var none = IDX.ladder.filter(function (t) {
+    return t.points_average === null || t.points_average === undefined;
+  }).length;
+  if (!none) return '';
+  return none === 1
+    ? ' A team with no match counted has no average yet, so it is placed last until it has one.'
+    : ' Teams with no match counted have no average yet, so they are placed last until they have one.';
 }
 
 /* Whether the average the ladder is ordered on divides by more matches than the P

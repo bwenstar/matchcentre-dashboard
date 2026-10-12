@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -71,6 +72,7 @@ REQUIRED = (
     "tools/screenshots.py",
     "tools/fetch.py",
     "tools/scheduled.py",
+    "tools/release.py",
     # The suite ships too, and the README tells a club how to run it, so a copy
     # that arrives without it has arrived incomplete.
     "tests/jslint.py",
@@ -89,6 +91,7 @@ REQUIRED = (
     "tests/test_scheduled.py",
     "tests/test_careers.py",
     "tests/test_anonymise.py",
+    "tests/test_release.py",
 )
 
 # Code that ships and that nothing promises, each with the reason it ships anyway.
@@ -122,16 +125,29 @@ SHIPPED_SUFFIXES = {".py", ".js", ".css", ".html", ".md", ".toml", ".txt", ".yml
 # the version line and every player's name, and a scan that had not been told
 # about `reports/` failed after the next version bump on a developer's machine.
 # The same goes for the copy without names that README.md builds into `public/`,
-# and the `reports-public/` its scheduled line keeps.
+# and the `reports-public/` its scheduled line keeps, and for `dist/`,
+# where `tools/release.py publish` writes a release's archive and its notes:
+# the notes are a changelog section, and quote whatever version it quoted.
 NOT_SHIPPED = frozenset({"notes", ".git", "__pycache__", "site", "data",
-                         "reports", "public", "reports-public"})
+                         "reports", "public", "reports-public", "dist"})
+
+# The report line's version, read whole as semver writes it. Read as three
+# numbers alone, `0.3.0-rc.1` was taken for `0.3.0`, so that a tree whose code
+# said the pre-release passed with every example quoting the final, or the
+# other way round. `tools/release.py prepare` rewrites with the same
+# expression, which tests/test_release.py holds equal to this one, and runs
+# the test below on what prepare wrote.
+REPORT_LINE = re.compile(
+    r"matchcentre-dashboard ([0-9]+\.[0-9]+\.[0-9]+"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)")
 
 # Every program in the project that a person types the name of. Each has an
 # argument parser of its own, which is the reason the tests below ask every one
 # of them the same question instead of asking `build.py` and assuming.
 ENTRY_POINTS = ("build.py", "tools/doctor.py", "tools/demo.py",
                 "tools/screenshots.py", "tools/fetch.py",
-                "tools/scheduled.py")
+                "tools/scheduled.py", "tools/release.py")
 
 
 def git(*args: str) -> str:
@@ -152,6 +168,37 @@ def under_git() -> bool:
     done = subprocess.run(("git", "rev-parse", "--is-inside-work-tree"),
                           cwd=ROOT, capture_output=True, text=True)
     return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def version_scan(root: Path) -> list[Path]:
+    """The files the version test below reads: every shipped text file under
+    *root* but the changelog, as git keeps them.
+
+    In a git work tree, the files git tracks and the ones it would add, so that
+    a file a .gitignore leaves out, such as the config.proposed.toml that
+    `build.py --discover` writes with the version that wrote it, is not taken
+    for an example nobody updated; elsewhere, as in an unzipped release, every
+    file. ``tools/release.py prepare`` rewrites exactly these, and
+    tests/test_release.py holds the two lists equal. *root* is read when this
+    is called, so that test can run the version test on a project of its own.
+    """
+    try:
+        done = subprocess.run(("git", "ls-files", "-z", "--cached", "--others",
+                               "--exclude-standard"), cwd=root,
+                              capture_output=True)
+    except OSError:                     # no git, which a club may not have
+        done = None
+    if done is not None and done.returncode == 0:
+        paths = [root / name for name in os.fsdecode(done.stdout).split("\0")
+                 if name]
+    else:
+        paths = list(root.rglob("*"))
+    return sorted(path for path in paths
+                  if path.suffix in SHIPPED_SUFFIXES
+                  # The changelog is a history of every version.
+                  and path.name != "CHANGELOG.md"
+                  and not set(path.relative_to(root).parts) & NOT_SHIPPED
+                  and path.is_file())
 
 
 class TestEverythingPromisedIsPresent(unittest.TestCase):
@@ -478,11 +525,17 @@ class TestTheReportsFolderIsNeitherShippedNorScanned(unittest.TestCase):
     a ``.txt`` (a shipped suffix) that failed the version scan after the next bump
     and the ``--redact`` scan besides. Nor did ``.gitignore`` name it, so one
     ``git add .`` published a season's worth of names.
+
+    A scan is a function that walks ``ROOT``, or walks the root it is given, as
+    ``version_scan`` does so that tests/test_release.py can run the version
+    test on a project of its own. Read as only the first, moving the version
+    test's walk into that function took the scan out of this test's sight, and
+    a list of folders kept there would have passed unseen.
     """
 
     SCANS = ("test_nothing_published_points_a_reader_at_an_unpublished_file",
              "test_every_document_that_asks_for_the_flag_names_the_policy",
-             "test_every_example_of_the_report_line_quotes_the_version_in_the_code",
+             "version_scan",
              "test_every_one_is_required_or_exempt_for_a_reason")
 
     def test_every_scan_of_the_tree_leaves_it_out(self):
@@ -492,11 +545,13 @@ class TestTheReportsFolderIsNeitherShippedNorScanned(unittest.TestCase):
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
+            # ROOT, or a root the function is handed.
+            roots = {"ROOT"} | {arg.arg for arg in node.args.args}
             walks = any(isinstance(call, ast.Call)
                         and isinstance(call.func, ast.Attribute)
                         and call.func.attr == "rglob"
                         and isinstance(call.func.value, ast.Name)
-                        and call.func.value.id == "ROOT"
+                        and call.func.value.id in roots
                         for call in ast.walk(node))
             if walks:
                 scans[node.name] = node
@@ -1374,17 +1429,10 @@ class TestTheVersionNumberIsOneNumber(unittest.TestCase):
         # hand in the issue forms, because a form has nothing to interpolate. This
         # is what makes bumping the version notice them.
         stale = []
-        for path in sorted(ROOT.rglob("*")):
-            if not path.is_file() or path.suffix not in SHIPPED_SUFFIXES:
-                continue
-            if set(path.relative_to(ROOT).parts) & NOT_SHIPPED:
-                continue
-            if path.name == "CHANGELOG.md":     # a history of every version
-                continue
+        for path in version_scan(ROOT):
             for number, line in enumerate(path.read_text(encoding="utf-8")
                                           .splitlines(), start=1):
-                for found in re.findall(r"matchcentre-dashboard (\d+\.\d+\.\d+)",
-                                        line):
+                for found in REPORT_LINE.findall(line):
                     if found != self.version():
                         stale.append(f"{path.relative_to(ROOT)}:{number}: "
                                      f"{found}")
@@ -1672,8 +1720,30 @@ class TestEveryFlagACommandAcceptsIsInTheListOfCommands(unittest.TestCase):
     LISTED = ("build.py", "tools/scheduled.py")
 
     def flags(self, entry: str) -> set[str]:
-        """Every long option ``python3 <entry> --help`` offers."""
-        done = subprocess.run((sys.executable, str(ROOT / entry), "--help"),
+        """Every long option ``python3 <entry> --help`` offers, and every one
+        each of its subcommands' ``--help`` offers.
+
+        ``tools/release.py`` is a command of four subcommands, each with
+        flags of its own that its ``--help`` alone lists. They are read from
+        the list the command's own ``--help`` gives, so that a fifth is read
+        without this being told.
+        """
+        # Named through the class, because a test of another class borrows
+        # this method with its own self.
+        options = TestEveryFlagACommandAcceptsIsInTheListOfCommands.options
+        found, text = options(self, entry)
+        listed = text.split("positional arguments:\n", 1)[1:]
+        for command in re.findall(r"(?m)^ {4}([a-z][a-z-]*)(?: {2,}|$)",
+                                  listed[0].split("\n\n", 1)[0]
+                                  if listed else ""):
+            found |= options(self, entry, command)[0]
+        return found
+
+    def options(self, entry: str, *command: str) -> tuple[set[str], str]:
+        """Every long option ``python3 <entry> [command] --help`` offers,
+        and the whole of what it printed."""
+        done = subprocess.run((sys.executable, str(ROOT / entry), *command,
+                               "--help"),
                               capture_output=True, text=True, timeout=120,
                               env={"PATH": "/usr/bin:/bin", "COLUMNS": "80",
                                    # tools/scheduled.py imports build.py, and a
@@ -1690,10 +1760,12 @@ class TestEveryFlagACommandAcceptsIsInTheListOfCommands(unittest.TestCase):
                 continue
             found.update(re.findall(r"--[a-z][a-z-]*",
                                     re.split(r"\s{2,}", line.strip())[0]))
-        # Every entry point has `--version`, which the class above holds them to.
+        # Every entry point has `--version`, which the class above holds them
+        # to, and so does every subcommand of one.
         self.assertIn("--version", found, f"nothing was parsed out of {entry} "
-                                          f"--help:\n{done.stdout}")
-        return found
+                                          f"{' '.join(command)} --help:\n"
+                                          f"{done.stdout}")
+        return found, done.stdout
 
     def commands(self) -> str:
         """The fenced block under the heading that promises to list them all."""
@@ -1718,7 +1790,13 @@ class TestEveryFlagACommandAcceptsIsInTheListOfCommands(unittest.TestCase):
         for entry in self.LISTED:
             with self.subTest(command=entry):
                 self.assertIn(entry, block, f"{entry} is not in the list at all")
-                missing = sorted(flag for flag in self.flags(entry) - {"--help"}
+                # A read of no flags would pass the check below with none to
+                # miss. Measured by mutation: with flags() reading only the
+                # subcommands', of which these two have none, this test passed.
+                accepted = self.flags(entry)
+                self.assertIn("--version", accepted,
+                              f"no flags were read out of {entry} --help")
+                missing = sorted(flag for flag in accepted - {"--help"}
                                  if flag not in block)
                 self.assertEqual(missing, [],
                                  f"{entry} accepts flag(s) the README's list of "
@@ -1764,6 +1842,21 @@ class TestEveryFetchFlagIsInTheReadme(TestEveryFlagACommandAcceptsIsInTheListOfC
         unknown = sorted(offered - self.flags(self.PROGRAM))
         self.assertEqual(unknown, [], f"the list of commands offers {self.PROGRAM} "
                                       f"flag(s) it does not accept: {unknown}")
+
+
+class TestEveryReleaseFlagIsInTheReadme(TestEveryFetchFlagIsInTheReadme):
+    """The release tool's flags are in the list of commands, on its own lines.
+
+    Held as the fetcher's are, and for the same reason: the block is mostly
+    ``build.py``'s, and a release flag on a ``build.py`` line, ``--out`` among
+    them, would pass a block-wide check. Its flags are its subcommands', which
+    its own ``--help`` does not list, so they are read from each subcommand's.
+    Rejected: leaving a maintainer's tool out of the list, as
+    ``tools/screenshots.py`` is, which leaves ``--dry-run`` to be found by
+    reading the source.
+    """
+
+    PROGRAM = "tools/release.py"
 
 
 # The standard library's modules whose own work is a connection, a server or a name

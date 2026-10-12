@@ -296,13 +296,12 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
   `complete`.
 - The front page and the overview name the same leader, or nobody. With a match
   still to come, the front page's card named no leader and the overview's top
-  crowned the top row, a team on 2 matches above teams on 3: `6.30 | Riverside
-  Rockets · 12.6 points from 2 matches`. `season.json`'s new `meta.leader` is the
-  top of a complete ladder and nobody else, with the points average it leads on,
-  and both pages read it; until the counts are level the overview says `No leader
-  while teams have played unequal numbers of matches`. A division with an odd
-  number of teams has a bye every round, so unless its rules credit the bye it is
-  led only after the rounds where the byes come out even. The README says so.
+  crowned the top row whatever the ladder was ordered on. `season.json`'s new
+  `meta.leader` is the one answer, with the points average it leads on, and both
+  pages read it; where it is nobody on a ladder in progress the overview says
+  why, as `No leader while teams have played unequal numbers of matches` on one
+  ordered on a total. Which ladders in progress have a leader is under
+  *Changed*.
 - A season's progress is said as a count against its length, `3 of 10 rounds
   played`, where it read `Round 3 of 10`: with cards for rounds 2, 3 and 5 that is
   a round's label, and not the one the latest card is from. The front page's card
@@ -597,6 +596,52 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
   team with no home card gets no line. A court the club declared is written back live,
   with the court its home cards print below it behind a `#` where the two differ. The
   dashboard shows a home court only once it is declared.
+- A pushed version tag makes the GitHub Release. Pushing a tag had run no workflow,
+  and the notes were pasted by hand. `.github/workflows/release.yml` runs on a tag
+  starting with `v`: `tools/release.py check` refuses in seconds, with every reason at
+  once, a tag the code and the changelog do not both describe as released; the suite
+  runs as `tests.yml` itself, which a workflow may now call; and `tools/release.py
+  publish` zips the tagged tree as `matchcentre-dashboard-X.Y.Z.zip` and makes the
+  release with `gh`. Its notes are the changelog's section, each wrapped paragraph and
+  item on one line, then the zip's SHA-256 and the run that tested it; `check` refuses
+  notes longer than the 125,000 characters GitHub takes. A re-run, of the same tagged
+  commit, finishes a release that stopped half way and publishes one left a draft; a
+  run whose tag has since moved on GitHub publishes nothing; and a version with a
+  pre-release part is published as one. `tools/release.py prepare X.Y.Z` writes the
+  version, moves `[Unreleased]` under a dated heading and rewrites every example of
+  the report's first line in the files git keeps, which the suite had found only after
+  the bump; a final after its own release candidates gathers their changes under it
+  too, leaving their sections where they are, and a write that fails part way leaves
+  each file whole and puts back the ones already written. `publish --dry-run` writes
+  the zip and the notes into `dist/`, which git ignores, without making a release.
+
+### Changed
+
+- A ladder ordered on the points average, as `games-bonus`'s is, names its leader
+  while teams have different numbers of matches counted. The average divides each
+  team's points by its own matches counted, and under the default
+  `unplayed = "zero"` a bye, a cancelled match or a washout is in neither, so the
+  order already stood. The front page now says `<team> lead on <average>`, and the
+  top of the overview names the same team, where the front page said the ladder was
+  in progress. Such a ladder in a division of an odd number of teams, a bye every
+  round, is led all season but for a tie at the top (below), where it was led only
+  after the rounds the byes came out even. The note under the ladder says the order
+  stands rather than calling it a snapshot, and the F10 warning still names the
+  teams with fewer matches counted, in case one is a card not yet copied in, and
+  says it costs them no place; a team with no match counted yet is still placed
+  last, and the warning and the note say that of it. Two teams level on the average
+  with different numbers counted are put in order by the next thing the ladder is
+  ordered by, under `games-bonus` points, a total. There the warning says the tie
+  goes to points and that having counted fewer, by one match or more, places the
+  team below, and the note says that part of the order is a snapshot and names what
+  the tie goes to. If the team on top is level so, nobody is named the leader, and
+  the front page and the overview say it is for that tie and not for the counts.
+  `season.json` says which kind of order it is as `meta.ordered_on_average`, whether
+  it stands on the counts it has as `meta.order_stands`, and why a leader is
+  withheld for a tie at the top as `meta.leader_withheld`; the document format is
+  still `4`. A ladder ordered on points (`sets-first`, `rubbers` and `simple`) names
+  nobody until the counts are level, as before, since the team on top there may be
+  on top for having played more.
 
 ## [0.1.0] — 2026-10-01
 
