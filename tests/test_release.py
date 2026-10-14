@@ -225,6 +225,17 @@ class ProjectCase(unittest.TestCase):
         self.project = self.base / "project"
         make_project(self.project, version=self.VERSION,
                      changelog=self.CHANGELOG)
+        # The tool runs here, and its git with it, which asks the repository
+        # os.environ names before the one at its root: under a contributor's
+        # hook or rebase -x, theirs. Without it and git_env() in git(), 36 of
+        # these errored and one failed, and the contributor's repository took
+        # five commits and two tags (/tmp/mcf/ub/scratch/repair2-release.txt).
+        # Rejected: an environment of its own for the tool's git, which a
+        # program run by somebody who did set GIT_DIR rightly obeys.
+        from test_project_complete import git_env
+        patcher = mock.patch.dict(os.environ, git_env(), clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_(self, *argv: str) -> Ran:
         out, err = io.StringIO(), io.StringIO()
@@ -1698,17 +1709,19 @@ class TestTheNotesShowEachParagraphAsOneLine(ProjectCase):
 
 
 def git(root: Path, *argv: str) -> str:
-    """git in *root*, as somebody with no settings of their own runs it."""
+    """git in *root*, as somebody with no settings of their own runs it, and
+    with no repository of theirs named: see test_project_complete.git_env."""
+    from test_project_complete import git_env
     done = subprocess.run(
         ("git", "-c", "init.defaultBranch=main", "-c", "commit.gpgSign=false",
          "-c", "tag.gpgSign=false", *argv),
         cwd=root, capture_output=True, text=True, check=True,
-        env=dict(os.environ, GIT_AUTHOR_NAME="Stand-in Maintainer",
-                 GIT_AUTHOR_EMAIL="maintainer@example.invalid",
-                 GIT_COMMITTER_NAME="Stand-in Maintainer",
-                 GIT_COMMITTER_EMAIL="maintainer@example.invalid",
-                 GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
-                 PYTHONDONTWRITEBYTECODE="1"))
+        env=git_env(GIT_AUTHOR_NAME="Stand-in Maintainer",
+                    GIT_AUTHOR_EMAIL="maintainer@example.invalid",
+                    GIT_COMMITTER_NAME="Stand-in Maintainer",
+                    GIT_COMMITTER_EMAIL="maintainer@example.invalid",
+                    GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                    PYTHONDONTWRITEBYTECODE="1"))
     return done.stdout.strip()
 
 

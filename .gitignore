@@ -64,6 +64,11 @@
 __pycache__/
 *.py[cod]
 
+# A virtual environment made beside build.py out of habit. The tool needs
+# nothing installed, and before Python 3.13 `python3 -m venv .venv` writes
+# no ignore file of its own, so the next `git add .` would commit pip.
+/.venv/
+
 # Editors and OS
 .DS_Store
 *.swp

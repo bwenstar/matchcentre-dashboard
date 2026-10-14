@@ -1419,6 +1419,27 @@ class TestARefusedIdentityLineNamesTheWordingItReads(IdentityCase):
                 self.assertEqual(self.refusal(line).detail,
                                  f'closest line: "{line}"')
 
+    def test_a_line_longer_than_the_quote_says_where_it_was_cut(self):
+        # 4.525's review: a line past eighty characters was quoted by its first
+        # eighty as though they were all of it, `... Night Tennis Fixture"` for a
+        # line printing `Fixtures 2026`, and under --redact the start of a word cut
+        # there was printed. Said as an echo says it, so that the doctor knows the
+        # cut. Rejected: the echo's sixty and twelve, which leave a line of seventy
+        # quoted by its first dozen. Up to eighty is quoted whole, as it was. The
+        # line taken for the identity line, and with no id the line nearest the
+        # table printing a word the reason lists.
+        for line, cut in (
+                ("Div.C / Yellow Ball / Round.1 / #1000100 / Example District Night "
+                 "Tennis Fixtures 2026", "Night Tennis Fixture"),
+                ("Div.C / Yellow Ball / Round.1 / Example District Night Tennis Spring "
+                 "Fixtures 2026", "Spring Fixtures 20")):
+            self.assertTrue(line[:80].endswith(cut))
+            for given, quoted in ((line[:80], f'"{line[:80]}"'),
+                                  (line, f'"{line[:80]}..." ({len(line)} characters)')):
+                with self.subTest(line=given):
+                    self.assertEqual(self.refusal(given).detail,
+                                     f"closest line: {quoted}")
+
 
 class TestACardThatPrintsNoRoundIsRefusedBeforeAMatchIsMadeOfIt(IdentityCase):
     """The reader returns no card without a round, so discovery makes no match without one.

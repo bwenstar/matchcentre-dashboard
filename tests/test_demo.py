@@ -59,7 +59,7 @@ import demo                                                          # noqa: E40
 from test_careers import CareersPage                                 # noqa: E402
 from test_cli import STAMP, readme_block                             # noqa: E402
 from test_pipeline import write_season_cards                         # noqa: E402
-from test_project_complete import git, under_git                     # noqa: E402
+from test_project_complete import git, git_env, under_git            # noqa: E402
 
 DEMO = ROOT / "tools" / "demo.py"
 TIMEOUT = 600
@@ -1800,7 +1800,8 @@ class TestGitIgnoresWhatTwoSeasonsWriteBesideBuildPy(unittest.TestCase):
                       demo.ARCHIVE_CONFIG):
             with self.subTest(path=probe):
                 result = subprocess.run(("git", "check-ignore", "-q", probe),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True,
+                                        env=git_env())
                 self.assertEqual(result.returncode, 0, f"{probe} is not gitignored")
         self.assertEqual(git("ls-files", folder, demo.ARCHIVE_CONFIG).split(), [])
 

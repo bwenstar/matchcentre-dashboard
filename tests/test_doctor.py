@@ -41,6 +41,7 @@ import importlib
 import io
 import itertools
 import json
+import os
 import re
 import subprocess
 import sys
@@ -62,8 +63,9 @@ from matchcentre.card import DATE_FORMS, verb_side, weekday_of      # noqa: E402
 import doctor                                                        # noqa: E402
 from test_hostile_input import (OTHER_TEMPLATE_LABELS,               # noqa: E402
                                 box_edges_unpaired, box_parts_outlined,
-                                boxes_moved, drawn_again, fewer_boxes,
-                                relabelled, word_lost, written_with_a_box_more)
+                                boxes_moved, build_corpus, drawn_again,
+                                fewer_boxes, relabelled, word_lost,
+                                written_with_a_box_more)
 from test_hostile_input import _PAINT_RECT, _in_stroked_lines        # noqa: E402
 from test_hostile_input import _repainted                            # noqa: E402
 from test_parsing import _GREY, _inline, _typed, _with_an_image      # noqa: E402
@@ -1053,6 +1055,1269 @@ class TestNothingOffTheCardSurvivesRedaction(DoctorCase):
                          f"{sorted(set(leaked))}")
 
 
+class TestACardsPathIsWithheldWholeWhateverItsFoldersHold(unittest.TestCase):
+    """A card's path is withheld whole under ``--redact``, whatever its folders hold.
+
+    Row 4.525. The scrub ran its forms first -- a date, a time, a run of five
+    digits or more, a rating pair -- and the path, learned whole, after them. So a
+    path holding one lost that span to its shape, no longer matched, and was printed
+    with every other folder in it: a card under ``2026-10-12/Round4-Nightjars/`` was
+    given as ``source: <date>/Round4-Nightjars/Nightjars-Kestrels.pdf``. Measured
+    by /tmp/mcf/r525/scratch/w/probe.py on the tree before this
+    (/tmp/mcf/r525/scratch/before-a-paths.txt): 13 of the 16 folders and file
+    names tried published the path's other parts. It is how
+    TestNothingOffTheCardSurvivesRedaction failed three times in GitHub Actions,
+    whose temporary folder's random name held five digits, as about one in two
+    hundred do.
+
+    The path, as given and as the page's ``source``, is now a set of its own,
+    withheld before the forms run, and what a form would part of the rest after it
+    and before them (the class below).
+
+    Rejected: the path's parts as secrets, which shape a word of the report a folder
+    is named like (4.187); the word pass before the forms, which took the ``PM`` off
+    "7:00 PM" and published the time; forms that skip what a secret will take, a
+    second matcher to keep in step with the first; and a word pass ignoring case,
+    which shapes the report's labels beside the page's words.
+
+    Row 4.525, its second review. A quote's cut was shaped before the path was
+    looked for, as this row first had it, so a folder named as a cut is said,
+    ``Kestrels... (12 characters)``, lost that span and published the rest, the
+    file's name among it: ``source: <13 chars>... (12
+    characters)/Nightjars-Kestrels.pdf``, measured by
+    /tmp/mcf/r525/scratch/repair2/probe.py
+    (/tmp/mcf/r525/scratch/repair2/before-f1-f2.txt). The path is withheld before
+    the cut now, as it is before the forms.
+    """
+
+    # Folders a club keeps its cards in, each holding a form the scrub shapes: a
+    # date in six spellings, a start in two, a run of digits and a rating pair, and
+    # a temporary folder named like the one this suite once ran in: eleven.
+    FORMED = ("2026-10-12", "2026/10/12", "12-10-2026", "12.10.26", "12 Oct 2026",
+              "Oct 12, 2026", "19:30", "7:30pm", "31415926", "Week [3/4]",
+              "Round 4 – 12-10-2026 19:30 #31415926 Quéllorine")
+    # Exports named for their date and for their id.
+    FILES = ("12-10-2026 Nightjars v Kestrels.pdf", "4200999 Nightjars-Kestrels.pdf")
+    # Folders named with what a quote of the page says where it was cut, unquoted
+    # and quoted, which the scrub shapes too.
+    CUTS = ("Round 4... (3 characters)", "Kestrels...' (12 characters)")
+    # The card's venue holds a postcode, and a folder is named like it: a value a
+    # form parts, which is withheld before the forms too, and after the path.
+    FORMED_VENUE = f"{VENUE} 70341"
+    NAMED = (FORMED_VENUE,)
+    CONTROL = f"Kestrels/Round4-Nightjars/{FILENAME}"
+    # What every path here spells, as the page prints them; a folder is named
+    # Round4-Nightjars, so the check folds case.
+    WORDS = ("NIGHTJARS", "KESTRELS")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        cls.formed = ([f"{folder}/Round4-Nightjars/{FILENAME}"
+                       for folder in cls.FORMED + cls.CUTS]
+                      + [f"Round4-Nightjars/{name}" for name in cls.FILES])
+        cls.given = [cls.CONTROL, *cls.formed,
+                     *(f"{folder}/Round4-Nightjars/{FILENAME}" for folder in cls.NAMED)]
+        card = cw.write_card(dataclasses.replace(_spec(), venue=cls.FORMED_VENUE))
+        for given in cls.given:
+            (root / given).parent.mkdir(parents=True, exist_ok=True)
+            (root / given).write_bytes(card)
+        # Given relative to the folder they are in, so that what is tried is these
+        # names and not whatever this machine's temporary folder is called.
+        done = subprocess.run((sys.executable, str(DOCTOR), "--redact", *cls.given),
+                              cwd=root, capture_output=True, text=True,
+                              timeout=TIMEOUT)
+        cls.done = done
+        cls.reports = dict(zip(cls.given, re.split(r"^file +#\d+ .*\n", done.stdout,
+                                                   flags=re.M)[1:]))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def spelt(self, text: str) -> list[str]:
+        """Which of :attr:`WORDS` *text* spells, case folded."""
+        return [word for word in self.WORDS if word.casefold() in text.casefold()]
+
+    def body(self, given: str) -> str:
+        """The report on *given*, as one line, its path's shape put as ``<path>``."""
+        text = self.reports[given].partition("\n" + doctor.REDACTION_FOOTER[0])[0]
+        return " ".join(text.replace("=" * 72, "").split()).replace(
+            redact.shape(given), "<path>")
+
+    def test_every_path_tried_holds_a_form_and_spells_the_words_looked_for(self):
+        # The premise. A path no form or cut matches inside was withheld whole
+        # before this row, and a check that did not fold case would not see the
+        # page's NIGHTJARS in a folder's Nightjars. And the run tells of every card.
+        forms = [expression for expression, _ in doctor._IDENTIFYING]
+        for given in self.given[1:]:
+            with self.subTest(path=given):
+                self.assertTrue(any(form.search(given) for form in
+                                    [*forms, doctor._RATING_RE, doctor._CUT]))
+        for given in self.given:
+            with self.subTest(path=given):
+                self.assertEqual(self.spelt(given), list(self.WORDS))
+        self.assertEqual((self.done.returncode, self.done.stderr), (0, ""))
+        self.assertEqual(len(self.reports), len(self.given))
+
+    def test_no_word_of_its_path_is_published(self):
+        for given in self.given:
+            with self.subTest(path=given):
+                self.assertEqual(self.spelt(self.reports[given]), [])
+
+    def test_its_source_line_gives_the_shape_of_the_whole_path(self):
+        for given in self.given:
+            with self.subTest(path=given):
+                self.assertIn(f"{doctor.INDENT}  source: {redact.shape(given)} "
+                              f"page 1 of 1", self.reports[given].splitlines())
+
+    def test_its_report_is_the_controls_but_for_the_paths_shape(self):
+        for given in self.given[1:]:
+            with self.subTest(path=given):
+                self.assertEqual(self.body(given), self.body(self.CONTROL))
+
+    def test_a_page_that_names_its_path_has_it_withheld_whole(self):
+        # page.source is the path as given wherever the doctor reads a page, so
+        # the run above cannot tell the two apart; the redactor is asked here of a
+        # page it learned and of no path.
+        source = self.formed[0]
+        scrub = doctor._Redactor()
+        scrub.learn_page(dataclasses.replace(
+            pdf.extract(Path(self._tmp.name) / source), source=source))
+        self.assertEqual(scrub.scrub(f"source: {source} page 1 of 1"),
+                         f"source: {redact.shape(source)} page 1 of 1")
+
+
+class TestAValueOffTheCardIsWithheldWholeWhateverFormItHolds(unittest.TestCase):
+    """A value read off the card is withheld whole, whatever form it holds.
+
+    Row 4.525. The same order cost the values off the card their whole. A venue, a
+    letterhead or a season line holding a date or a run of five digits lost that
+    span to its shape before the value was looked for, what was left was shaped
+    word by word, and a number among it was published. Measured by probe.py part b
+    (/tmp/mcf/r525/scratch/before-b-values.txt): a venue of "112 ... 70341" was
+    given as ``venue '112 <11 chars> ...'``, a letterhead's founding year 1923 and
+    a season's 2026 were printed, and a venue's "Lot70341" came out
+    ``Lot<5 digits>``, its word no longer the token the page drew.
+
+    A value off the card, or a word of the page, that a form would part, leaving a
+    word of it, is now withheld whole before the forms, as the path is; the words
+    of a page that did not read are all there is to go on. The rest are withheld
+    after the forms, as all of them were.
+
+    Measured by /tmp/mcf/r525/scratch/w/meas.py over the fixture card and the demo
+    season's fifteen (/tmp/mcf/r525/scratch/token-rule.txt): neither this nor the
+    alternatives below changes a line of any of the sixteen reports from the tree
+    before this. Rejected: every value off the card before the forms, which on a
+    card whose venue is one word, a month, gave its date as ``'18 <6 chars>
+    2026'``, the day and year printed; and a page's word parted by a form withheld
+    as its letter and digit parts, which on a card with ``Lot12-70341`` shaped the
+    report's own measurements in five places on each card, the 12 of a rectangle's
+    width twice and of the games total three times.
+    """
+
+    CASES = {
+        "a venue with a street number and a postcode":
+            (dict(venue="112 Marrowfield Gardens Tarlow Vale 70341"), "venue", "112"),
+        "a letterhead with a founding year and a number":
+            (dict(club_lines=("QUILLBOROUGH LAWN TENNIS 1923", "ASSOCIATION 70341")),
+             "club_hint", "1923"),
+        "a season line holding a date":
+            (dict(season_line="Winter 2026 12-10-2026"), "season_hint", "2026"),
+        "a season line holding a reference number":
+            (dict(season_line="Winter 2026 ref 70341"), "season_hint", "2026"),
+        "a venue with a word glued to a postcode":
+            (dict(venue="Marrowfield Gardens Lot70341"), "venue", "Lot"),
+    }
+    # A page that did not read: no value off the card is learned, only its words.
+    REFUSED = "a page that did not read, with a word glued to a postcode"
+    # The other way round: a value a form holds, a venue named like the month of a
+    # date the card prints in words.
+    HELD = "a venue named like the month a date in words holds"
+    WHEN = "Tuesday 18 August 2026 7:30 PM"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        specs = {name: dataclasses.replace(_spec(), **fields)
+                 for name, (fields, _, _) in cls.CASES.items()}
+        specs[cls.REFUSED] = dataclasses.replace(
+            _spec(), home_name="", venue="Marrowfield Gardens Lot12-70341")
+        specs[cls.HELD] = dataclasses.replace(_spec(), venue="August", when=cls.WHEN)
+        cls.paths = {name: cw.write_card_file(root / f"card{index}.pdf", spec)
+                     for index, (name, spec) in enumerate(specs.items())}
+        done = subprocess.run((sys.executable, str(DOCTOR), "--redact",
+                               *(str(path) for path in cls.paths.values())),
+                              capture_output=True, text=True, timeout=TIMEOUT)
+        cls.done = done
+        cls.reports = {name: " ".join(text.split()) for name, text in zip(
+            cls.paths, re.split(r"^file +#\d+ .*\n", done.stdout, flags=re.M)[1:])}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def published(part: str, report: str) -> bool:
+        """Whether *report* prints *part* whole, case folded: digits not among
+        digits, a word not among letters."""
+        edge = r"\d" if part.isdigit() else r"[^\W\d_]"
+        return re.search(rf"(?<!{edge}){re.escape(part.casefold())}(?!{edge})",
+                         report.casefold()) is not None
+
+    def test_each_value_holds_a_form_and_the_part_looked_for(self):
+        # The premise: each card reads, with the value as written, which a form
+        # would part; the page that did not read is refused; and the run tells
+        # of every card.
+        forms = [expression for expression, _ in doctor._IDENTIFYING]
+        for name, (_, field, part) in self.CASES.items():
+            with self.subTest(case=name):
+                (card,), _ = scorecard.read(self.paths[name])
+                value = getattr(card, field)
+                self.assertTrue(self.published(part, value), value)
+                self.assertTrue(any(form.search(value) for form in forms), value)
+        cards, refused = scorecard.read(self.paths[self.REFUSED])
+        self.assertEqual((cards, len(refused)), ([], 1))
+        (card,), _ = scorecard.read(self.paths[self.HELD])
+        self.assertEqual(card.venue, "August")
+        self.assertIn(card.venue, re.search(doctor.DATE_SHAPE, self.WHEN).group())
+        self.assertEqual((self.done.returncode, self.done.stderr), (1, ""))
+        self.assertEqual(len(self.reports), len(self.paths))
+
+    def test_each_value_is_printed_as_the_shape_of_the_whole_of_it(self):
+        for name, (_, field, _) in self.CASES.items():
+            with self.subTest(case=name):
+                (card,), _ = scorecard.read(self.paths[name])
+                label = field.replace("_", " ")
+                self.assertIn(f"{label} '{redact.shape(getattr(card, field))}'",
+                              self.reports[name])
+
+    def test_no_part_of_one_is_published(self):
+        for name, (_, _, part) in self.CASES.items():
+            with self.subTest(case=name):
+                self.assertFalse(self.published(part, self.reports[name]))
+
+    def test_a_word_glued_to_a_number_on_a_page_that_did_not_read_is_withheld_whole(
+            self):
+        # Whole, and not as its parts: a part 12 would be shaped wherever the
+        # report gives a 12 of its own, as in the games total.
+        report = self.reports[self.REFUSED]
+        self.assertIn("This page was refused", report)
+        self.assertFalse(self.published("Lot", report))
+        self.assertIn("printed TOTAL row: sets 3-1 games 22-12", report)
+
+    def learned(self, token: str) -> doctor._Redactor:
+        """A redactor that has learned one page, whose one word is *token*."""
+        page = pdf.extract(self.paths[self.REFUSED])
+        scrub = doctor._Redactor()
+        scrub.learn_page(dataclasses.replace(
+            page, words=(dataclasses.replace(page.words[0], text=token),)))
+        return scrub
+
+    def test_a_word_of_the_page_glued_to_any_form_is_withheld_whole(self):
+        # The reader ends a value at a time or a rating pair, so those two reach the
+        # scrub only as a word of the page; the redactor is asked here of one.
+        forms = [*(expression for expression, _ in doctor._IDENTIFYING),
+                 doctor._RATING_RE]
+        for form, token in zip(forms, ("Lot-12/10/2026", "Lot-19:30", "Lot70341",
+                                       "Lot[3/4]")):
+            with self.subTest(token=token):
+                self.assertTrue(form.search(token))
+                self.assertEqual(self.learned(token).scrub(f"venue '{token}'"),
+                                 f"venue '{redact.shape(token)}'")
+
+    def test_a_word_of_the_page_that_is_all_a_form_keeps_the_forms_shape(self):
+        # And with the punctuation round it, which is no word of it.
+        for token, shape in (("7:30pm", "<time>"), ("18-Aug-2026", "<date>"),
+                             ("7:30pm,", "<time>,"), ("(18-Aug-2026)", "(<date>)")):
+            with self.subTest(token=token):
+                self.assertEqual(self.learned(token).scrub(f"at {token}"),
+                                 f"at {shape}")
+
+    def test_a_value_a_date_holds_leaves_the_date_to_its_form(self):
+        report = self.reports[self.HELD]
+        self.assertIn("date found '<date>'", report)
+        self.assertFalse(self.published("2026", report))
+
+    # A word of the page that holds no form, and a line in which one runs into it
+    # across a space, from either side, or from both: the time's "PM" out of a
+    # word, a date's month, day or year, and the ends of a range.
+    RUN_INTO = (("Amquill", "19:30 Amquill Reach", "<time> Reach"),
+                ("PMORVELIN", "19:30 PMORVELIN v", "<time> v"),
+                ("Am'quill", "19:30 Am'quill Reach", "<time> Reach"),
+                ("Orvelinmay", "Orvelinmay 4 2026 Night", "<date> Night"),
+                ("Orvelin4", "Orvelin4 May 2026 Night", "<date> Night"),
+                ("ORVELIN'4", "ORVELIN'4 May 2026 Night", "<date> Night"),
+                ("2026Brovin", "4 May 2026Brovin Night", "<date> Night"),
+                ("ORVELIN29/09", "ORVELIN29/09 - Sun 04/10 Night", "<date> Night"),
+                ("04/10Brovin", "29/09 - Sun 04/10Brovin Night", "<date> Night"),
+                ("2026Orvelin4", "4 May 2026Orvelin4 May 2026 Night", "<date> Night"))
+
+    def test_a_form_that_runs_into_a_word_of_the_page_takes_the_whole_word(self):
+        # Asked of a redactor that learned the word alone, which no form parts, so
+        # it is among the rest, withheld after the forms.
+        forms = [expression for expression, _ in doctor._IDENTIFYING]
+        for token, line, shaped in self.RUN_INTO:
+            with self.subTest(line=line):
+                self.assertFalse(any(form.search(token) for form in forms))
+                self.assertTrue(any(match.start() < line.index(token) + len(token)
+                                    and line.index(token) < match.end()
+                                    for form in forms for match in form.finditer(line)))
+                self.assertEqual(self.learned(token).scrub(f"line '{line}'"),
+                                 f"line '{shaped}'")
+
+
+class TestAPathTheSystemWillNotLookAtIsAnsweredInWords(unittest.TestCase):
+    """A path the system will not look at is answered in words, and under
+    ``--redact`` nothing reaches stderr.
+
+    Row 4.525. ``is_dir`` raises for a card in a folder this user may not search
+    and for a name longer than the disk allows, and ``resolve``, which
+    ``--redact`` asked of every path, raised for a link that leads back to itself:
+    each printed a traceback, the path in it, on stderr, which the scrub never sees.
+    Measured by probe.py part c (/tmp/mcf/r525/scratch/before-c-tracebacks.txt),
+    and the same on 3.11, 3.12 and 3.13 but for ``resolve``, which 3.13 no longer
+    raises on a loop (/tmp/mcf/r525/scratch/pathlib-by-version.txt). And a failure
+    nobody foresaw that leaves the report under ``--redact`` -- the build's rules
+    raising where the verdict asks them, which the plain report raises after the
+    rows it follows (4.134) -- was printed whole, quoting what it quoted, and the
+    report it ended was lost (/tmp/mcf/r525/scratch/before-c-unforeseen.txt).
+
+    The path is now asked of ``os.stat`` first, whose errors were measured the
+    same on every version, and an error from it or from pathlib's calls after it
+    is answered by its reason, never by the error's copy of the path; the
+    resolved path is no longer learned, since nothing prints it
+    (/tmp/mcf/r525/scratch/before-resolved-form.txt); and a failure that leaves
+    the report under ``--redact`` is told as any failure nobody foresaw is, its
+    message withheld, after the report scrubbed.
+
+    Rejected: a catch round pathlib's calls alone, which tells a loop it is a link
+    to nothing, since ``is_dir`` and ``exists`` answer False for one; and
+    scrubbing stderr, after which a traceback would still have cost the club the
+    report.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def doctor(self, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run((sys.executable, str(DOCTOR), *argv),
+                              capture_output=True, text=True, timeout=TIMEOUT)
+
+    def said(self, path: Path) -> str:
+        """The plain report on *path*, as one line, which must be a failure told."""
+        done = self.doctor(str(path))
+        self.assertEqual((done.returncode, done.stderr), (1, ""))
+        self.assertNotIn("Errno", done.stdout)
+        return " ".join(done.stdout.split())
+
+    def unsearchable(self) -> Path:
+        folder = self.dir / "Round4-Nightjars"
+        folder.mkdir()
+        card = cw.write_card_file(folder / FILENAME, _spec())
+        folder.chmod(0o600)
+        self.addCleanup(folder.chmod, 0o700)
+        return card
+
+    def too_long(self) -> Path:
+        return self.dir / ("Nightjars" + "x" * 300) / FILENAME
+
+    def looped(self) -> Path:
+        link = self.dir / "Nightjars-loop.pdf"
+        link.symlink_to(link)
+        return link
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0,
+                     "needs a folder its owner cannot search, which root can")
+    def test_a_card_in_a_folder_it_may_not_search_is_told_why(self):
+        self.assertIn("That path cannot be looked at: Permission denied.",
+                      self.said(self.unsearchable()))
+
+    def test_a_name_longer_than_the_disk_allows_is_told_why(self):
+        self.assertIn("That path cannot be looked at: File name too long.",
+                      self.said(self.too_long()))
+
+    def test_a_path_through_a_file_is_told_there_is_no_file_at_it(self):
+        card = cw.write_card_file(self.dir / FILENAME, _spec())
+        self.assertIn("There is no file at that path.", self.said(card / FILENAME))
+
+    def test_a_link_that_leads_back_to_itself_is_told_so(self):
+        said = self.said(self.looped())
+        self.assertIn("That path leads round a loop of symbolic links, so there is "
+                      "no file at the end of it.", said)
+        self.assertNotIn("nothing at the other end", said)
+
+    def test_under_redact_nothing_it_is_given_reaches_stderr(self):
+        # Every path the audit gave it: each kind of bad path, a path through the
+        # card as though it were a folder, and the card given four ways a club
+        # types one.
+        folder = self.dir / "Round4-Kestrels"
+        folder.mkdir()
+        card = cw.write_card_file(folder / FILENAME, _spec())
+        (self.dir / "Kestrels-linked").symlink_to(folder)
+        dangling = self.dir / "Nightjars-dangling.pdf"
+        dangling.symlink_to(self.dir / "gone.pdf")
+        locked = self.dir / "Nightjars-locked.pdf"
+        locked.write_bytes(b"%PDF-1.4\n")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        (self.dir / "Nightjars-text.pdf").write_text("not a pdf\n")
+        (self.dir / "Nightjars-empty.pdf").write_bytes(b"")
+        paths = [str(self.dir / "Nightjars-gone.pdf"), str(folder),
+                 str(dangling), str(self.looped()), str(locked),
+                 str(self.dir / "Nightjars-text.pdf"),
+                 str(self.dir / "Nightjars-empty.pdf"), str(self.too_long()),
+                 str(card / FILENAME), str(card),
+                 f"{self.dir}/./Round4-Kestrels//{FILENAME}",
+                 f"{self.dir}/Kestrels-linked/../Round4-Kestrels/{FILENAME}",
+                 f"{self.dir}/Kestrels-linked/{FILENAME}"]
+        if os.name != "nt" and os.geteuid() != 0:
+            paths.append(str(self.unsearchable()))
+        done = self.doctor("--redact", *paths)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(len(re.findall(r"^file +#\d+ ", done.stdout, flags=re.M)),
+                         len(paths))
+        for word in ("NIGHTJARS", "KESTRELS"):
+            with self.subTest(word=word):
+                self.assertNotIn(word.casefold(), done.stdout.casefold())
+
+    def test_under_redact_a_failure_that_leaves_the_report_is_a_sentence(self):
+        card = cw.write_card_file(self.dir / FILENAME, _spec())
+        failure = RuntimeError(f"a bug quoting {HOME_TEAM} at {card}")
+        for where, said in (((validate, "rows_against_box"),
+                             "This page reads as a scorecard."),
+                            ((scorecard, "read_page"), "page 1 of 1")):
+            with self.subTest(where=where[1]):
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(*where, side_effect=failure), \
+                        contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    code = doctor.main(["--redact", str(card)])
+                report = " ".join(out.getvalue().split())
+                self.assertEqual((code, err.getvalue()), (1, ""))
+                self.assertIn(said, report)
+                self.assertIn("RuntimeError; the message is withheld", report)
+                for word in HOME_TEAM.split() + ["Kestrels"]:
+                    self.assertNotIn(word.casefold(), report.casefold())
+
+
+class TestAShapeTheScrubPrintsIsNotShapedAgain(unittest.TestCase):
+    """What the scrub prints in place of a value is not scrubbed again.
+
+    Row 4.525, its review. The scrub is a run of passes -- the path, what a form
+    would part, the forms, the rating pair, the rest -- and each matched what the
+    passes before it had printed. So a page that draws ``words``, ``chars`` or
+    ``digits``, which a shape is made of, or the ``xx`` of a rating pair's, had
+    them shaped inside the shapes. Measured on this file's card with a comment
+    printing all four (/tmp/mcf/r525/scratch/repair1-measure-reshaped.txt): its
+    source line was ``<3 <6 chars> 40 <5 chars>>``, since this row put the path
+    before the rest, and its match id ``<7 <6 chars>>`` and each rating pair
+    ``[x.<2 chars>/x.<2 chars>]``, as before it.
+
+    Each pass now leaves a mark where it printed a shape, which no pass after it
+    matches, and the shapes are put in when the last is done. Rejected: the four
+    words among the template's, which prints a page's word of that spelling and
+    leaves the next word a shape is given; one pass for everything, which is the
+    order this row is about; and leaving alone whatever is between ``<`` and
+    ``>``, which a page can print round a name.
+    """
+
+    # A comment of the kind a club writes on a card, printing the words a shape
+    # is made of and the xx of a rating pair's.
+    COMMENTS = ("Rubber 2 re-scored in words, the chars and digits smudged, "
+                "xx where blank")
+    WORDS = ("words,", "chars", "digits", "xx")
+    GIVEN = f"Round 4 Nightjars/{FILENAME}"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        (root / cls.GIVEN).parent.mkdir()
+        cls.card = cw.write_card_file(
+            root / cls.GIVEN, dataclasses.replace(_spec(), comments=cls.COMMENTS))
+        # Given from the folder above it, so that its shape is known here.
+        cls.done = subprocess.run((sys.executable, str(DOCTOR), "--redact", cls.GIVEN),
+                                  cwd=root, capture_output=True, text=True,
+                                  timeout=TIMEOUT)
+        cls.report = cls.done.stdout.partition("\n" + doctor.REDACTION_FOOTER[0])[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_page_draws_the_words_a_shape_is_made_of(self):
+        # The premise, and that the card reads.
+        tokens = {token for word in pdf.extract(self.card).words
+                  for token in word.text.split()}
+        self.assertLessEqual(set(self.WORDS), tokens)
+        self.assertEqual((self.done.returncode, self.done.stderr), (0, ""))
+
+    def test_its_source_line_is_the_shape_of_its_path(self):
+        self.assertIn(f"{doctor.INDENT}  source: {redact.shape(self.GIVEN)} "
+                      f"page 1 of 1", self.report.splitlines())
+
+    def test_its_match_id_and_its_ratings_are_given_the_forms_shapes(self):
+        report = " ".join(self.report.split())
+        self.assertIn("match id '<7 digits>'", report)
+        self.assertEqual(report.count("[x.xx/x.xx]"), len(RATINGS))
+
+    def test_no_shape_is_printed_inside_another(self):
+        self.assertEqual(re.findall(r"<[^<>\n]*<|\.<", self.report), [])
+
+    def test_the_words_are_still_withheld_where_they_are_printed(self):
+        # Asked of the redactor, of a page drawing the four and no other word.
+        page = pdf.extract(self.card)
+        scrub = doctor._Redactor()
+        scrub.learn_path(Path(self.GIVEN))
+        scrub.learn_page(dataclasses.replace(page, words=tuple(
+            dataclasses.replace(page.words[0], text=token) for token in self.WORDS)))
+        self.assertEqual(
+            scrub.scrub(f"source: {self.GIVEN} #{MATCH_ID} [2.34/4.23] "
+                        f"words, chars, digits, xx"),
+            f"source: {redact.shape(self.GIVEN)} #<7 digits> [x.xx/x.xx] "
+            f"<6 chars> <5 chars>, <6 chars>, <2 chars>")
+
+
+class TestUnderRedactAWordAQuoteIsCutInsideIsWithheld(unittest.TestCase):
+    """What is left of a word that a quote of the page is cut inside is withheld.
+
+    Row 4.525, its review. A line of the page past sixty characters is quoted by
+    its first twelve and its length (``scope.echoed``), and the line a refused
+    card came closest to an identity in by its first eighty, each cut where the
+    count fell, as often as not inside a word. The scrub withholds the page's
+    words whole, and what a cut left of one is none of them, so it was printed,
+    the same before this row. Measured by
+    /tmp/mcf/r525/scratch/repair1/cutcards.py on this file's card
+    (/tmp/mcf/r525/scratch/repair1-measure-cut.txt): a division and a round on
+    lines of their own were warned of as ``('The QUILLBOR...' (70 characters)
+    and 'Round 4: Mar...' (61 characters))`` with ``--redact`` as without it, and a
+    refused card's closest line ended ``2026 at Marrow"``, which said nothing of
+    where it stopped.
+
+    The closest line now says where it was cut, as an echo does, and under
+    ``--redact`` the text a quote ends at, where it says it was cut, is shaped.
+    A cut word cannot be told from a whole one there, so a whole one is shaped
+    too. Rejected: cutting an echo at the end of its last whole word, which
+    changes every echo a club is shown and leaves a value of one long word no
+    start at all; telling the closest line by its eighty characters, which a line
+    of eighty exactly has as well; and shaping whatever goes before an ellipsis,
+    which takes ``Signed`` off a page that prints ``Signed......``.
+
+    And the cut was looked for only after a quote or a space and up to the next,
+    so a word the page draws with an apostrophe in it had only what followed the
+    apostrophe shaped. Measured by /tmp/mcf/r525/scratch/repair2/probe.py
+    (/tmp/mcf/r525/scratch/repair2/before-f1-f2.txt and before-f1-refused.txt): a
+    line beginning ``ST KESTREL'S`` was echoed as ``("<2 chars> KESTREL'<1
+    chars>..." (66 characters)`` and a closest line ending in it as
+    ``KESTREL'<1 chars>..." (86 characters)``, where before this row the word was
+    withheld whole; and one cut just after the apostrophe printed ``KESTREL'...``,
+    the same before this row. The cut is now the whole run after a space, but
+    for the quotes that open it, which are the report's. Rejected: telling the
+    report's quotes from an apostrophe by what stands either side of them, which
+    the echo's ``"`` round a text holding a ``'`` makes a guess.
+
+    And only the run a cut ends in was shaped, so a line that begins with a value
+    off the card, a number in it and then the word the echo is cut inside, had
+    the number printed, which as a number is withheld nowhere but inside the
+    value. Measured by /tmp/mcf/r525/scratch/repair2/valued-premise.py
+    (valued-premise.txt, and valued-at-base.txt beside it): a venue of
+    ``112 Marrowfield Gardens 70341`` opening the division's line was echoed as
+    ``('112 <8 chars>...' (68 characters)``, and a season of ``Spring 26 Pennant
+    Night Tennis`` as ``('<6 chars> 26 <2 chars>...'``, where before this row
+    the number and the cut word were both printed. The cut is now shaped from as
+    far back as it is the start of a value learned. Rejected
+    (/tmp/mcf/r525/scratch/repair2/meas112.txt): a value's numbers learned as
+    secrets, which shaped the ``30 outline(s)`` of this file's card, its start
+    being 7:30; and each cut quote shaped from its opening quote, which shapes
+    all of a refused card's closest line.
+    """
+
+    # A division printed on a line of its own, past sixty characters and cut by
+    # its echo inside the club's name, and a round on the season's line, cut in
+    # the venue's.
+    SPLIT = (f"The QUILLBOROUGH Spring Pennant / Division {DIVISION} / Yellow Ball "
+             f"/ #{MATCH_ID}")
+    ROUNDS = f"Round {ROUND}: Marrowfield Gardens Spring Pennant Night Tennis 2026"
+    # An identity line the reader refuses, past eighty characters and cut by its
+    # quote inside the venue's name.
+    HINT = (f"Div.{DIVISION} / Yellow Ball / Round.{ROUND} / #{MATCH_ID} / "
+            f"Spring Pennant Tennis 2026 at Marrowfield Gardens")
+    CUT = ("QUILLBOR", "Mar", "Marrow", "KESTREL")
+    # And a word with an apostrophe in it, the echo and the closest line each cut
+    # at its end and just after the apostrophe: the echo quotes a text
+    # holding a ' between ", and its round is on a line short enough to be quoted
+    # whole.
+    POSSESSIVE = {
+        "echo at the end": f"ST KESTREL'S Spring Pennant / Division {DIVISION} / "
+                           f"Yellow Ball / #{MATCH_ID}",
+        "echo after the apostrophe": f"THE KESTREL'S Spring Pennant / Division "
+                                     f"{DIVISION} / Yellow Ball / #{MATCH_ID}",
+        "closest at the end": f"Div.{DIVISION} / Yellow Ball / Round.{ROUND} / "
+                              f"#{MATCH_ID} / Spring Pennant Tennis 2026 KESTREL'S "
+                              f"Green",
+        "closest after the apostrophe": f"Div.{DIVISION} / Yellow Ball / "
+                                        f"Round.{ROUND} / #{MATCH_ID} / Spring "
+                                        f"Pennant Night Tennis KESTREL'S Green",
+    }
+    SHORT_ROUNDS = f"Round {ROUND}: Spring Pennant Night Tennis"
+    # And a line that begins with a value off the card holding a number before
+    # the word its echo is cut inside: a venue, which a form parts, and the
+    # season's name, which none does. Its round is on a line with no season's
+    # name in it, so that the season's is read off the line the echo quotes.
+    VALUED = {
+        "venue": ({"venue": "112 Marrowfield Gardens 70341"},
+                  f"112 Marrowfield Gardens 70341 / Division {DIVISION} / "
+                  f"Yellow Ball / #{MATCH_ID}"),
+        "season": ({}, f"Spring 26 Pennant Night Tennis / Division {DIVISION} / "
+                       f"Yellow Ball / #{MATCH_ID}"),
+    }
+    PLAIN_ROUNDS = f"Round {ROUND}: Night Tennis at Tarlow Vale"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        cls.cards = {}
+        for name, line, fields in (("split", cls.SPLIT, {"season_line": cls.ROUNDS}),
+                                   ("refused", cls.HINT, {}),
+                                   *((name, line, {"season_line": cls.SHORT_ROUNDS}
+                                      if name.startswith("echo") else {})
+                                     for name, line in cls.POSSESSIVE.items()),
+                                   *((name, line, {"season_line": cls.PLAIN_ROUNDS,
+                                                   **fields})
+                                     for name, (fields, line) in cls.VALUED.items())):
+            with mock.patch.object(cw, "_identity_line", lambda _spec, line=line: line):
+                cls.cards[name] = cw.write_card_file(
+                    root / f"{name}.pdf", dataclasses.replace(_spec(), **fields))
+        cls.plain, cls.redacted = [
+            subprocess.run((sys.executable, str(DOCTOR), *flag,
+                            *(str(card) for card in cls.cards.values())),
+                           capture_output=True, text=True, timeout=TIMEOUT)
+            for flag in ((), ("--redact",))]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def joined(done: subprocess.CompletedProcess) -> str:
+        return " ".join(done.stdout.split())
+
+    def test_each_line_is_cut_inside_a_word_of_the_page(self):
+        # The premise: the split card reads, warned of, the other is refused, and
+        # each quote stops inside a word the page draws whole.
+        (card,), _ = scorecard.read(self.cards["split"])
+        self.assertEqual((card.division, card.round), (DIVISION, ROUND))
+        self.assertTrue(any("different lines" in warning for warning in card.warnings))
+        cards, refused = scorecard.read(self.cards["refused"])
+        self.assertEqual((cards, len(refused)), ([], 1))
+        self.assertTrue(self.HINT[:80].endswith(" at Marrow"))
+        self.assertTrue(len(self.SPLIT) > 60 and self.SPLIT[:12].endswith("QUILLBOR"))
+        self.assertTrue(len(self.ROUNDS) > 60 and self.ROUNDS[:12].endswith("Mar"))
+        tokens = {token for card in self.cards.values()
+                  for word in pdf.extract(card).words for token in word.text.split()}
+        self.assertLessEqual({"QUILLBOROUGH", "Marrowfield", "KESTREL'S"}, tokens)
+        for done in (self.plain, self.redacted):
+            self.assertEqual((done.returncode, done.stderr), (1, ""))
+
+    def test_each_line_with_an_apostrophe_is_cut_at_or_inside_its_word(self):
+        # The premise of the four: the echoed two read, warned of, the
+        # others are refused, and each quote ends at the word or after its '.
+        for name, line in self.POSSESSIVE.items():
+            with self.subTest(card=name):
+                cards, refused = scorecard.read(self.cards[name])
+                if name.startswith("echo"):
+                    self.assertTrue(len(line) > 60 and len(self.SHORT_ROUNDS) <= 60)
+                    self.assertTrue(any("different lines" in warning
+                                        for warning in cards[0].warnings))
+                    quoted = line[:12]
+                else:
+                    self.assertEqual((cards, len(refused)), ([], 1))
+                    quoted = line[:80]
+                self.assertTrue(quoted.endswith("KESTREL'S" if name.endswith("end")
+                                                else "KESTREL'"), quoted)
+
+    def test_no_start_of_a_word_cut_inside_is_published(self):
+        report = self.joined(self.redacted).casefold()
+        for cut in self.CUT:
+            with self.subTest(cut=cut):
+                self.assertNotRegex(report, rf"(?<![^\W\d_]){cut.casefold()}"
+                                            rf"(?![^\W\d_])")
+
+    def test_each_quote_is_shaped_where_it_was_cut(self):
+        report = self.joined(self.redacted)
+        self.assertIn("('The <8 chars>...' (70 characters) and 'Round 4: "
+                      "<3 chars>...' (61 characters))", report)
+        self.assertIn(f'2026 at <6 chars>..." ({len(self.HINT)} characters)', report)
+
+    def test_a_word_with_an_apostrophe_is_shaped_whole_where_it_was_cut(self):
+        report = self.joined(self.redacted)
+        echoes = {"echo at the end": '("<2 chars> <9 chars>..." (66 characters)',
+                  "echo after the apostrophe": '("THE <8 chars>..." (67 characters)',
+                  "closest at the end": '2026 <9 chars>..." (86 characters)',
+                  "closest after the apostrophe": '<6 chars> <8 chars>..." (87 '
+                                                  'characters)'}
+        for name, shaped in echoes.items():
+            with self.subTest(card=name):
+                self.assertEqual(len(self.POSSESSIVE[name]),
+                                 int(re.search(r"\((\d+) characters", shaped)[1]))
+                self.assertIn(shaped, report)
+
+    def test_each_line_begins_with_a_value_its_echo_is_cut_inside(self):
+        # The premise: each reads, warned of, its value learned as the line begins,
+        # and the first dozen end inside a word of it, after a number.
+        for name, (fields, line) in self.VALUED.items():
+            with self.subTest(card=name):
+                (card,), _ = scorecard.read(self.cards[name])
+                self.assertTrue(any("different lines" in warning
+                                    for warning in card.warnings))
+                value = card.venue if name == "venue" else card.season_hint
+                self.assertTrue(len(line) > 60 and line.startswith(value), value)
+                self.assertRegex(line[:12], r"^(?:\S+ )?\d+ \S+$")
+                self.assertTrue(line[12].isalpha() and value[12].isalpha())
+        self.assertRegex(self.VALUED["venue"][0]["venue"], r"\d{5}")
+
+    def test_a_value_an_echo_is_cut_inside_is_withheld_as_far_as_it_is_quoted(self):
+        # The venue and the season's name off the card, which a form would part
+        # or none would, each shaped whole as far as the quote goes, where the
+        # rest was withheld and its number printed: ('112 <8 chars>...' and
+        # ('<6 chars> 26 <2 chars>...'.
+        report = self.joined(self.redacted)
+        for name, words in (("venue", 2), ("season", 3)):
+            with self.subTest(card=name):
+                line = self.VALUED[name][1]
+                self.assertIn(f"('<{words} words, 12 chars>...' ({len(line)} "
+                              f"characters)", report)
+        self.assertNotRegex(report, r"\('[^']*\b(?:112|26)\b[^']*\.\.\.'")
+        plain = self.joined(self.plain)
+        for name, (fields, line) in self.VALUED.items():
+            with self.subTest(card=name, redact=False):
+                self.assertIn(f"('{line[:12]}...' ({len(line)} characters)", plain)
+
+    def test_a_cut_is_shaped_from_the_furthest_start_of_a_value_not_the_nearest(self):
+        # Asked of a redactor that learned a venue and the club it is named for:
+        # the quote is the start of both from where each begins, and shaped from
+        # the venue's, the further back. From the club's, the nearer, it printed
+        # the venue's number, ('12 <2 words, 9 chars>...'.
+        redactor = doctor._Redactor()
+        for value in ("12 Tarlow Vale Road", "Tarlow Vale"):
+            redactor._add(value)
+        self.assertEqual(
+            redactor.scrub("lines ('12 Tarlow Va...' (70 characters) and"),
+            "lines ('<3 words, 12 chars>...' (70 characters) and")
+
+    def test_a_cut_is_shaped_however_the_quote_is_written(self):
+        # Asked of a redactor that has learned nothing: an echo quoted as repr
+        # quotes it either way, and unquoted, and a closest line, cut inside a word
+        # punctuation parts. And an ellipsis that is no cut, left alone.
+        scrub = doctor._Redactor().scrub
+        for said, shaped in (
+                ("('The QUILLBOR...' (70 characters))",
+                 "('The <8 chars>...' (70 characters))"),
+                ("('QUILLBOROUGH...' (61 characters))",
+                 "('<12 chars>...' (61 characters))"),
+                ('("Vale\'s QUILL..." (70 characters))',
+                 '("Vale\'s <5 chars>..." (70 characters))'),
+                # A word with an apostrophe in it, cut at its end and after it,
+                # and a text that opens with one: the quotes before a cut are
+                # the report's, or a character alone.
+                ('("ST KESTREL\'S..." (66 characters)',
+                 '("ST <9 chars>..." (66 characters)'),
+                ('("THE KESTREL\'..." (67 characters)',
+                 '("THE <8 chars>..." (67 characters)'),
+                ('closest line: "Tennis 2026 KESTREL\'S..." (86 characters)',
+                 'closest line: "Tennis 2026 <9 chars>..." (86 characters)'),
+                ('("\'QUILLBOROUG..." (61 characters))',
+                 '("\'<11 chars>..." (61 characters))'),
+                ("round The QUILLBOR... (70 characters)",
+                 "round The <8 chars>... (70 characters)"),
+                ('closest line: "Round 4 / Div.G..." (93 characters)',
+                 'closest line: "Round 4 / <5 chars>..." (93 characters)'),
+                ("Signed...... (for the home team)",
+                 "Signed...... (for the home team)")):
+            with self.subTest(said=said):
+                self.assertEqual(scrub(said), shaped)
+
+    def test_without_redact_each_is_quoted_as_it_was_and_the_line_says_it_was_cut(
+            self):
+        report = self.joined(self.plain)
+        self.assertIn("('The QUILLBOR...' (70 characters) and 'Round 4: Mar...' "
+                      "(61 characters))", report)
+        self.assertIn(f'closest line: "{self.HINT[:80]}..." ({len(self.HINT)} '
+                      f'characters)', report)
+
+
+# The row each file's report opens with: the path, or under --redact its number,
+# beside the label, or past the width the label alone and the path under it.
+_FILE_ROW = re.compile(rf"^file(?: +\S.*)?\n(?: {{{doctor.LABEL}}}\S.*\n)?", re.M)
+
+
+def _each_report(stdout: str) -> list[str]:
+    """The report of each file the doctor was given, in order, out of *stdout*."""
+    return _FILE_ROW.split(stdout)[1:]
+
+
+class TestEachFilesReportIsFoundWhereverItsPathIsPrinted(unittest.TestCase):
+    """The doctor's output is parted into each file's report where the path is
+    printed beside the file row's label and where, past the width, it goes on
+    under it (4.186).
+
+    Row 4.525, its second review. The classes that read a card's report with and
+    without ``--redact`` parted the output on a row with the path beside its
+    label, and a card written to a folder made in a TMPDIR of 43 characters or
+    more has a path past the width: no report was found, 0 of 5, 0 of 8 and 0 of
+    6, and each test that reads one failed or raised, in the suite run with
+    TMPDIR set to a folder of 70
+    (/tmp/mcf/r525/scratch/repair2/suite-hostile-before-split/test_doctor.txt,
+    /tmp/mcf/r525/scratch/repair2/hostile-probe/threshold.txt). Rejected: a
+    short TMPDIR of the classes' own, which leaves the next test that parts a
+    report to find the same, and hides from these what a long one does.
+    """
+
+    def test_a_report_is_found_beside_its_path_and_under_it(self):
+        given = ("card.pdf", str(Path("x" * 70) / "card.pdf"))
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / given[1]).parent.mkdir()
+            for name in given:
+                cw.write_card_file(Path(tmp) / name, _spec())
+            for flag in ((), ("--redact",)):
+                with self.subTest(flag=flag):
+                    done = subprocess.run((sys.executable, str(DOCTOR), *flag, *given),
+                                          cwd=tmp, capture_output=True, text=True,
+                                          timeout=TIMEOUT)
+                    if not flag:
+                        # The premise: one path beside the label, one under it.
+                        self.assertIn(f"\n{'file':<{doctor.LABEL}}{given[0]}\n",
+                                      done.stdout)
+                        self.assertIn(f"\nfile\n{' ' * doctor.LABEL}{given[1]}\n",
+                                      done.stdout)
+                    reports = _each_report(done.stdout)
+                    self.assertEqual(len(reports), 2, done.stdout[:600])
+                    for report in reports:
+                        self.assertTrue(report.startswith("=" * 72 + "\nsize "),
+                                        report[:200])
+
+
+class _RedactedCardsCase(unittest.TestCase):
+    """Cards written from this file's, with the fields and identity line given, read
+    by the doctor at once with and without ``--redact``."""
+
+    # name: (the card's fields, its identity line or None for the template's)
+    CARDS: dict[str, tuple[dict, str | None]] = {}
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        cls.cards = {}
+        for name, (fields, line) in cls.CARDS.items():
+            spec = dataclasses.replace(_spec(), **fields)
+            path = root / f"card{len(cls.cards)}.pdf"
+            with (mock.patch.object(cw, "_identity_line", lambda _spec, line=line: line)
+                  if line is not None else contextlib.nullcontext()):
+                cls.cards[name] = cw.write_card_file(path, spec)
+        cls.plain, cls.redacted = [
+            subprocess.run((sys.executable, str(DOCTOR), *flag,
+                            *(str(card) for card in cls.cards.values())),
+                           capture_output=True, text=True, timeout=TIMEOUT)
+            for flag in ((), ("--redact",))]
+        cls.reports = {flag: dict(zip(cls.cards, _each_report(done.stdout)))
+                       for flag, done in (("plain", cls.plain),
+                                          ("redact", cls.redacted))}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def tokens(self, name: str) -> set[str]:
+        """The words the page of card *name* draws, as the redactor learns them."""
+        return {token for word in pdf.extract(self.cards[name]).words
+                for token in word.text.split()}
+
+    def read(self, name: str) -> bool:
+        """Whether the reader reads card *name*, which is otherwise refused."""
+        cards, refused = scorecard.read(self.cards[name])
+        self.assertEqual(len(cards) + len(refused), 1)
+        return bool(cards)
+
+
+class TestUnderRedactAFormThatRunsIntoAWordOfThePageTakesTheWordWithIt(
+        _RedactedCardsCase):
+    """Under ``--redact`` a form that runs into a word of the page is withheld with
+    the whole of that word.
+
+    Row 4.525, its second review. The forms -- a date, a time, five digits or more
+    -- are matched where the report prints them, and one that crosses a space can
+    take the start or the end of the word beside it: the time's ``Am`` out of
+    ``19:30 Amquill Reach``, a date's month out of ``ORVELINMAY 4 2026``, its day
+    out of ``Orvelin4 May 2026``, its year's word out of ``4 May 2026Brovin``. The
+    page's word is withheld whole, after the forms, and what the form left of it
+    matched nothing and was printed. Measured by
+    /tmp/mcf/r525/scratch/repair2/probe.py
+    (/tmp/mcf/r525/scratch/repair2/before-f3.txt and
+    /tmp/mcf/r525/scratch/repair2/before-f3-orvelin.txt): ``<time>quill``,
+    ``<time>ORVELIN``, ``ORVELIN<date>``, ``<date>Brovin`` and ``Orvelin<date>``,
+    on every card tried, read or refused, the same before this row.
+
+    A form whose span starts or ends inside a word learned among the rest,
+    leaving a word of it, now takes that word with it, and its shape stands for
+    both. Rejected, measured by /tmp/mcf/r525/scratch/repair2/meas2.py
+    (/tmp/mcf/r525/scratch/repair2/meas2.txt): the page's words withheld before
+    the forms, which printed the date, the time and the match id of every one of
+    the fixture's and the demo season's 16 reports as characters; and any word a
+    form runs into, learned or not, which took the report's own quotes into the
+    shape, ``'<date>' and`` printed ``<date> and``.
+    """
+
+    CARDS = {
+        "a time before the venue": (
+            dict(season_line=f"Round {ROUND}: Spring Pennant", venue="Amquill Reach"),
+            f"Division {DIVISION} / Yellow Ball / 19:30 Amquill Reach"),
+        "a time's PM out of a word": (
+            {}, f"Div.{DIVISION} / Round.{ROUND} / #{MATCH_ID} / 19:30 PMORVELIN v "
+                f"NIGHTJARS"),
+        "a month at the end of a word": (
+            {}, f"Div.{DIVISION} / Round.{ROUND} / #{MATCH_ID} / ORVELINMAY 4 2026 "
+                f"Night"),
+        "a word glued to the year": (
+            dict(season_line=f"Round {ROUND}: Spring Pennant"),
+            f"Division {DIVISION} / Yellow Ball / #{MATCH_ID} / 4 May 2026Brovin"),
+        "a word glued to the day": (
+            dict(season_line=f"Round {ROUND}: Spring Pennant Orvelin4 May 2026"),
+            f"Division {DIVISION} / Yellow Ball / #{MATCH_ID} / 4 May 2026"),
+    }
+    # The word each card's form runs into, and whether the card reads.
+    WORDS = {"a time before the venue": ("Amquill", True),
+             "a time's PM out of a word": ("PMORVELIN", False),
+             "a month at the end of a word": ("ORVELINMAY", False),
+             "a word glued to the year": ("2026Brovin", True),
+             "a word glued to the day": ("Orvelin4", True)}
+
+    def test_each_page_draws_a_word_a_form_runs_into(self):
+        # The premise: the word is one the page draws, which holds no form, and a
+        # form found on the page takes a part of it; each card reads or is refused
+        # as said, and the runs tell of every card.
+        forms = [expression for expression, _ in doctor._IDENTIFYING]
+        for name, (word, reads) in self.WORDS.items():
+            with self.subTest(card=name):
+                self.assertIn(word, self.tokens(name))
+                self.assertFalse(any(form.search(word) for form in forms))
+                text = pdf.extract(self.cards[name]).text()
+                self.assertTrue(any(
+                    match.start() < drawn.end() and drawn.start() < match.end()
+                    and not drawn.start() <= match.start() <= match.end() <= drawn.end()
+                    for drawn in re.finditer(re.escape(word), text)
+                    for form in forms for match in form.finditer(text)))
+                self.assertEqual(self.read(name), reads)
+        for done in (self.plain, self.redacted):
+            self.assertEqual((done.returncode, done.stderr), (1, ""))
+        for reports in self.reports.values():
+            self.assertEqual(len(reports), len(self.cards))
+
+    def test_no_part_of_the_word_is_published(self):
+        for name in self.CARDS:
+            with self.subTest(card=name):
+                report = self.reports["redact"][name].casefold()
+                for part in ("quill", "orvelin", "brovin"):
+                    self.assertNotIn(part, report)
+
+    def test_without_redact_the_line_is_quoted_as_it_was(self):
+        for name, (word, _) in self.WORDS.items():
+            with self.subTest(card=name):
+                self.assertIn(word, self.reports["plain"][name])
+
+
+class TestUnderRedactAValueTheHeaderFieldsFindInsideAWordIsWithheld(
+        _RedactedCardsCase):
+    """Under ``--redact`` a value the header fields find inside a word of the page,
+    or across a line's end, is withheld.
+
+    Row 4.525, its second review. The header fields print what the reader's rule
+    or a pattern of the doctor's own finds, and either can stop inside a word: the
+    reader's rule reads a division of ``Orvelin`` off ``Division Orvelin/Brovin``,
+    and the doctor's ``Section``, ``Grade`` and ``Round`` patterns stop at an
+    apostrophe, a slash or a comma and run on over a line's end, as its date and
+    time patterns do. What was found is none of the page's words, which are
+    withheld whole, so it was printed: measured by
+    /tmp/mcf/r525/scratch/repair2/probe.py
+    (/tmp/mcf/r525/scratch/repair2/before-f4.txt, before-f4-reader.txt and
+    before-f4-more.txt), ``division found 'Orvelin'``, with the reader's summary's
+    ``header: division 'Orvelin'`` and the verdict's ``division Orvelin`` where the
+    card read, ``'Orvelin'`` off ``Section`` at a line's end, ``'<time>\\nAm'``
+    and ``'4 <3 chars>\\n2026'``, the same before this row.
+
+    What the header fields find of a date, a time, a division and a round is now
+    learned with the page's words, as it is printed. Not the other fields, whose
+    values are the template's own words, which a phrase such as ``Match Winner``
+    would have shaped. Rejected: the doctor's patterns kept to the line and to the
+    reader's characters, which changes what the report finds without
+    ``--redact`` and leaves the reader's own rule printing ``Orvelin``.
+    """
+
+    NO_DIVISION = f"Yellow Ball / Round {ROUND} / #{MATCH_ID}"
+    NO_ROUND = f"Division {DIVISION} / Yellow Ball / #{MATCH_ID}"
+    CARDS = {
+        "the reader's division inside a word": (
+            {}, f"Division Orvelin/Brovin / Yellow Ball / Round {ROUND} / #{MATCH_ID}"),
+        "the reader's round inside a word": (
+            {}, f"Division {DIVISION} / Yellow Ball / Round Orvelin/Brovin / "
+                f"#{MATCH_ID}"),
+        "the reader's division on a refused card": (
+            dict(home_name=""),
+            f"Division Orvelin/Brovin / Yellow Ball / Round {ROUND} / #{MATCH_ID}"),
+        "a section at a line's end": (
+            dict(comments_heading="Played for the Section",
+                 comments="Orvelin's Night Shield"), NO_DIVISION),
+        "a grade at a line's end, before a slash": (
+            dict(comments_heading="Played for the Grade",
+                 comments="Orvelin/Brovin Cup"), NO_DIVISION),
+        "a round before a comma": (
+            dict(comments_heading="Notes",
+                 comments="Carried over from Round Orvelin,Brovin"), NO_ROUND),
+        "a time across a line": (
+            dict(start_time="", comments_heading="Played at 19:30",
+                 comments="Amquill Reach"), None),
+        "a date across a line": (
+            dict(when="Tue 7:30 PM", comments_heading="Played 4 May",
+                 comments="2026 at Tarlow Vale"), None),
+    }
+    # The field each card's value is found for, and whether the card reads.
+    FIELDS = {"the reader's division inside a word": ("division", True),
+              "the reader's round inside a word": ("round", True),
+              "the reader's division on a refused card": ("division", False),
+              "a section at a line's end": ("division", False),
+              "a grade at a line's end, before a slash": ("division", False),
+              "a round before a comma": ("round", False),
+              "a time across a line": ("time", True),
+              "a date across a line": ("date", True)}
+
+    def found(self, flag: str, name: str, field: str) -> str:
+        """What the report on card *name* prints its header field *field* found."""
+        row = re.search(rf"^ +{field} +found +(.*)$", self.reports[flag][name], re.M)
+        self.assertIsNotNone(row, self.reports[flag][name][:2000])
+        return row.group(1)
+
+    def test_each_value_found_is_part_of_a_word_or_crosses_a_line(self):
+        # The premise: what the report finds without --redact is no word the page
+        # draws, but a part of one, or holds a line's end; and each card reads or
+        # is refused as said.
+        for name, (field, reads) in self.FIELDS.items():
+            with self.subTest(card=name):
+                value = ast.literal_eval(self.found("plain", name, field))
+                tokens = self.tokens(name)
+                if field in ("date", "time"):
+                    self.assertIn("\n", value)
+                else:
+                    self.assertNotIn(value, tokens)
+                    self.assertTrue(any(value in token for token in tokens), value)
+                self.assertEqual(self.read(name), reads)
+        for done in (self.plain, self.redacted):
+            self.assertEqual((done.returncode, done.stderr), (1, ""))
+        for reports in self.reports.values():
+            self.assertEqual(len(reports), len(self.cards))
+
+    def test_what_is_found_is_printed_as_a_shape(self):
+        for name, (field, _) in self.FIELDS.items():
+            with self.subTest(card=name):
+                printed = ast.literal_eval(self.found("redact", name, field))
+                self.assertRegex(printed, r"^(<[^<>]+>)+$")
+
+    def test_no_part_of_a_word_found_inside_is_published(self):
+        for name in self.CARDS:
+            with self.subTest(card=name):
+                report = self.reports["redact"][name].casefold()
+                for part in ("orvelin", "brovin", "quill", "\\nam", "\\n2026"):
+                    self.assertNotIn(part, report)
+
+
+class TestUnderRedactAHostileFileIsToldAsWithoutIt(unittest.TestCase):
+    """Under ``--redact`` a damaged file fails nowhere it does not fail without it.
+
+    Row 4.525, its review. The backstop this row put round the report under
+    ``--redact`` tells a failure nobody foresaw in a sentence, where there was a
+    traceback, and a traceback is what test_hostile_input's
+    TestRedactionHoldsOnFilesThatDoNotParse looks for over the damaged files: so
+    the redactor's own learning failing on one of them would now pass it. Asked
+    here of the same files, written from this file's card, by the sentence.
+
+    And the ``version`` row printed the file's first line, its first sixteen bytes,
+    as written, which for a file that is no PDF is whatever it holds, no page having
+    been read to learn it from. Measured by /tmp/mcf/r525/scratch/repair1/sweep.py
+    over those files (/tmp/mcf/r525/scratch/repair1-measure-sweep.txt):
+    ``Round 3 results``, ``<!doctype html><`` and ``1 0 obj`` under ``--redact``,
+    and a text file beginning with the two teams printed ``NIGHTJARS v KEST``, the
+    same before this row. A first line that is not a version is now withheld
+    whole under ``--redact``, as the path is. Rejected: its words learned as the
+    page's are, which shaped the report's own ``obj streams`` wherever a file began
+    ``1 0 obj``.
+
+    Its second review. No test held that first line with the path rather than
+    with the page's words, after the forms, where a date, a time, a match id or a
+    rating pair at its start is shaped first and the words after it, the teams',
+    printed, as they were before this row; asked here of four such lines. And the
+    rule shaped the first line of an HTML page, a zip, a PNG and a JPEG, which is
+    the one thing the row says of a file that is no PDF: they are named in words
+    now, which no page can have put there, an HTML page however it opens, and
+    under ``--redact`` alone, the line as it was saying more where nothing is
+    withheld. And the line was what came before the first line feed, so a version
+    ended by a carriage return, as Acrobat writes it, ran on into the bytes after
+    it, was no version and was shaped, and without ``--redact`` printed those
+    bytes on a line of their own after the row, ``1 0 obj`` or the binary comment;
+    it ends at either now. Measured by
+    /tmp/mcf/r525/scratch/repair2/probe.py
+    (/tmp/mcf/r525/scratch/repair2/before-f5-f6.txt). Rejected: the signatures left
+    shaped as the cost of the rule, when naming them prints nothing off the file.
+    """
+
+    TEAMS = f"{HOME_TEAM.split()[-1]} v {AWAY_TEAM.split()[-1]}"
+    AWAY = AWAY_TEAM.split()[-1]
+    # A first line a form or the rating pair takes a span of, before a team's name.
+    FORMED = {"a date first": f"12-10-2026 {TEAMS} results",
+              "a time first": f"19:30 {TEAMS}",
+              "a match id first": f"Rd4 70341 {AWAY}",
+              "a rating pair first": f"Week [3/4] {AWAY}"}
+    # A file that is no PDF, named for what its first bytes say it is.
+    NAMED = {"hostile-html-error-page": "an HTML page",
+             "html-after-a-byte-order-mark": "an HTML page",
+             "html-with-no-doctype": "an HTML page",
+             "hostile-zip-not-pdf": "a zip archive (a Word or Excel file is one)",
+             "png-image": "a PNG image",
+             "jpeg-image": "a JPEG image"}
+    # A genuine card whose version line ends at a carriage return.
+    RETURNED = ("cr-ended-version", "acrobat-version")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        corpus = build_corpus(cw.write_card(_spec()), cw.write_card(dataclasses.replace(
+            _spec(), home_name=AWAY_TEAM, away_name=HOME_TEAM)))
+        # A club's own notes saved under a card's name: its first line is printed.
+        corpus["teams"] = f"{cls.TEAMS} results\nRound {ROUND}\n".encode()
+        # And a version with them after it on its line, and a character alone,
+        # which is no secret anywhere in the report.
+        corpus["after-the-version"] = f"%PDF-1.4 {cls.TEAMS}\n".encode()
+        corpus["one-character"] = b"x\nnot a pdf\n"
+        for name, line in cls.FORMED.items():
+            corpus[name] = f"{line}\n".encode()
+        card = cw.write_card(_spec())
+        assert card.startswith(b"%PDF-1.4\n")
+        corpus["cr-ended-version"] = b"%PDF-1.4\r" + card[9:]
+        corpus["acrobat-version"] = b"%PDF-1.4\r%\xe2\xe3\xcf\xd3\r\n" + card[9:]
+        corpus["png-image"] = b"\x89PNG\r\n\x1a\n" + bytes(40)
+        corpus["jpeg-image"] = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + bytes(40)
+        # An HTML page as some servers write it, in capitals after a byte-order
+        # mark and a blank line, and one with no doctype.
+        corpus["html-after-a-byte-order-mark"] = (
+            b'\xef\xbb\xbf\r\n<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN">\n')
+        corpus["html-with-no-doctype"] = b"<html>\n<head><title>Round 4</title>\n"
+        cls.paths = {}
+        for name, raw in corpus.items():
+            cls.paths[name] = root / f"card{len(cls.paths)}.pdf"
+            cls.paths[name].write_bytes(raw)
+        cls.paths["genuine"] = cw.write_card_file(root / "genuine.pdf", _spec())
+        cls.done = subprocess.run((sys.executable, str(DOCTOR), "--redact",
+                                   *(str(path) for path in cls.paths.values())),
+                                  capture_output=True, text=True, timeout=TIMEOUT)
+        cls.reports = dict(zip(cls.paths, re.split(r"^file +#\d+ .*\n",
+                                                   cls.done.stdout, flags=re.M)[1:]))
+        cls.plain = subprocess.run((sys.executable, str(DOCTOR),
+                                    *(str(cls.paths[name]) for name in cls.RETURNED)),
+                                   capture_output=True, text=True, timeout=TIMEOUT)
+        cls.plain_reports = dict(zip(cls.RETURNED, _each_report(cls.plain.stdout)))
+        named = [str(cls.paths[name]) for name in cls.NAMED]
+        cls.plain_named = subprocess.run((sys.executable, str(DOCTOR), *named),
+                                         capture_output=True, text=True,
+                                         timeout=TIMEOUT)
+        cls.plain_named_reports = dict(zip(cls.NAMED,
+                                           _each_report(cls.plain_named.stdout)))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def version(self, name: str) -> str:
+        row = re.search(r"^version *(.*)$", self.reports[name], re.M)
+        self.assertIsNotNone(row, self.reports[name][:2000])
+        return row.group(1)
+
+    def test_every_file_is_reported(self):
+        # The premise: one report for each, the genuine card read.
+        self.assertEqual((self.done.returncode, self.done.stderr), (1, ""))
+        self.assertEqual(len(self.reports), len(self.paths))
+        self.assertIn("This page reads as a scorecard.",
+                      " ".join(self.reports["genuine"].split()))
+
+    def test_none_is_a_failure_nobody_foresaw(self):
+        for name, report in self.reports.items():
+            with self.subTest(file=name):
+                self.assertNotIn("failed unexpectedly", report)
+
+    def test_a_first_line_that_is_no_version_is_withheld_whole(self):
+        for name in self.paths.keys() - self.NAMED.keys():
+            with self.subTest(file=name):
+                self.assertRegex(self.version(name),
+                                 r"^(%PDF-\d\.\d|<\d+ (words, \d+ )?chars>|.?)$")
+        self.assertEqual(self.version("genuine"), "%PDF-1.4")
+        self.assertEqual(self.version("after-the-version"),
+                         redact.shape(f"%PDF-1.4 {self.TEAMS}"[:16]))
+        self.assertEqual(self.version("one-character"), "x")
+        # Its first sixteen bytes, and so the start of a word cut there.
+        self.assertEqual(self.version("teams"), redact.shape(self.TEAMS[:16]))
+        for word in (word for word in self.TEAMS[:16].split() if len(word) > 1):
+            with self.subTest(word=word):
+                self.assertNotIn(word.casefold(), self.reports["teams"].casefold())
+
+    def test_a_first_line_a_form_would_part_is_withheld_whole(self):
+        for name, line in self.FORMED.items():
+            with self.subTest(file=name):
+                # The premise: a form, or the rating pair, takes a span of it.
+                self.assertTrue(any(expression.search(line[:16]) for expression in
+                                    [*(form for form, _ in doctor._IDENTIFYING),
+                                     doctor._RATING_RE]))
+                self.assertEqual(self.version(name), redact.shape(line[:16].strip()))
+                for part in ("night", "kestr"):
+                    self.assertNotIn(part, self.reports[name].casefold())
+
+    def test_a_file_that_begins_like_another_kind_is_named_for_it(self):
+        for name, kind in self.NAMED.items():
+            with self.subTest(file=name):
+                self.assertEqual(self.version(name), f"none: it begins like {kind}")
+
+    def test_without_redact_its_first_line_is_printed_as_it_was(self):
+        # Named under --redact alone: the line as it was says more, and without
+        # it nothing is withheld.
+        done = self.plain_named
+        self.assertEqual((done.returncode, done.stderr), (1, ""))
+        self.assertEqual(len(self.plain_named_reports), len(self.NAMED))
+        for name, report in self.plain_named_reports.items():
+            with self.subTest(file=name):
+                self.assertNotIn("begins like", report)
+        self.assertRegex(self.plain_named_reports["hostile-html-error-page"],
+                         r"(?m)^version +<!doctype html><$")
+
+    def test_a_version_a_carriage_return_ends_is_the_version(self):
+        self.assertEqual((self.plain.returncode, self.plain.stderr), (0, ""))
+        for name in self.RETURNED:
+            with self.subTest(file=name):
+                # The premise: a carriage return ends the version, and no line feed
+                # comes straight after it.
+                raw = self.paths[name].read_bytes()
+                self.assertTrue(raw.startswith(b"%PDF-1.4\r")
+                                and not raw.startswith(b"%PDF-1.4\r\n"), raw[:16])
+                for report in (self.reports[name], self.plain_reports[name]):
+                    # The row, and nothing after it on a line of its own.
+                    self.assertRegex(report, r"(?m)^version +%PDF-1\.4\nproducer ")
+                    self.assertIn("This page reads as a scorecard.",
+                                  " ".join(report.split()))
+
+
 class TestAFolderNamedLikeAWordOfTheReportKeepsTheWordAndLosesThePath(
         unittest.TestCase):
     """A card in a folder named like a word the report prints keeps the word.
@@ -1070,8 +2335,9 @@ class TestAFolderNamedLikeAWordOfTheReportKeepsTheWordAndLosesThePath(
     not split, in ``banner.pdf``, refused as "the team-name <6 chars> does not
     straddle the middle of the table".
 
-    The path is now learned whole, as given and resolved, and withheld where it
-    is printed, and its parts are not. Rejected: keeping the parts and adding
+    The path is now learned whole, as given (and resolved, until 4.525 dropped
+    the resolved form, which nothing prints), and withheld where it is printed,
+    and its parts are not. Rejected: keeping the parts and adding
     the report's words to what is never shaped, which a folder named like the
     next word the report prints falls outside of.
     """
@@ -1446,6 +2712,11 @@ class TestAFailureNobodyForesawIsStillASentence(unittest.TestCase):
         self.assertIn("RuntimeError", text)
         self.assertNotIn("HALLORAN", text)
         self.assertIn("without --redact", text)
+        # Told by the page's own guard, as without --redact, and not by the one
+        # 4.525 put round the whole report, which would tell it as well, and so
+        # would hide that guard failing to.
+        self.assertIn("failed unexpectedly while reading page 1.",
+                      " ".join(text.split()))
 
 
 class TestTheVerdictOnAFileOrAPageItCannotReadNamesNeitherTwice(unittest.TestCase):

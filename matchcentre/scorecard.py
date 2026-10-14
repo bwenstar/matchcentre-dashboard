@@ -1427,11 +1427,26 @@ def _header_hint(joined: Sequence[tuple[str, list[pdf.Word]]]) -> str:
     for text, _ in joined:
         stripped = text.strip()
         if stripped.count("/") >= 2 and _MATCH_ID_RE.search(stripped):
-            return f'closest line: "{stripped[:80]}"'
+            return f"closest line: {_quoted_line(stripped)}"
     closest = _nearest([text for text, _ in joined], _LABEL_WORD_RE.search)
     if closest:
-        return f'closest line: "{closest.strip()[:80]}"'
+        return f"closest line: {_quoted_line(closest.strip())}"
     return "no line above the table uses any of those words"
+
+
+def _quoted_line(text: str) -> str:
+    """*text* quoted, whole up to eighty characters, and past that its first
+    eighty and its length, as :func:`echoed` says where it cuts.
+
+    It was its first eighty alone, quoted as though they were all of it, and the
+    doctor's redacted report published the start of a word cut there, being none
+    of the page's words (4.525). Rejected: the echo's sixty and twelve, which
+    quote a line of seventy by its first dozen, too little of the line to tell
+    what the header was worded as.
+    """
+    if len(text) <= 80:
+        return f'"{text}"'
+    return f'"{text[:80]}..." ({len(text)} characters)'
 
 
 # Month names, spelled out for the reason card.WEEKDAYS is: strftime's are the

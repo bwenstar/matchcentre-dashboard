@@ -10,10 +10,30 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
-## [0.2.0-rc.1] — 2026-10-12
+## [0.2.0-rc.1] — 2026-10-14
 
 ### Fixed
 
+- `tools/doctor.py --redact` published a card's file and folder names, which often
+  name the two teams, when its path held a date, a time or a long number (five
+  digits or more): a card at `…/2026-10-12/Round4-Nightjars/Nightjars-Kestrels.pdf`
+  printed its source as `…/<date>/Round4-Nightjars/Nightjars-Kestrels.pdf`, because
+  the date was shaped first and the path, no longer whole, matched nothing to
+  withhold. It now withholds the path whole, whatever it holds, before anything else
+  is shaped. A value off the card that a date or a number would part is withheld
+  whole the same way, where a venue opening with its street number printed the
+  number, and so are the start of a word the report's quote of a long line is cut
+  inside, a word of the card a date or a time is printed against, and a name the
+  header fields find part of, each of which printed part of a name; and so is the
+  first line of a file that is no PDF, which could hold the teams, a file that
+  begins like an HTML page, a zip, a PNG or a JPEG being named for what it is
+  instead. A card in a folder the doctor may not search, or under a name too long
+  for the disk, gave a traceback naming the path, with or without `--redact`, and a
+  loop of symbolic links gave one under `--redact`; each is now told in a sentence.
+  Under `--redact` a failure nobody foresaw is told inside the report with its
+  message withheld, where it went to the terminal whole and the report was lost. If
+  you have posted a redacted report in public for a card whose path held a date, a
+  time or a long number, look at it again. README section: *Reporting a problem*.
 - A card is filed under the night its competition line names (`Tuesday Night
   Fixtures 2026`) before the weekday of its date. Filed by its date alone, a card
   dated off its night made a competition of its own, and a card printing a range of
@@ -531,6 +551,27 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
   it, of the slug test and of this file's 0.1.0 entry on the identity line are a made-up
   match id, `1000100`, and a made-up name, where 0.1.0 used ones from a real club's
   cards.
+- The test suite passes in the copy you build your dashboard in, with your cards in
+  `data/`, your `config.toml` and the `site/` a build leaves there. Until now, in a git
+  clone where `tools/demo.py` and `build.py` had run, it failed three tests: the
+  README's block for a folder with no cards, because `build.py` rightly pointed at the
+  cards beside it; the test that no club's config ships, which found the `config.toml`
+  git ignores; and the test that every command can say its version, which found the
+  demo's cards already in `data/`. A virtual environment in `.venv/` failed one more,
+  and the lock file Emacs leaves beside a file it has open, a link to nothing, gave
+  eighteen errors. The tests now ask git what ships, or run the program in a fresh copy
+  of itself, and read a link as a link. `.venv/` is gitignored, since before Python
+  3.13 a virtual environment brings no ignore file of its own and `git add .` would
+  commit pip, and the test that nothing published names a particular club or player no
+  longer reads a `config.toml` git ignores. A test makes a club's copy, a clone with
+  the demo's cards, a build, a `.venv/` and a lock file, and runs there the tests that
+  read the folder, each of which must pass without skipping. The suite's own git no
+  longer takes a repository from the environment, so run from `git rebase -x` or a
+  commit hook it makes no commit or tag in the repository running it and leaves its
+  index and settings alone. A folder unzipped from a release, or a computer without
+  git, has no git to ask, and there one test still fails once a build has written
+  `config.toml`: run the suite before the first build. README section: *Checking the
+  tool itself*.
 
 ### Added
 

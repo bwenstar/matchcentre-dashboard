@@ -29,7 +29,8 @@ it is the diagnosis: every measurement, every count, every score, the result ver
 the box each tick is read as, by its label, row and side, the grade, round and
 court numbers, the weekday, and the producer line out of the file's metadata.
 What it removes: names, teams, the club, the venue, the season label, dates,
-times, the Match Centre match id, ratings, and the file's own name and path.
+times, the Match Centre match id, ratings, the file's own name and path, and its
+first line where that is no PDF version.
 
 A redacted run ends by saying the other half of that out loud: if a name survived
 it, the fault is in this flag rather than in the card, and ``SECURITY.md`` has a
@@ -55,8 +56,10 @@ can be used in a loop over a directory.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import dataclasses
+import errno
 import io
 import os
 import re
@@ -123,7 +126,10 @@ DATE_SHAPE = (
 
 # Header fields, each with a pattern deliberately more tolerant than the reader's.
 # The division and the round are looked for with the reader's own rule first
-# (READER_RULES, below); these two patterns only add to what it finds.
+# (READER_RULES, below); these two patterns only add to what it finds. What the
+# rule or the pattern finds can stop inside a word, at an apostrophe, a slash or a
+# comma, or run on over a line's end, so under ``--redact`` it is learned as it is
+# found (_Redactor.learn_found, 4.525).
 HEADER_FIELDS: tuple[tuple[str, str], ...] = (
     ("date", DATE_SHAPE),
     ("time", r"\b(\d{1,2}:\d{2}\s*[AaPp]\.?[Mm]\.?)"),
@@ -219,11 +225,18 @@ TEMPLATE_WORDS = frozenset(word.casefold() for word in (
 # longer any word on the page, so an ISO date and a match id captured out of
 # "#4200000" are invisible to a word-by-word comparison.
 #
-# These run *before* the word pass, on untouched text, because a value made of
-# more than one token is only recognisable while it is still whole. Measured: with
-# the word pass first, "7:00 PM" had its PM shaped as a two-character secret,
-# after which the time pattern no longer matched and the report published the
-# start time as "7:00".
+# These run *before* the word pass, on text it has not touched, because a value
+# made of more than one token is only recognisable while it is still whole.
+# Measured: with the word pass first, "7:00 PM" had its PM shaped as a
+# two-character secret, after which the time pattern no longer matched and the
+# report published the start time as "7:00". And *after* the card's path, and any
+# value off the card or word of the page one of them would part, which are withheld
+# whole first for the same reason the other way round (4.525): a path or a venue
+# holding a date lost that span to ``<date>``, no longer matched, and was printed
+# with every other part of it, a folder or a street number. A form that runs into
+# a word of the page, ``19:30 Amquill`` taken as a time with its ``Am``, or a
+# date ending inside ``2026Brovin``, takes the whole of that word with it
+# (_Redactor._formed), where the rest of the word was printed (4.525).
 _IDENTIFYING: tuple[tuple[re.Pattern[str], object], ...] = (
     (re.compile(DATE_SHAPE), lambda m: "<date>"),
     # The am/pm is optional so that a 24-hour card is covered too. No structural
@@ -248,6 +261,68 @@ def _rating_shape(match: re.Match[str]) -> str:
                           for side in match.groups()) + "]"
 
 
+# What a quote of the page ends at where it says it was cut: an echo's
+# ``'Example Dist...' (70 characters)``, quoted or not, and a refused card's
+# closest line. Whatever it is, the start of a word or a whole one, it is none of
+# the page's words, which are withheld whole, so it was printed (4.525). Shaped
+# while it is still as the reader quoted it, after the path, which a folder named
+# ``Round 4... (3 characters)`` would otherwise have had shaped in part and the
+# rest of it printed; and only from where its run starts: looked for from every
+# place in it, a run of 32,000 characters with no cut after it took nine seconds,
+# and with this a millisecond. The whole run, but for the quotes or bracket that
+# open it (group 1, printed as they are): stopped at a quote, ``KESTREL'S...``
+# printed ``KESTREL'`` and shaped the ``S`` (4.525). Rejected: telling
+# the report's quotes from an apostrophe by what stands either side, which a
+# word cut right after its apostrophe cannot show.
+_CUT = re.compile(r"""(?<!\S)([('"]*)([^\s('"]\S*)(?=\.\.\.['"]? \(\d+ characters\))""")
+
+# Where a run starts, past the quotes or bracket that open it, as for _CUT: where
+# a quote that was cut may start, before the run it ends in.
+_OPENED = re.compile(r"""(?<!\S)[('"]*([^\s('"])""")
+
+# The first line of a PDF, which the ``version`` row prints, when it is one.
+_VERSION = re.compile(r"%PDF-\d\.\d")
+
+# What a file that is no PDF most often is, by how it begins, so that under
+# ``--redact`` the ``version`` row can still say so in words of its own once its
+# first line is withheld (4.525): a sign-in page saved under the link's
+# name, an Office file, a photograph of the card.
+_SIGNATURES: tuple[tuple[re.Pattern[bytes], str], ...] = (
+    (re.compile(rb"(?i)(?:\xef\xbb\xbf)?\s*<(?:!doctype\s+html|html)\b"),
+     "an HTML page"),
+    (re.compile(rb"PK\x03\x04"), "a zip archive (a Word or Excel file is one)"),
+    (re.compile(rb"\x89PNG\r\n\x1a\n"), "a PNG image"),
+    (re.compile(rb"\xff\xd8\xff"), "a JPEG image"),
+)
+
+# Where the scrub printed a shape, while the passes after it run: a noncharacter
+# either side of the shape's number among the scrub's, its digits noncharacters
+# too, so that no pass matches it. As a shape, a page drawing ``chars`` or
+# ``words`` had them shaped inside the shapes, and ``xx`` inside a rating pair's
+# (4.525). Put back when every pass is done.
+_HELD = "\ufdd1"
+_HELD_DIGITS = str.maketrans("0123456789",
+                             "".join(chr(0xFDD2 + digit) for digit in range(10)))
+_PLACED = re.compile(f"{_HELD}[\ufdd2-\ufddb]+{_HELD}")
+
+
+def _parted_by_a_form(text: str) -> bool:
+    """Whether a form would take a span of *text* and leave a word of it.
+
+    Such a value off the card, or word of the page, is withheld whole before the
+    forms. Left until after them, a venue of ``112 ... 70341`` was ``112 ...
+    <5 digits>`` by the time it was looked for, matched nothing, and was shaped
+    word by word, its street number printed; and the page's ``Lot70341``, which on
+    a page that did not read is all there is to go on, printed its ``Lot`` (4.525).
+    """
+    rest = text
+    for expression, _ in _IDENTIFYING:
+        rest = expression.sub(" ", rest)
+    rest = _RATING_RE.sub(" ", rest)
+    return rest != text and any(redact.candidates(part, TEMPLATE_WORDS)
+                                for part in rest.split())
+
+
 class _Redactor:
     """Everything the page said, so that none of it can be printed.
 
@@ -260,7 +335,7 @@ class _Redactor:
     lines, the verdict, the card's warnings *and* the text quoted inside a
     refusal's detail, including whatever any of them prints next year.
 
-    The secret set is gathered two ways at once, so an unreadable page -- the
+    What it withholds is gathered two ways at once, so an unreadable page -- the
     case this whole tool exists for, and the case where a field-by-field
     redactor has nothing to work from -- is covered as well as a clean one:
 
@@ -268,6 +343,19 @@ class _Redactor:
       needs nothing to parse.
     * the full multi-word values off the parsed card, when it parses, so that
       ``Priya Halloran`` is shaped as one name rather than as two words.
+
+    And the file's own path, and its first line where that is no PDF version.
+    Each is withheld whole, longest first, in this order (4.525): the path and the
+    first line; what a quote of the page ends at where it was cut, :data:`_CUT`,
+    with the start of a value it was cut inside, :meth:`_cut`; any value or word
+    of the page that one of the forms would part; the forms,
+    :data:`_IDENTIFYING` and the rating pair, each taking with it a word of the
+    page it runs into; and the rest. A thing a form would part is looked for
+    whole before the form can take a span of it, after which what was left of it
+    matched nothing and was printed; the rest after the forms, as
+    :data:`_IDENTIFYING` says, so that a date holding a venue named ``August`` is
+    still a date. What each pass prints is a mark the passes after it do not
+    match, :data:`_HELD`, the shapes put in once they are done.
 
     Single characters are never secrets: shaping every "J" on the page would
     take the report's own punctuation with it. An initial standing alone
@@ -282,9 +370,13 @@ class _Redactor:
     """
 
     def __init__(self) -> None:
-        self._secrets: set[str] = set()
+        self._paths: set[str] = set()               # the file's, withheld first
+        self._whole: set[str] = set()               # then what a form would part
+        self._secrets: set[str] = set()             # the rest, after the forms
         self._kept: list[tuple[int, int]] = []      # spans of the report, verbatim
         self.shapes: set[str] = set()               # what the scrub printed instead
+        self._marks: dict[str, str] = {}            # each shape's, as a pass prints it
+        self._marked: dict[str, str] = {}           # and the shape each mark is
 
     # --- learning ---
 
@@ -293,7 +385,7 @@ class _Redactor:
             for token in word.text.split():
                 self._add(token)
         if page.source:
-            self._secrets.add(page.source)
+            self._paths.add(page.source)
 
     def learn_card(self, card: Card) -> None:
         for value in (card.club_hint, card.venue, card.season_hint,
@@ -313,19 +405,55 @@ class _Redactor:
     def learn_path(self, path: Path) -> None:
         """The file's own path, which the reader's summary prints as `source:`.
 
-        Whole, as given and resolved, because it is printed whole there and in
-        the reader's errors. Not its parts: a folder named ``pages`` would have
-        that word shaped wherever the report says it.
+        Whole, as given, because it is printed whole there and in the reader's
+        errors, and before the forms, which took a date or a run of digits out of
+        it and left the rest printed (4.525). Not its parts: a folder named
+        ``pages`` would have that word shaped wherever the report says it. Not as
+        resolved either, which nothing prints (measured over a link, ``..`` and
+        ``./``), and which raised for a link that leads back to itself before the
+        report could say so.
         """
-        self._secrets.add(str(path))
-        self._secrets.add(str(Path(path).resolve()))
+        self._paths.add(str(path))
+
+    def learn_first_line(self, line: str) -> None:
+        """The file's first line, as the ``version`` row prints it.
+
+        Whole, with the path, where it is no PDF version: a file that is no PDF
+        has it printed as whatever it holds, and no page is read to learn its
+        words from, so a club's notes saved under a card's name had the start of
+        the teams' names printed (4.525). Rejected: its words learned as a page's
+        are, which shaped the report's own ``obj streams`` for a file beginning
+        ``1 0 obj``. A single character is never withheld, as nowhere here. With
+        the path, and not after the forms, where a date, a time, a match id or a
+        rating pair at its start was shaped first, the line matched nothing, and
+        the words after it were printed. A file that begins like one of
+        :data:`_SIGNATURES` is named for it instead, which is all the line said.
+        """
+        if len(line) > 1 and not _VERSION.fullmatch(line):
+            self._paths.add(line)
+
+    def learn_found(self, value: str) -> None:
+        """A value the header fields find, as the ``found`` row prints it.
+
+        Learned as a value off the card is, because it is none of the page's
+        words: a rule or a pattern stops inside one, at an apostrophe, a slash or
+        a comma, and the tolerant patterns run on over a line's end, so that
+        ``Division Orvelin/Brovin`` printed ``'Orvelin'`` and a time across a line
+        ``'<time>\\nAm'`` (4.525). Rejected: keeping the patterns to
+        the line and to the word, which changes what the report finds without
+        ``--redact`` for every card, to cover what it prints with it.
+        """
+        self._add(value)
 
     def _add(self, text: str) -> None:
         # The rule the build withholds players' names by, so the two cannot drift.
         # Each also as repr quotes it, as the summary does a row's players: repr
-        # escapes a soft hyphen or a zero-width space inside a name.
+        # escapes a soft hyphen or a zero-width space inside a name. Before the
+        # forms if one of them would part it, and after them otherwise, as all of
+        # it was, so that a date that holds it is still a date (4.525).
         for spelling in redact.candidates(text, TEMPLATE_WORDS):
-            self._secrets.update((spelling, repr(spelling)[1:-1]))
+            into = self._whole if _parted_by_a_form(spelling) else self._secrets
+            into.update((spelling, repr(spelling)[1:-1]))
 
     # --- using ---
 
@@ -350,21 +478,150 @@ class _Redactor:
         return "".join(out) + self.scrub(report[at:])
 
     def scrub(self, text: str) -> str:
+        # In the order the class gives, and why, each pass printing marks; and
+        # then the shapes put in for them. A mark no pass printed is left alone.
+        text = self._withheld(text, self._paths)
+        text = self._cut(text)
+        text = self._withheld(text, self._whole)
         for expression, replace in _IDENTIFYING:
-            text = expression.sub(lambda match, replace=replace:
-                                  self._held(replace(match)), text)
-        text = _RATING_RE.sub(_rating_shape, text)
+            text = self._formed(text, expression, replace)
+        text = _RATING_RE.sub(lambda match: self._held(_rating_shape(match)), text)
+        text = self._withheld(text, self._secrets)
+        return _PLACED.sub(lambda match: self._marked.get(match.group(), match.group()),
+                           text)
+
+    def _cut(self, text: str) -> str:
+        """*text* with each quote that says it was cut, :data:`_CUT`, held as its
+        shape from as far back as it is the start of a value learned off the
+        card or the page.
+
+        A quote is cut at a count of characters, not at a word, and the run it
+        ends in was all that was shaped, so that a venue the echo quotes by its
+        first twelve printed ``'112 <8 chars>...'``: the number, which as a number
+        is withheld nowhere, and beside it the length of the street's name
+        (4.525). Only so far back as the span is the start of a value, so that the
+        report's own words before the quote are printed as they were, and a number
+        of the page that is part of no value is printed as any number is.
+        Measured: of the fixture's and the demo season's 16 reports and 45 others,
+        only the three whose echo is cut inside a value changed. Rejected: a
+        value's numbers learned as secrets, which shaped the report's own counts
+        and widths in 11 of the 16, ``30 outline(s)`` for a card that starts at
+        7:30; and each cut quote shaped from its opening quote, which printed a
+        refused card's closest line as ``<15 words, 80 chars>``, none of the
+        layout of the header it is quoted to show. Looked back no further than the
+        longest value: a hundred cuts, each after 15,000 runs, took a ninth of a
+        second; looked back as far as the cut before, a second, as long as they
+        take where a word of 30,000 characters is learned. And across a line's
+        end, as a value is withheld whole: what the header fields find can run on
+        over one.
+        """
+        values: list[str] | None = None
+        out, at = [], 0
+        for match in _CUT.finditer(text):
+            start, end = match.start(2), match.end()
+            if values is None:
+                values = sorted(self._whole | self._secrets)
+                longest = max(map(len, values), default=0)
+            low = max(at, end - longest)
+            begins = start
+            for opened in _OPENED.finditer(text, low, start):
+                head = text[opened.start(1):end]
+                index = bisect.bisect_left(values, head)
+                if index < len(values) and values[index].startswith(head):
+                    begins = opened.start(1)
+                    break
+            if begins < start:
+                out += [text[at:begins], self._held(redact.shape(text[begins:end]))]
+            else:
+                out += [text[at:start], self._held(redact.shape(match.group(2)))]
+            at = end
+        return "".join(out) + text[at:]
+
+    def _formed(self, text: str, expression: re.Pattern[str], replace) -> str:
+        """*text* with each match of a form held as its shape, over the whole of
+        any word of the page the match runs into.
+
+        A form found in context takes a span that may start or end inside a word
+        the page drew: the time's ``19:30 Am`` out of ``19:30 Amquill``, a date
+        from inside ``Orvelinmay`` or up to ``2026Brovin``. Shaped alone, it left
+        the rest of the word, which then matched no secret, printed (4.525). Only
+        a word the page drew, and only where some of it lies outside the match and
+        is more than punctuation, so that ``(18-Aug-2026)`` keeps its brackets.
+        Measured against two others. Rejected: the page's words withheld before
+        the forms, which printed the date, the time and the match id of every one
+        of the fixture's and the demo season's 16 reports as characters,
+        ``<10 chars>`` for ``<date>``; and widening over any word a form runs
+        into, learned or not, which took the report's own quotes into the shape,
+        ``'<date>' and`` printed ``<date> and``.
+        """
+        spans: list[tuple[int, int, str]] = []
+        runs: list[tuple[int, int]] | None = None
+        for match in expression.finditer(text):
+            start, end = match.span()
+            if ((start and not text[start - 1].isspace())
+                    or (end < len(text) and not text[end].isspace())):
+                if runs is None:
+                    runs = [run.span() for run in re.finditer(r"\S+", text)]
+                    starts = [first for first, _ in runs]
+                    learned: dict[int, list[tuple[int, int]]] = {}
+                start, end = self._widened(text, start, end, runs, starts, learned)
+            shape = replace(match)
+            # Two forms widened over one word are one span, the first one's shape.
+            while spans and start < spans[-1][1]:
+                first, last, shape = spans.pop()
+                start, end = min(start, first), max(end, last)
+            spans.append((start, end, shape))
+        out, at = [], 0
+        for start, end, shape in spans:
+            out += [text[at:start], self._held(shape)]
+            at = end
+        return "".join(out) + text[at:]
+
+    def _widened(self, text: str, start: int, end: int, runs: list[tuple[int, int]],
+                 starts: list[int], learned: dict[int, list[tuple[int, int]]]
+                 ) -> tuple[int, int]:
+        """The span *start* to *end*, widened over a word of the page that one of
+        its ends lies inside, the word being its run's spelling as learned.
+
+        Where each run's words lie is looked up once, into *learned*: looked up
+        for every match, a run of 36,000 characters holding 4,000 dates took a
+        third of a second, and a run twice as long four times that, where now
+        each takes a hundredth.
+        """
+        for edge in (start, end - 1):
+            index = bisect.bisect_right(starts, edge) - 1
+            if index not in learned:
+                first, last = runs[index]
+                run = text[first:last]
+                learned[index] = []
+                for word in redact.candidates(run, TEMPLATE_WORDS):
+                    if word in self._secrets:
+                        at = first + run.find(word)
+                        learned[index].append((at, at + len(word)))
+            for at, stop in learned[index]:
+                if not (at < start < stop or at < end < stop):
+                    continue
+                outside = [text[at:start], text[end:stop]]
+                if any(redact.candidates(part, TEMPLATE_WORDS) for part in outside):
+                    start, end = min(start, at), max(end, stop)
+        return start, end
+
+    def _withheld(self, text: str, secrets: set[str]) -> str:
         # Case-sensitive, where the build ignores case: this report's own labels
         # sit beside the page's words (`club hint` beside `Club`), and a scrub that
         # ignored case would shape the report rather than the card.
-        return redact.substitute(text, self._secrets,
+        return redact.substitute(text, secrets,
                                  lambda secret: self._held(redact.shape(secret)),
                                  ignore_case=False)
 
     def _held(self, shape: str) -> str:
-        """*shape*, to be held whole where its line is laid out."""
+        """*shape*'s mark, for the scrub to print until its passes are done, and
+        *shape* to be held whole where its line is laid out."""
         self.shapes.add(shape)
-        return shape
+        if shape not in self._marks:
+            mark = f"{_HELD}{str(len(self._marks)).translate(_HELD_DIGITS)}{_HELD}"
+            self._marks[shape], self._marked[mark] = mark, shape
+        return self._marks[shape]
 
 
 def _row(label: str, value: str, *, indent: str = "") -> None:
@@ -502,8 +759,18 @@ def _one_file(path: Path, *, page: int | None, redact: bool = False,
     redactor.learn_path(path)
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        code = _report(path, page=page, redactor=redactor,
-                       label=f"#{number}  (name and path withheld by --redact)")
+        try:
+            code = _report(path, page=page, redactor=redactor,
+                           label=f"#{number}  (name and path withheld by --redact)")
+        except Exception as exc:                      # noqa: BLE001 - see below
+            # A failure nobody foresaw that leaves the report, as the build's
+            # rules raising where the verdict asks them does, after the rows it
+            # follows (4.134). Its traceback went to stderr, which nothing
+            # scrubs, quoting what it quoted, and the report it ended was lost
+            # (4.525). Told here as any such failure is, inside the buffer, so
+            # that the report above it is scrubbed and printed.
+            _surprise(exc, "reading this file", redacting=True)
+            code = 1
     print(_laid_out(redactor.publish(buffer.getvalue()),
                     keep=tuple(sorted(redactor.shapes))), end="")
     return code
@@ -534,22 +801,43 @@ def _written(path: Path, *, page: int | None, label: str,
     # of them used to be a traceback and two of them used to be the same wrong
     # sentence -- "There is no file at that path" is false about a directory, and
     # about a symlink whose target has gone. Each gets the answer it actually earns.
-    if path.is_dir():
-        print(f"{INDENT}That is a directory, not a file. This tool explains one "
-              f"scorecard at a time; name the PDFs inside it instead, which a "
-              f"shell will expand for you:")
-        print(f"{INDENT}{INDENT}python3 tools/doctor.py data/Round1/*.pdf")
-        return 1
-    if path.is_symlink() and not path.exists():
-        print(f"{INDENT}That is a symbolic link and there is nothing at the other "
-              f"end of it. If the cards live on a share, it may not be mounted.")
-        return 1
-    if not path.exists():
-        print(f"{INDENT}There is no file at that path.")
-        return 1
-    if not path.is_file():
-        print(f"{INDENT}That path is not a regular file, so there is nothing to "
-              f"read from it.")
+    #
+    # The system is asked first, once, because pathlib's questions raise for a path
+    # it will not look at -- a card in a folder this user may not search, a name
+    # longer than the disk allows -- and is_dir and exists answer False for a link
+    # that leads back to itself, which would be told it is a link to nothing.
+    # Measured the same on 3.11, 3.12 and 3.13 (4.525). Only the reason is printed,
+    # never the errno's copy of the path, as for a file that cannot be read below.
+    try:
+        try:
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            pass                      # told below: a link to nothing, or no file
+        if path.is_dir():
+            print(f"{INDENT}That is a directory, not a file. This tool explains one "
+                  f"scorecard at a time; name the PDFs inside it instead, which a "
+                  f"shell will expand for you:")
+            print(f"{INDENT}{INDENT}python3 tools/doctor.py data/Round1/*.pdf")
+            return 1
+        if path.is_symlink() and not path.exists():
+            print(f"{INDENT}That is a symbolic link and there is nothing at the "
+                  f"other end of it. If the cards live on a share, it may not be "
+                  f"mounted.")
+            return 1
+        if not path.exists():
+            print(f"{INDENT}There is no file at that path.")
+            return 1
+        if not path.is_file():
+            print(f"{INDENT}That path is not a regular file, so there is nothing to "
+                  f"read from it.")
+            return 1
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            print(f"{INDENT}That path leads round a loop of symbolic links, so there "
+                  f"is no file at the end of it.")
+        else:
+            print(f"{INDENT}That path cannot be looked at: "
+                  f"{exc.strerror or type(exc).__name__}.")
         return 1
 
     try:
@@ -562,7 +850,7 @@ def _written(path: Path, *, page: int | None, label: str,
         print(f"{INDENT}A build cannot read it either, so it will be refused and "
               f"reported rather than scored.")
         return 1
-    fonts_ok = _file_facts(path, raw)
+    fonts_ok = _file_facts(path, raw, redactor)
 
     try:
         count = pdf.page_count(path)
@@ -610,7 +898,7 @@ def _written(path: Path, *, page: int | None, label: str,
 # --- file-level metadata ----------------------------------------------------
 
 
-def _file_facts(path: Path, raw: bytes) -> bool:
+def _file_facts(path: Path, raw: bytes, redactor: _Redactor | None = None) -> bool:
     """What the file says about itself. Returns whether every font can be decoded.
 
     Read straight out of the bytes rather than through :mod:`~matchcentre.pdf`,
@@ -624,8 +912,18 @@ def _file_facts(path: Path, raw: bytes) -> bool:
     has been extracted and its words counted.
     """
     _row("size", f"{len(raw):,} bytes")
-    header = raw[:16].split(b"\n", 1)[0].strip()
-    _row("version", _ascii(header))
+    # Up to the first line's end, either one: Acrobat ends the version line with
+    # a carriage return, and taken up to the line feed it ran on into the bytes
+    # after it and was no version (4.525).
+    header = _ascii(re.split(rb"[\r\n]", raw[:16], maxsplit=1)[0].strip())
+    kind = next((kind for signature, kind in _SIGNATURES if signature.match(raw)), "")
+    if redactor is not None:
+        redactor.learn_first_line(header)
+    if redactor is not None and kind:
+        # The line is withheld, so said in words that no file put there.
+        _row("version", f"none: it begins like {kind}")
+    else:
+        _row("version", header)
 
     creator = _text_field(raw, b"Creator")
     producer = _text_field(raw, b"Producer")
@@ -812,7 +1110,7 @@ def _one_page(path: Path, index: int, count: int, raw: bytes, *,
     _rect_census(page)
     rules, bands = _table(page)
     _checkboxes(page, bands)
-    found, missing = _header_fields(page)
+    found, missing = _header_fields(page, redactor)
     try:
         taken, failure = _taken(page), None
     except Exception as exc:                          # noqa: BLE001
@@ -1120,8 +1418,14 @@ def _as_read(name: str, text: str) -> str:
                  if value), "")
 
 
-def _header_fields(page: pdf.Page) -> tuple[list[str], list[str]]:
-    """Which header fields the reader's rule or a tolerant pattern can find."""
+def _header_fields(page: pdf.Page,
+                   redactor: _Redactor | None = None) -> tuple[list[str], list[str]]:
+    """Which header fields the reader's rule or a tolerant pattern can find.
+
+    Under ``--redact`` a date, a time, a division or a round found is learned as
+    found (:meth:`_Redactor.learn_found`): each can be a part of a word, or run
+    over a line's end, which no word of the page is (4.525).
+    """
     text = page.text()
     found: list[str] = []
     missing: list[str] = []
@@ -1133,6 +1437,8 @@ def _header_fields(page: pdf.Page) -> tuple[list[str], list[str]]:
                  or (match.group(1) if match else ""))
         if value:
             found.append(name)
+            if redactor is not None and name in ("date", "time", "division", "round"):
+                redactor.learn_found(value)
             # Past the width it goes on under the name: a value with no space
             # in it, a match id of fifty digits, is as wide under itself as
             # beside the name (4.186).

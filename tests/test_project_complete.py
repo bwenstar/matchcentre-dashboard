@@ -16,6 +16,7 @@ import ast
 import fnmatch
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -149,10 +150,55 @@ ENTRY_POINTS = ("build.py", "tools/doctor.py", "tools/demo.py",
                 "tools/screenshots.py", "tools/fetch.py",
                 "tools/scheduled.py", "tools/release.py")
 
+# The variables by which git tells a command it runs which repository is meant,
+# as `git rev-parse --local-env-vars` lists them (git 2.43). Git exports them to
+# a hook, to `rebase -x` and `bisect run`, and to a `!` alias: GIT_DIR in a
+# linked worktree, and GIT_INDEX_FILE to the hook of `git commit -a`.
+THE_CALLERS_REPOSITORY = frozenset({
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR"})
+
+
+def git_env(**settings: str) -> dict[str, str]:
+    """The environment of a git this suite runs: this process's as it is now,
+    less THE_CALLERS_REPOSITORY, and with *settings*.
+
+    So git finds its repository from the folder it is asked in, as it does for
+    a contributor typing the command, and not from whatever ran the suite
+    (4.524). Each planted project's git was given all of os.environ: run by
+    `git rebase -x` in a linked worktree, its `git init` reinitialised the
+    contributor's repository, which then said core.bare=true, and the planted
+    commit went onto the branch being rebased; run by the hook of `git commit
+    -a`, the commit was refused, and a test errored
+    (/tmp/mcf/ub/scratch/repair2-hermetic.txt). Read when called, so that a
+    test which takes git off PATH takes it off for git too. Rejected: a skip
+    wherever GIT_DIR is set, which skips every check a contributor runs from a
+    hook; and asking git for the list before every git it runs, a second
+    process each time for a list that changes only with git, which a test
+    below holds to the git it finds.
+    """
+    env = {name: value for name, value in os.environ.items()
+           if name not in THE_CALLERS_REPOSITORY}
+    env.update(settings)
+    return env
+
 
 def git(*args: str) -> str:
-    return subprocess.run(("git", *args), cwd=ROOT, capture_output=True,
-                          text=True).stdout
+    """What ``git *args`` prints here: nothing outside a repository, and nothing
+    where there is no git, so that a question about what is tracked is answered
+    on a computer without git as in an unzipped release, which tracks nothing.
+    Without git it raised, and the four tests that ask it what is tracked
+    errored (/tmp/mcf/ub/scratch/repair1-nogit.txt). Rejected: a skip, which an
+    unzipped release on a computer with git does not take either.
+    """
+    try:
+        return subprocess.run(("git", *args), cwd=ROOT, capture_output=True,
+                              text=True, env=git_env()).stdout
+    except OSError:                     # no git, so nothing tracked
+        return ""
 
 
 def under_git() -> bool:
@@ -164,10 +210,118 @@ def under_git() -> bool:
     directory skips exactly the case where the ignore rules matter most: a folder
     whose parent is already a repository, where one `git add .` in the wrong place
     commits a club's scorecards.
+
+    False where there is no git at all, which a club that downloaded a release
+    may well not have: the README asks for Python and nothing else. Asked, it
+    raised there, so the eleven tests that ask this to choose between the
+    folder and git, nine of them base's, errored on such a computer before they
+    could do either (/tmp/mcf/ub/scratch/repair1-nogit.txt).
     """
-    done = subprocess.run(("git", "rev-parse", "--is-inside-work-tree"),
-                          cwd=ROOT, capture_output=True, text=True)
+    try:
+        done = subprocess.run(("git", "rev-parse", "--is-inside-work-tree"),
+                              cwd=ROOT, capture_output=True, text=True,
+                              env=git_env())
+    except OSError:                     # no git, so no opinion
+        return False
     return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def git_holds_the_project() -> bool:
+    """Whether the repository git finds here is this project's: ``build.py`` is
+    in its index.
+
+    :func:`under_git` is true of a folder that sits untracked inside a larger
+    checkout as well, as a release does when it is unzipped into a home folder
+    or a monorepo kept in git, and there every question about what ships went to
+    the other repository (4.524): with a commit in it, ``git archive HEAD`` asked
+    from here wrote a tar with nothing in it, which would not open, so the config
+    test errored on a release never built, and with none it passed a config.toml
+    the release had carried, which base failed
+    (/tmp/mcf/ub/scratch/repair1-parent.txt). Such a folder is a release
+    unzipped, whatever is above it. Rejected: ``build.py`` that git would add, as
+    :func:`files_git_would_ship` has it, which says what a commit would take but
+    not where the folder's files came from.
+    """
+    if not under_git():
+        return False
+    done = subprocess.run(("git", "ls-files", "--error-unmatch", "--", "build.py"),
+                          cwd=ROOT, capture_output=True, env=git_env())
+    return done.returncode == 0
+
+
+def files_git_would_ship(root: Path) -> list[Path] | None:
+    """The files under *root* that git tracks or would add, or None where git
+    cannot say what this project ships.
+
+    A scan of what ships asks this rather than walking the folder, which in a
+    club's own clone holds the config.toml its first build wrote and a .venv
+    made out of habit, each of which git leaves out as it should (4.524). None
+    where there is no git, where *root* is in no work tree, as in an unzipped
+    release, and where git would ship none of the program: a release unzipped
+    into a larger checkout that ignores it whole, as a home folder kept in git
+    with ``*`` does, where the answer is about the other checkout, and an
+    empty one would pass every scan that asked it. The caller walks the folder
+    then. Rejected: leaving the folders a club fills out of the walk by name,
+    which reads whatever a club keeps beside them and skips them where git
+    would commit them.
+    """
+    try:
+        done = subprocess.run(("git", "ls-files", "-z", "--cached", "--others",
+                               "--exclude-standard"), cwd=root,
+                              capture_output=True, env=git_env())
+    except OSError:                     # no git, which a club may not have
+        return None
+    if done.returncode != 0:
+        return None
+    paths = [root / name for name in os.fsdecode(done.stdout).split("\0") if name]
+    return paths if root / "build.py" in paths else None
+
+
+# Who commits in a project a test plants, and nothing of whoever runs the suite:
+# no setting of theirs signs, names or refuses the commit, and no repository of
+# theirs is the one committed to.
+PLANTED_GIT = git_env(GIT_AUTHOR_NAME="A Club Secretary",
+                      GIT_AUTHOR_EMAIL="secretary@example.invalid",
+                      GIT_COMMITTER_NAME="A Club Secretary",
+                      GIT_COMMITTER_EMAIL="secretary@example.invalid",
+                      GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                      PYTHONDONTWRITEBYTECODE="1")
+
+
+def git_in(root: Path, *argv: str) -> None:
+    """``git *argv`` in a planted project at *root*, which must succeed.
+
+    A skip and not an error where there is no git: a test that plants a clone
+    has nothing to say about a computer that cannot make one, and without git
+    the eight that plant one errored on FileNotFoundError
+    (/tmp/mcf/ub/scratch/repair1-nogit.txt).
+    """
+    if shutil.which("git") is None:
+        raise unittest.SkipTest("no git to plant a project with")
+    subprocess.run(("git", "-c", "init.defaultBranch=main",
+                    "-c", "commit.gpgSign=false", *argv),
+                   cwd=root, env=PLANTED_GIT, check=True, capture_output=True)
+
+
+def copy_of_a_fresh_checkout(project: Path) -> Path:
+    """The program as a fresh clone or an unzipped release has it, in *project*.
+
+    ``build.py``, ``matchcentre/`` and ``tools/``, and a ``data/`` holding only
+    what the repository keeps there, its note and its ``.gitkeep``: no card, no
+    ``config.toml``, no ``site/``. A test of what the program does runs it here
+    and not from this folder, which is as often as not a club's own (4.524): the
+    README's report for an empty ``data/`` was asked of this folder's
+    ``build.py``, which looks beside itself for cards, and in a copy with the
+    demo's season in it rightly said where they were, inside the block quoted.
+    Rejected: an empty folder to stand in beside this ``build.py``, which is
+    what that test had.
+    """
+    from test_demo import copy_of_the_program
+    copy_of_the_program(project)
+    for keeper in ("README.md", ".gitkeep"):
+        if (ROOT / "data" / keeper).is_file():
+            shutil.copy2(ROOT / "data" / keeper, project / "data" / keeper)
+    return project
 
 
 def version_scan(root: Path) -> list[Path]:
@@ -185,7 +339,7 @@ def version_scan(root: Path) -> list[Path]:
     try:
         done = subprocess.run(("git", "ls-files", "-z", "--cached", "--others",
                                "--exclude-standard"), cwd=root,
-                              capture_output=True)
+                              capture_output=True, env=git_env())
     except OSError:                     # no git, which a club may not have
         done = None
     if done is not None and done.returncode == 0:
@@ -199,6 +353,292 @@ def version_scan(root: Path) -> list[Path]:
                   and path.name != "CHANGELOG.md"
                   and not set(path.relative_to(root).parts) & NOT_SHIPPED
                   and path.is_file())
+
+
+# The folders a club's copy holds as they shipped, and the private notes/ that
+# none holds at all: a walk of one of these reads the same files in any copy.
+AS_SHIPPED = frozenset({"matchcentre", "tools", "tests", ".github", "notes"})
+
+
+def walkers_of_the_folder(module: str, source: str) -> set[str]:
+    """Each function in the test module *module*, whose text is *source*, that
+    walks this folder: ``module.Class.method``, or ``module.function``.
+
+    A walk is ``rglob``, ``glob`` or ``iterdir`` of ROOT, or of ROOT and a part
+    that is not one of AS_SHIPPED, or ``os.walk``, ``os.listdir`` or
+    ``os.scandir`` of one. It counts written out, through a name given it in the
+    same function or at the top of the module, or handed to a function of the
+    module that walks what it is handed: the wrapper test walks ROOT only in
+    ``entries(root)``, and the scheduled tests' guard in a ``reports`` it names
+    first. Rejected: the walks written against ROOT alone, which missed both,
+    as the shipped-scans test once missed a walk moved into ``version_scan``.
+    """
+    tree = ast.parse(source)
+    functions = {}
+    for top in tree.body:
+        if isinstance(top, ast.FunctionDef):
+            functions[f"{module}.{top.name}"] = top
+        elif isinstance(top, ast.ClassDef):
+            functions |= {f"{module}.{top.name}.{node.name}": node
+                          for node in top.body if isinstance(node, ast.FunctionDef)}
+
+    def names_in(statements) -> dict[str, ast.expr]:
+        return {node.targets[0].id: node.value for node in statements
+                if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)}
+
+    at_the_top = names_in(tree.body)
+
+    def under_root(node, names, depth=0):
+        """(Whether *node* is ROOT or a path under it, its first part if one)."""
+        first = None
+        while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            first, node = node.right, node.left
+        if isinstance(node, ast.Name) and node.id == "ROOT":
+            return True, first
+        if isinstance(node, ast.Name) and node.id in names and depth < 8:
+            rooted, part = under_root(names[node.id], names, depth + 1)
+            return rooted, part if part is not None else first
+        return False, None
+
+    def of_the_folder(node, names) -> bool:
+        rooted, first = under_root(node, names)
+        return rooted and not (isinstance(first, ast.Constant)
+                               and str(first.value).split("/")[0] in AS_SHIPPED)
+
+    def received(node) -> list[str]:
+        """The parameters of *node* a caller hands it, in the order handed."""
+        given = [arg.arg for arg in (*node.args.posonlyargs, *node.args.args)]
+        return given[1:] if given[:1] in (["self"], ["cls"]) else given
+
+    def walked(node, names) -> list[ast.expr]:
+        """What each walk in *node* walks."""
+        found = []
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                continue
+            if call.func.attr in ("rglob", "glob", "iterdir"):
+                found.append(call.func.value)
+            elif (call.func.attr in ("walk", "listdir", "scandir") and call.args
+                  and isinstance(call.func.value, ast.Name)
+                  and call.func.value.id == "os"):
+                found.append(call.args[0])
+        return found
+
+    # By the name a caller writes, each function's parameters and the ones it
+    # walks: two classes may each have a function of one name.
+    walks_what_it_is_handed = {}
+    for qualified, node in functions.items():
+        own = received(node)
+        handed = set()
+        for walk in walked(node, {}):
+            while isinstance(walk, ast.BinOp) and isinstance(walk.op, ast.Div):
+                walk = walk.left
+            if isinstance(walk, ast.Name) and walk.id in own:
+                handed.add(walk.id)
+        if handed:
+            walks_what_it_is_handed.setdefault(node.name, []).append((own, handed))
+
+    found = set()
+    for qualified, node in functions.items():
+        names = at_the_top | names_in(ast.walk(node))
+        if any(of_the_folder(walk, names) for walk in walked(node, names)):
+            found.add(qualified)
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            callee = (call.func.attr if isinstance(call.func, ast.Attribute)
+                      else getattr(call.func, "id", None))
+            for own, handed in walks_what_it_is_handed.get(callee, ()):
+                given = dict(zip(own, call.args)) | {keyword.arg: keyword.value
+                                                     for keyword in call.keywords}
+                if any(of_the_folder(given[name], names)
+                       for name in handed if name in given):
+                    found.add(qualified)
+    return found
+
+
+def gits_not_given_git_env(source: str) -> list[int]:
+    """The line of each git in the module whose text is *source* that is run
+    with an environment other than :func:`git_env`'s.
+
+    A git is ``subprocess.run`` of a tuple whose first word is ``"git"``, and it
+    is given git_env's when its ``env`` is a call of ``git_env``, or is
+    PLANTED_GIT, which was one. Read from the source, because the decoy below
+    runs only the tests that plant a repository, and a git asked of ROOT
+    without git_env() is asked of the repository that ran the suite, and not
+    of the one git would find from ROOT. Rejected: the planted projects' git
+    alone, which leaves every question about this project to the caller's.
+    """
+    found = []
+    for call in ast.walk(ast.parse(source)):
+        if not (isinstance(call, ast.Call)
+                and ast.unparse(call.func) == "subprocess.run" and call.args
+                and isinstance(call.args[0], ast.Tuple) and call.args[0].elts
+                and isinstance(call.args[0].elts[0], ast.Constant)
+                and call.args[0].elts[0].value == "git"):
+            continue
+        env = next((keyword.value for keyword in call.keywords
+                    if keyword.arg == "env"), None)
+        if not (isinstance(env, ast.Call) and isinstance(env.func, ast.Name)
+                and env.func.id == "git_env"
+                or isinstance(env, ast.Name) and env.id == "PLANTED_GIT"):
+            found.append(call.lineno)
+    return sorted(found)
+
+
+def planters_of_a_repository(module: str, source: str) -> set[str]:
+    """Each test in the test module *module*, whose text is *source*, that
+    plants a repository: ``module.Class.method``, or ``module.Class`` where the
+    class's setUp or setUpClass plants one for every test in it.
+
+    A test plants one when it calls ``git_in``, or a function of the module
+    that runs git in a folder and with words it is handed, as test_release's
+    ``git()`` does, or a function of the module or a method of its own class
+    that calls one, at any remove: the leak scan's tests plant in
+    ``planted()``, the config test's in ``project()`` and ``release_in()``,
+    and test_release's in ``PublishCase.setUp``. Not ``git()`` here, which
+    asks ROOT. Rejected: a list by hand alone, which the next test that plants
+    one is left out of.
+    """
+    tree = ast.parse(source)
+    functions = {top.name: top for top in tree.body
+                 if isinstance(top, ast.FunctionDef)}
+
+    def runs_git_where_and_as_handed(function) -> bool:
+        handed = {arg.arg for arg in function.args.args}
+        if function.args.vararg is not None:
+            handed.add(function.args.vararg.arg)
+        for call in ast.walk(function):
+            if (isinstance(call, ast.Call)
+                    and ast.unparse(call.func) == "subprocess.run" and call.args
+                    and isinstance(call.args[0], ast.Tuple) and call.args[0].elts
+                    and isinstance(call.args[0].elts[0], ast.Constant)
+                    and call.args[0].elts[0].value == "git"):
+                words = {word.value.id for word in call.args[0].elts
+                         if isinstance(word, ast.Starred)
+                         and isinstance(word.value, ast.Name)}
+                cwd = next((keyword.value for keyword in call.keywords
+                            if keyword.arg == "cwd"), None)
+                if (words & handed and isinstance(cwd, ast.Name)
+                        and cwd.id in handed):
+                    return True
+        return False
+
+    defined = {top.name: top for top in tree.body if isinstance(top, ast.ClassDef)}
+
+    def methods_of(name: str, seen=()) -> dict:
+        """The methods a class of the module has, its bases' among them, as
+        test_release's publish tests have PublishCase's setUp."""
+        at = defined[name]
+        held = {}
+        for base in at.bases:
+            if (isinstance(base, ast.Name) and base.id in defined
+                    and base.id not in seen):
+                held |= methods_of(base.id, (*seen, name))
+        return held | {node.name: node for node in at.body
+                       if isinstance(node, ast.FunctionDef)}
+
+    classes = {name: methods_of(name) for name in defined}
+
+    def calls(node, methods=()) -> set[str]:
+        """What *node* calls by name, and the methods of *methods* it calls
+        on self or cls, each as ``.name``."""
+        called = set()
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            if isinstance(call.func, ast.Name):
+                called.add(call.func.id)
+            elif (isinstance(call.func, ast.Attribute)
+                  and isinstance(call.func.value, ast.Name)
+                  and call.func.value.id in ("self", "cls")
+                  and call.func.attr in methods):
+                called.add(f".{call.func.attr}")
+        return called
+
+    def closure(nodes: dict, planting: set[str], methods=(), mark="") -> set[str]:
+        planting = set(planting)
+        while True:
+            more = {f"{mark}{name}" for name, node in nodes.items()
+                    if f"{mark}{name}" not in planting
+                    and calls(node, methods) & planting}
+            if not more:
+                return planting
+            planting |= more
+
+    planting = closure(functions, {"git_in"} | {
+        name for name, function in functions.items()
+        if runs_git_where_and_as_handed(function)})
+    found = set()
+    for name, methods in classes.items():
+        planted = closure(methods, planting, methods, ".")
+        if planted & {".setUp", ".setUpClass"}:
+            found.add(f"{module}.{name}")
+            continue
+        found |= {f"{module}.{name}.{method}" for method in methods
+                  if method.startswith("test") and f".{method}" in planted}
+    return found
+
+
+def skips_reached(source: str, entry: str) -> list[tuple[int, str]]:
+    """Each skip a run of *entry*, a class or ``Class.method`` of the test
+    module whose text is *source*, can take: its line, and its reason as
+    written.
+
+    A skip is ``skipTest``, ``SkipTest`` raised, or a skip decorator. Reached
+    are the decorators of the class and of the classes it inherits from in the
+    module, and their functions: every one for a class; for a method, it and
+    every one that is not a test, since setUp and a helper run for it too; and
+    any function of the module those call, at any remove, as git_in is called.
+    A reason worked out when it runs is its text, and on no list. Rejected:
+    the skips in the method alone, which leave out the setUp of a base class.
+    """
+    tree = ast.parse(source)
+    classes = {top.name: top for top in tree.body if isinstance(top, ast.ClassDef)}
+    functions = {top.name: top for top in tree.body
+                 if isinstance(top, ast.FunctionDef)}
+    name, _, method = entry.partition(".")
+    lineage, waiting = [], [name]
+    while waiting:
+        at = classes.get(waiting.pop(0))
+        if at is not None and at not in lineage:
+            lineage.append(at)
+            waiting += [base.id for base in at.bases if isinstance(base, ast.Name)]
+    reached = [decorator for at in lineage for decorator in at.decorator_list]
+    queue = [node for at in lineage for node in at.body
+             if isinstance(node, ast.FunctionDef)
+             and (not method or node.name == method
+                  or not node.name.startswith("test"))]
+    followed = set()
+    while queue:
+        node = queue.pop(0)
+        reached.append(node)
+        for call in ast.walk(node):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in functions
+                    and call.func.id not in followed):
+                followed.add(call.func.id)
+                queue.append(functions[call.func.id])
+
+    def reason(node) -> str:
+        return (node.value if isinstance(node, ast.Constant)
+                and isinstance(node.value, str) else ast.unparse(node))
+
+    found = set()
+    for node in reached:
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            called = ast.unparse(call.func).rsplit(".", 1)[-1]
+            given = [*call.args, *(keyword.value for keyword in call.keywords
+                                   if keyword.arg == "reason")]
+            if called in ("skipTest", "SkipTest", "skip") and given:
+                found.add((call.lineno, reason(given[0])))
+            elif called in ("skipIf", "skipUnless") and len(given) > 1:
+                found.add((call.lineno, reason(given[1])))
+    return sorted(found)
 
 
 class TestEverythingPromisedIsPresent(unittest.TestCase):
@@ -242,8 +682,19 @@ class TestEveryFileOfCodeThatShipsIsOnTheList(unittest.TestCase):
                "tools/stray.css", "tools/stray.html")
 
     def test_every_one_is_required_or_exempt_for_a_reason(self):
+        # In a work tree, the files git tracks and the ones it would add, as
+        # version_scan reads them (4.524). A club's copy with pip in a .venv
+        # failed here on 495 of pip's files (/tmp/mcf/ub/lived-survey/
+        # alone-extra.txt), which the next `git add .` would indeed have
+        # committed, so .gitignore names the folder now and the question is put
+        # to git. Elsewhere, as in an unzipped release, every file. Rejected:
+        # .venv in NOT_SHIPPED, which leaves it out of every scan whether or not
+        # git would commit it.
+        paths = files_git_would_ship(ROOT)
+        if paths is None:
+            paths = ROOT.rglob("*")
         unlisted = []
-        for path in sorted(ROOT.rglob("*")):
+        for path in sorted(paths):
             if not path.is_file() or path.suffix not in (".py", ".js", ".css", ".html"):
                 continue
             relative = path.relative_to(ROOT)
@@ -260,6 +711,31 @@ class TestEveryFileOfCodeThatShipsIsOnTheList(unittest.TestCase):
             for name in self.PLANTED:
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text("", encoding="utf-8")
+            with mock.patch.dict(globals(), ROOT=root):
+                with self.assertRaises(self.failureException) as caught:
+                    self.test_every_one_is_required_or_exempt_for_a_reason()
+        self.assertIn("4 shipped file(s) that nothing promises: ['stray.py', "
+                      "'tools/stray.css', 'tools/stray.html', 'tools/stray.js']",
+                      str(caught.exception))
+
+    def test_in_a_clone_git_is_asked_and_what_it_leaves_out_is_not_named(self):
+        # The same strays in a work tree, two of them committed and the rest not
+        # yet, beside pip in a .venv the planted .gitignore leaves out (4.524).
+        # Each stray is still named, committed or not, and pip is not: on the
+        # walk this scan was, pip failed it in a club's copy
+        # (/tmp/mcf/ub/scratch/before-venv.txt). Fictional.
+        if shutil.which("git") is None:
+            self.skipTest("no git to plant a clone with")
+        with tempfile.TemporaryDirectory(prefix="test-planted-") as holder:
+            root = Path(holder)
+            pip = ".venv/lib/python3.12/site-packages/pip/__init__.py"
+            for name in (*self.PLANTED, pip):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("", encoding="utf-8")
+            (root / ".gitignore").write_text("/.venv/\n", encoding="utf-8")
+            git_in(root, "init", "-q")
+            git_in(root, "add", "build.py", "tools/stray.js")
+            git_in(root, "commit", "-q", "-m", "A planted project")
             with mock.patch.dict(globals(), ROOT=root):
                 with self.assertRaises(self.failureException) as caught:
                     self.test_every_one_is_required_or_exempt_for_a_reason()
@@ -454,7 +930,7 @@ class TestAFreshCheckoutIsEmptyOfOnesOwnData(unittest.TestCase):
             self.skipTest("not inside a git checkout")
         probe = "data/round-01/some-club-v-another.pdf"
         result = subprocess.run(("git", "check-ignore", "-q", probe),
-                                cwd=ROOT, capture_output=True)
+                                cwd=ROOT, capture_output=True, env=git_env())
         self.assertEqual(result.returncode, 0,
                          f"{probe} is not gitignored, so a club that runs "
                          f"tools/demo.py or drops its own cards in would commit "
@@ -469,7 +945,7 @@ class TestAFreshCheckoutIsEmptyOfOnesOwnData(unittest.TestCase):
         for keeper in ("data/.gitkeep", "data/README.md"):
             with self.subTest(path=keeper):
                 result = subprocess.run(("git", "check-ignore", "-q", keeper),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True, env=git_env())
                 self.assertNotEqual(result.returncode, 0,
                                     f"{keeper} is gitignored, so a fresh clone "
                                     f"would have no data/ at all")
@@ -485,7 +961,7 @@ class TestAFreshCheckoutIsEmptyOfOnesOwnData(unittest.TestCase):
         for path, ignored in (("config.toml", True), ("config.example.toml", False)):
             with self.subTest(path=path):
                 result = subprocess.run(("git", "check-ignore", "-q", path),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True, env=git_env())
                 if ignored:
                     self.assertEqual(result.returncode, 0,
                                      f"{path} is not gitignored, so a club would "
@@ -497,12 +973,45 @@ class TestAFreshCheckoutIsEmptyOfOnesOwnData(unittest.TestCase):
                                         f"would document no settings at all")
 
     def test_no_config_of_anybody_elses_ships_with_the_project(self):
-        # A config.toml left in the tree is one machine's state, and it would
-        # arrive in a club's copy naming somebody else's club, teams and captains.
-        # The README's whole opening is that the first run writes this file.
-        self.assertFalse((ROOT / "config.toml").exists(),
-                         "config.toml is in the project tree; it is a build "
-                         "artefact and the deliverable must not carry one")
+        # A config.toml that ships is one machine's state, and it would arrive in
+        # a club's copy naming somebody else's club, teams and captains. The
+        # README's whole opening is that the first run writes this file.
+        #
+        # So in a repository that holds the project the question is what ships,
+        # and not what is in the folder (4.524): a club's own clone has the
+        # config.toml its first build wrote, gitignored as it should be, and
+        # failed here for having it (/tmp/mcf/ub/scratch/before-repro.txt). Git
+        # neither tracks it nor would add it, and HEAD, which every clone and
+        # every release archive is made from, does not hold it. Rejected: a skip
+        # wherever the file exists, which is the one place the question is worth
+        # asking. Anywhere else -- an unzipped release, inside a larger checkout
+        # or not, and any folder on a computer without git -- the folder is all
+        # there is to ask.
+        if not git_holds_the_project():
+            self.assertFalse((ROOT / "config.toml").exists(),
+                             "config.toml is in the project tree; it is a build "
+                             "artefact and the deliverable must not carry one")
+            return
+        self.assertEqual(git("ls-files", "--", "config.toml").split(), [],
+                         "config.toml is committed, so every clone carries it")
+        ignored = subprocess.run(("git", "check-ignore", "-q", "config.toml"),
+                                 cwd=ROOT, capture_output=True, env=git_env())
+        self.assertEqual(ignored.returncode, 0, "config.toml is not gitignored, so "
+                                                "the next `git add .` commits it")
+        head = subprocess.run(("git", "rev-parse", "--verify", "-q", "HEAD"),
+                              cwd=ROOT, capture_output=True, env=git_env())
+        if head.returncode != 0:
+            return                      # nothing committed, so nothing to archive
+        # The name asked of HEAD's tree, from here, so that a project inside a
+        # larger checkout is asked of its own folder. Rejected: reading `git
+        # archive HEAD` back as a tar, which from a folder HEAD holds nothing of
+        # is a tar with no member, and tarfile will not open one.
+        held = subprocess.run(("git", "ls-tree", "--name-only", "HEAD", "--",
+                               "config.toml"), cwd=ROOT, capture_output=True,
+                              text=True, check=True, env=git_env()).stdout
+        self.assertEqual(held.split(), [],
+                         "HEAD carries config.toml, so every clone of it does, "
+                         "and every release archived from it")
 
     def test_no_pdf_is_tracked_anywhere_in_the_repository(self):
         tracked = [line for line in git("ls-files").splitlines()
@@ -513,6 +1022,594 @@ class TestAFreshCheckoutIsEmptyOfOnesOwnData(unittest.TestCase):
         tracked = [line for line in git("ls-files").splitlines()
                    if line.startswith("site/")]
         self.assertEqual(tracked, [], "the built dashboard is output, not source")
+
+
+class TestTheConfigTestAsksWhatShipsAndNotWhatIsInTheFolder(unittest.TestCase):
+    """The config test, run on planted projects: each way a config.toml ships fails.
+
+    4.524 made it ask git, and a test that asks git can pass by asking it the
+    wrong thing, or the wrong git. On this folder config.toml is either absent or
+    gitignored, so the tracked, the archived and the nested cases never fail
+    here, and a release inside somebody else's checkout and a computer without
+    git are never this folder: each is planted instead, with a config.toml naming
+    an invented club. Rejected: the real tree alone, where any of the three
+    halves could go and nothing fail.
+    """
+
+    TEST = "test_no_config_of_anybody_elses_ships_with_the_project"
+    CONFIG = '[club]\nname = "Invented Tennis Club"\n'
+
+    def project(self, *, ignored: bool = True, under: str = "",
+                committed: bool = True) -> Path:
+        """A clone with one commit, or none if not *committed*, and the
+        config.toml its first build wrote, in the folder *under* names inside
+        the repository if it names one."""
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-config-")
+        self.addCleanup(holder.cleanup)
+        top = Path(holder.name)
+        root = top / under if under else top
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ".gitignore").write_text("/config.toml\n" if ignored else "",
+                                         encoding="utf-8")
+        for name in ("README.md", "build.py"):
+            (root / name).write_text("A planted project.\n", encoding="utf-8")
+        git_in(top, "init", "-q")
+        git_in(top, "add", "-A")
+        if committed:
+            git_in(top, "commit", "-q", "-m", "A planted project")
+        (root / "config.toml").write_text(self.CONFIG, encoding="utf-8")
+        return root
+
+    def release_in(self, *, committed: bool) -> Path:
+        """A release unzipped, and not yet built, into a checkout kept above it
+        that tracks none of it, with one commit of something else or none."""
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-release-")
+        self.addCleanup(holder.cleanup)
+        top = Path(holder.name)
+        (top / "journal.txt").write_text("Somebody's own notes.\n", encoding="utf-8")
+        git_in(top, "init", "-q")
+        if committed:
+            git_in(top, "add", "journal.txt")
+            git_in(top, "commit", "-q", "-m", "Something else")
+        root = top / "matchcentre-dashboard"
+        root.mkdir()
+        (root / ".gitignore").write_text("/config.toml\n", encoding="utf-8")
+        for name in ("README.md", "build.py"):
+            (root / name).write_text("A planted release.\n", encoding="utf-8")
+        return root
+
+    def verdict(self, root: Path) -> str:
+        """What the config test says of *root*: nothing when it passes."""
+        case = TestAFreshCheckoutIsEmptyOfOnesOwnData(self.TEST)
+        with mock.patch.dict(globals(), ROOT=root):
+            try:
+                getattr(case, self.TEST)()
+            except case.failureException as caught:
+                return str(caught)
+        return ""
+
+    def test_the_config_a_build_writes_and_git_ignores_passes(self):
+        self.assertEqual(self.verdict(self.project()), "")
+
+    def test_a_config_git_would_add_fails(self):
+        self.assertIn("is not gitignored", self.verdict(self.project(ignored=False)))
+
+    def test_a_config_git_tracks_fails(self):
+        root = self.project()
+        git_in(root, "add", "-f", "config.toml")
+        self.assertIn("is committed", self.verdict(root))
+
+    def test_a_config_in_the_last_commit_fails_after_it_is_untracked(self):
+        # `git rm --cached` takes it out of the index and leaves it in HEAD, which
+        # is what a release is archived from.
+        root = self.project()
+        git_in(root, "add", "-f", "config.toml")
+        git_in(root, "commit", "-q", "-m", "The config too")
+        git_in(root, "rm", "-q", "--cached", "config.toml")
+        self.assertIn("HEAD carries config.toml", self.verdict(root))
+
+    def test_a_folder_made_a_repository_with_nothing_committed_yet_passes(self):
+        # `git init` in an unzipped release, after its first build: there is no
+        # HEAD to archive, and asking for one raised where nothing ships yet.
+        self.assertEqual(self.verdict(self.project(committed=False)), "")
+
+    def test_a_project_inside_a_larger_checkout_is_asked_of_its_own_folder(self):
+        # The checkout's own config.toml, committed at its top, is not the
+        # project's, and the project's is gitignored by the project's rules.
+        root = self.project(under="clubs/dashboard")
+        top = root.parent.parent
+        (top / "config.toml").write_text("[unrelated]\n", encoding="utf-8")
+        git_in(top, "add", "-f", "config.toml")
+        git_in(top, "commit", "-q", "-m", "Something else's config")
+        self.assertEqual(self.verdict(root), "")
+
+    def test_a_config_in_a_folder_git_knows_nothing_of_fails(self):
+        # No skip where the temporary folder is inside a checkout: one that does
+        # not hold the project is asked as a release unzipped is.
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-config-")
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        (root / "config.toml").write_text("[club]\n", encoding="utf-8")
+        self.assertIn("is in the project tree", self.verdict(root))
+
+    def test_a_release_inside_a_checkout_with_a_commit_is_asked_as_a_release(self):
+        # A home folder or a monorepo kept in git, with the release unzipped into
+        # it and never added. Never built, it passes, where it errored on a tar
+        # of HEAD with nothing in it; built, its config.toml fails, as base had
+        # it, because nothing says it is not one the release carried.
+        root = self.release_in(committed=True)
+        self.assertEqual(self.verdict(root), "")
+        (root / "config.toml").write_text(self.CONFIG, encoding="utf-8")
+        self.assertIn("is in the project tree", self.verdict(root))
+
+    def test_a_release_inside_a_checkout_with_no_commit_is_asked_as_one_too(self):
+        # The same with nothing committed above it, where a config.toml the
+        # release carried passed: untracked, ignored by the release's own rules,
+        # and no HEAD to look in.
+        root = self.release_in(committed=False)
+        self.assertEqual(self.verdict(root), "")
+        (root / "config.toml").write_text(self.CONFIG, encoding="utf-8")
+        self.assertIn("is in the project tree", self.verdict(root))
+
+    def test_on_a_computer_without_git_the_folder_is_asked(self):
+        # The README asks for Python and nothing else, and a release zip ships
+        # its tests: asking git there raised, before a build or after one.
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-config-")
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        (root / "build.py").write_text("A planted release.\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, PATH=str(root / "no-git-in-here")):
+            self.assertFalse(under_git())
+            self.assertEqual(self.verdict(root), "")
+            (root / "config.toml").write_text(self.CONFIG, encoding="utf-8")
+            self.assertIn("is in the project tree", self.verdict(root))
+
+    def test_without_git_a_planted_project_is_a_skip_and_not_an_error(self):
+        # Each test above that plants a clone, and the two in test_foundation.
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-config-")
+        self.addCleanup(holder.cleanup)
+        with mock.patch.dict(os.environ, PATH=str(Path(holder.name) / "no-git")):
+            with self.assertRaises(unittest.SkipTest):
+                git_in(Path(holder.name), "init", "-q")
+        self.assertFalse((Path(holder.name) / ".git").exists())
+
+    def test_without_git_nothing_is_tracked_here(self):
+        # The four that ask git() what is tracked (a card, a note, bytecode, the
+        # site) errored without git, in base too, where an unzipped release on a
+        # computer with git passes them, tracking nothing.
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-config-")
+        self.addCleanup(holder.cleanup)
+        with mock.patch.dict(os.environ, PATH=str(Path(holder.name) / "no-git")):
+            self.assertEqual(git("ls-files"), "")
+
+    def test_the_readme_names_it_as_the_one_an_unzipped_release_fails(self):
+        # The case above is a club's: a release unzipped, built once, and the
+        # whole suite run, on its own, inside a checkout of something else, or on
+        # a computer without git. Each fails this one test and no other
+        # (/tmp/mcf/ub/scratch/repair1-unzipped.txt), and the README's "Checking
+        # the tool itself" says so by name. Renamed, the README would send a club
+        # looking for a test that is not there. Rejected: a skip outside git,
+        # which would pass a release zip that carried somebody's config.toml.
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"`{self.TEST}`", readme)
+
+
+class TestASuiteRunByGitLeavesTheRepositoryThatRanItAlone(unittest.TestCase):
+    """The tests that plant a repository, run as git runs a contributor's command.
+
+    A hook, ``git rebase -x``, ``git bisect run`` and a ``!`` alias each run it
+    with the repository named in the environment, and the planted projects'
+    git was given those variables with the rest of os.environ (4.524; see
+    :func:`git_env`). Here a decoy repository stands in for the contributor's,
+    named by GIT_DIR and by a GIT_INDEX_FILE beside its index, as `git commit
+    -a` hands its hook one. It holds a build.py, a README.md and a config.toml,
+    committed, so that a planted project asked of it is given a wrong answer as
+    well as a written one. Every test that plants a repository is run with it,
+    in one child: each passes, none skips, and the decoy's config, its two
+    indexes, its HEAD, its refs and its objects are what they were. Before
+    git_env(), four of this module's and test_foundation's failed and the
+    decoy took ten planted commits, and under ``git rebase -x`` in a linked
+    worktree the clone it was linked to was left core.bare=true
+    (/tmp/mcf/ub/scratch/repair2-hermetic.txt); test_release, base's, errored
+    36 and failed one, and left five commits and two tags
+    (/tmp/mcf/ub/scratch/repair2-release.txt). Rejected: a decoy with nothing
+    committed, which a planted project reading it would not notice; and a run
+    of the planted tests alone, when every git a test runs is asked of the
+    repository the environment names, which the scan below holds.
+    """
+
+    # Every test that plants a repository, as planters_of_a_repository finds
+    # them, but for the PLANTS_UNRUN.
+    PLANTING = (
+        "test_foundation.TestNoClubSpecificsLeaked"
+        ".test_a_file_git_ignores_is_not_read_and_one_it_would_add_is",
+        "test_foundation.TestNoClubSpecificsLeaked"
+        ".test_outside_a_work_tree_every_file_is_read",
+        "test_foundation.TestNoClubSpecificsLeaked"
+        ".test_inside_a_checkout_that_ignores_it_every_file_is_read_too",
+        "test_project_complete.TestEveryFileOfCodeThatShipsIsOnTheList"
+        ".test_in_a_clone_git_is_asked_and_what_it_leaves_out_is_not_named",
+        "test_project_complete.TestTheConfigTestAsksWhatShipsAndNotWhatIsInTheFolder",
+        # Whole, four seconds: its tool runs git in the projects it plants.
+        "test_release",
+    )
+    # Each plants one and is not run with the decoy, and why.
+    PLANTS_UNRUN = {
+        "test_project_complete.TestTheTestsThatReadTheFolderPassInAClubsOwnCopyOfIt":
+            "its clone is made by git_in, as each planted project above is, "
+            "and the copy and its child take half a minute",
+        "test_project_complete.TestASuiteRunByGitLeavesTheRepositoryThatRanItAlone":
+            "this class, which makes the decoy with git_in and would run "
+            "itself in its own child",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("git") is None:
+            raise unittest.SkipTest("no git to make a decoy with")
+        holder = tempfile.TemporaryDirectory(prefix="test-decoy-")
+        cls.addClassCleanup(holder.cleanup)
+        cls.decoy = Path(holder.name) / "a-contributors-clone"
+        cls.decoy.mkdir()
+        for name in ("README.md", "build.py", "config.toml"):
+            (cls.decoy / name).write_text('name = "Invented Tennis Club"\n',
+                                          encoding="utf-8")
+        git_in(cls.decoy, "init", "-q")
+        git_in(cls.decoy, "add", "-f", "README.md", "build.py", "config.toml")
+        git_in(cls.decoy, "commit", "-q", "-m", "A contributor's work")
+        named = cls.decoy / ".git"
+        shutil.copy2(named / "index", named / "next-index.lock")
+        cls.before = cls.state()
+        cls.child = subprocess.run(
+            (sys.executable, "-m", "unittest", *cls.PLANTING),
+            cwd=ROOT / "tests", capture_output=True, text=True, timeout=600,
+            env=dict(os.environ, GIT_DIR=str(named),
+                     GIT_INDEX_FILE=str(named / "next-index.lock"),
+                     PYTHONDONTWRITEBYTECODE="1"))
+        cls.after = cls.state()
+
+    @classmethod
+    def state(cls) -> dict[str, bytes | list[str]]:
+        """What the decoy's repository holds, as git would read it back."""
+        named = cls.decoy / ".git"
+        held = {name: (named / name).read_bytes()
+                for name in ("config", "index", "next-index.lock", "HEAD")}
+        for folder in ("refs", "objects"):
+            held[folder] = sorted(
+                f"{path.relative_to(named).as_posix()} {path.read_bytes()!r}"
+                for path in (named / folder).rglob("*") if path.is_file())
+        return held
+
+    def test_each_test_that_plants_a_repository_passes_with_another_one_named(self):
+        printed = (self.child.stdout + self.child.stderr).strip()
+        self.assertEqual(self.child.returncode, 0,
+                         f"with a contributor's repository named:\n{printed[-3000:]}")
+        self.assertEqual(printed.splitlines()[-1], "OK", printed[-2000:])
+
+    def test_the_repository_named_is_as_it_was(self):
+        for part, held in self.before.items():
+            with self.subTest(part=part):
+                self.assertEqual(self.after[part], held,
+                                 f"the decoy's {part} was written to")
+
+    def test_every_variable_this_git_names_a_repository_by_is_left_out(self):
+        # Held to the git this runs with, so that a later git's new variable is
+        # named here and not found by a contributor's hook. Each set to a decoy.
+        named = subprocess.run(("git", "rev-parse", "--local-env-vars"),
+                               capture_output=True, text=True, check=True,
+                               env=git_env()).stdout.split()
+        self.assertIn("GIT_DIR", named)
+        with mock.patch.dict(os.environ, {name: "decoy" for name in named}):
+            passed_on = sorted(set(named) & set(git_env()))
+        self.assertEqual(passed_on, [], "git names a repository by these, and "
+                                        "git_env() passes them on: add them to "
+                                        "THE_CALLERS_REPOSITORY")
+
+    def test_every_git_a_test_runs_is_given_that_environment(self):
+        # Every module's, ROOT's questions among them: test_demo's check-ignore
+        # of ROOT asked the decoy's ignore rules.
+        found = [f"tests/{path.name}:{line}"
+                 for path in sorted((ROOT / "tests").glob("test_*.py"))
+                 for line in gits_not_given_git_env(
+                     path.read_text(encoding="utf-8"))]
+        self.assertEqual(found, [], "a git run without git_env()")
+
+    def test_a_git_given_some_other_environment_is_found(self):
+        # Fictional: none, the caller's own, and a copy of it, each found; the
+        # two given it, not.
+        source = ('subprocess.run(("git", "init"), cwd=root)\n'
+                  'subprocess.run(("git", "add"), env=os.environ)\n'
+                  'subprocess.run(("git", *argv), env=dict(os.environ, A="1"))\n'
+                  'subprocess.run(("git", "status"), env=git_env())\n'
+                  'subprocess.run(("git", "log"), env=PLANTED_GIT)\n'
+                  'subprocess.run(("python3", "-m", "unittest"), cwd=root)\n')
+        self.assertEqual(gits_not_given_git_env(source), [1, 2, 3])
+
+    def test_every_test_that_plants_a_repository_is_run_with_the_decoy(self):
+        found = set()
+        for path in sorted((ROOT / "tests").glob("test_*.py")):
+            found |= planters_of_a_repository(
+                path.stem, path.read_text(encoding="utf-8"))
+        covered = (*self.PLANTING, *self.PLANTS_UNRUN)
+        unrun = sorted(name for name in found
+                       if not any(name == entry or name.startswith(f"{entry}.")
+                                  for entry in covered))
+        self.assertEqual(unrun, [], "a test that plants a repository, and is "
+                                    "not run here with one named")
+        # And each exemption is for a class that still plants one.
+        self.assertEqual(sorted(set(self.PLANTS_UNRUN) - found), [])
+
+    def test_a_test_planting_through_a_helper_or_its_set_up_is_found(self):
+        # Fictional: through a method, a function of the module, setUp, a
+        # base's setUp, and a function that runs git as and where it is told;
+        # not one that asks ROOT.
+        source = (
+            "def made(root):\n    git_in(root, 'init')\n"
+            "class Planted(unittest.TestCase):\n"
+            "    def project(self):\n        return made(Path('.'))\n"
+            "    def test_through_a_method(self):\n        self.project()\n"
+            "    def test_directly(self):\n        git_in(Path('.'), 'init')\n"
+            "    def test_not_at_all(self):\n        pass\n"
+            "class SetUp(unittest.TestCase):\n"
+            "    def setUp(self):\n        self.root = made(Path('.'))\n"
+            "    def test_any(self):\n        pass\n"
+            "class Inherited(SetUp):\n"
+            "    def test_more(self):\n        pass\n"
+            "def runner(root, *argv):\n"
+            "    subprocess.run(('git', *argv), cwd=root)\n"
+            "def asks_root(*argv):\n"
+            "    subprocess.run(('git', *argv), cwd=ROOT)\n"
+            "class Run(unittest.TestCase):\n"
+            "    def test_by_a_runner(self):\n        runner(Path('.'), 'init')\n"
+            "    def test_of_root(self):\n        asks_root('status')\n")
+        self.assertEqual(sorted(planters_of_a_repository("planted", source)),
+                         ["planted.Inherited",
+                          "planted.Planted.test_directly",
+                          "planted.Planted.test_through_a_method",
+                          "planted.Run.test_by_a_runner",
+                          "planted.SetUp"])
+
+
+class TestTheTestsThatReadTheFolderPassInAClubsOwnCopyOfIt(unittest.TestCase):
+    """The tests that read this folder pass in a club's own working copy of it.
+
+    4.524. A club's clone that it also builds its dashboard in, which is the copy
+    the README leaves anybody who follows it, failed three of them ("Ran 18 tests
+    ... FAILED (failures=3)", /tmp/mcf/ub/scratch/before-repro.txt; the whole
+    suite there, as the row reported it, FAILED (failures=3, skipped=2)): the
+    README's block for an empty data/, because build.py rightly pointed at the
+    demo's cards beside it; the config test, because config.toml was there,
+    gitignored as it should be; and the version test, because the demo's season
+    was in data/ before anything asked. Each read the state of the folder where
+    the question was what ships, or what the program does in a fresh copy.
+    Measured on the most lived-in copy a club plausibly keeps
+    (/tmp/mcf/ub/lived-survey), those three failed and nothing else did; pip in
+    a .venv failed one more, and an editor's lock file beside build.py, a link
+    to nothing, errored eighteen (/tmp/mcf/ub/scratch/before-venv.txt,
+    before-symlink.txt).
+
+    So a copy is made here as a club has it -- a git clone, the demo's cards in
+    data/, config.toml and site/ as a build writes them, a .venv and a lock file
+    -- and two kinds of test are run in it, in one child: the classes of the
+    twenty-two that failed or errored there, and every test that walks the
+    folder, which ``walkers_of_the_folder`` finds and a test below holds NESTED
+    to, but for the WALKS_UNRUN and why each is. That is 45 tests, and the
+    class, copy and all, took 26.8 s alone
+    (/tmp/mcf/ub/scratch/repair2-meta-alone.txt). None of them may skip
+    there, where a skip guards nothing: a test below finds every skip they
+    can reach, and SKIPS_RULED_OUT says why the copy rules out each it leaves.
+    Rejected: the whole suite in that copy, whose parts sum to 1374 s, 362 s
+    four at a time (/tmp/mcf/ub/fix/two-suites.log, its second run, which is
+    a club's copy's); the twenty-two alone, picked by hand and named as if
+    they were every test that reads the folder, which left five that walk it
+    unasked there; a skip wherever a config.toml is, which hides the guard in
+    the one copy that has a config.toml to ship.
+    """
+
+    NESTED = (
+        # The classes of the twenty-two that failed or errored in a club's copy
+        # before 4.524.
+        "test_cli.TestTheReadmeQuotesBothEmptyHandedReports",
+        "test_cli.TestARunFromSomewhereElseSaysWhereTheCardsAre",
+        "test_project_complete.TestAFreshCheckoutIsEmptyOfOnesOwnData",
+        "test_project_complete.TestEveryCommandCanSayWhichVersionItIs",
+        "test_project_complete.TestEveryFileOfCodeThatShipsIsOnTheList",
+        "test_scheduled.TestTheWrapperNeverWritesIntoTheCheckout",
+        # And the tests that walk the folder, which none of those classes holds.
+        "test_cli.TestNothingLeaksIntoTheProject"
+        ".test_a_run_writes_nothing_inside_the_checkout",
+        "test_fetch.TestTheFetcherWritesOnlyIntoItsFolder",
+        "test_project_complete.TestTheDesignNotesStayPrivate"
+        ".test_nothing_published_points_a_reader_at_an_unpublished_file",
+        "test_project_complete.TestALeakInTheRedactorHasSomewhereToGoThatIsNotPublic"
+        ".test_every_document_that_asks_for_the_flag_names_the_policy",
+        "test_project_complete.TestTheVersionNumberIsOneNumber"
+        ".test_every_example_of_the_report_line_quotes_the_version_in_the_code")
+    # Each walks the folder and is not run in the copy, and why. Not this class
+    # either, which would make a copy inside the copy, and so on down.
+    WALKS_UNRUN = {
+        "test_foundation.TestNoClubSpecificsLeaked.shipped_files":
+            "the leak scan's files: its two tests skip where the private list "
+            "of terms is absent, as it is in every club's copy, and what it "
+            "picks is asked of planted projects in test_foundation",
+        "test_scheduled._reports_listing":
+            "the scheduled tests' guard that none of them writes into the real "
+            "reports/, read before and after each: the copy has no reports/ "
+            "until a club schedules a build, and the lived-in suite has one",
+    }
+    # Each skip a test it names can reach, and why the copy rules it out: a run
+    # there that skips says "OK (skipped=N)", which fails, and on a system where
+    # it is the only one to (4.524, repair 2: the wrapper's two link tests on
+    # Windows) nothing here would show it but that system's run.
+    SKIPS_RULED_OUT = {
+        "not inside a git checkout":
+            "the copy is a clone with a commit, which the first test here holds",
+        "not inside a git checkout, so there is no way to tell a shipped file "
+        "from one a club added":
+            "the copy is a clone with a commit, which the first test here holds",
+        "no git to plant a project with":
+            "without git this class skips before it makes the copy",
+        "no git to plant a clone with":
+            "without git this class skips before it makes the copy",
+    }
+    # What an editor leaves beside a file it has open: Emacs's lock, a link to a
+    # name that is not a file.
+    LOCK = ".#build.py"
+
+    @classmethod
+    def runs_itself(cls, names) -> list[str]:
+        """The names in *names* that would run this class again; with no name,
+        the empty one, since ``python3 -m unittest`` given none finds every test."""
+        if not names:
+            return [""]
+        mine = f"test_project_complete.{cls.__name__}"
+        return [name for name in names
+                if mine == name or mine.startswith(f"{name}.")
+                or name.startswith(f"{mine}.")]
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("git") is None:
+            raise unittest.SkipTest("no git to clone with")
+        holder = tempfile.TemporaryDirectory(prefix="test-club-copy-")
+        cls.addClassCleanup(holder.cleanup)
+        cls.copy = Path(holder.name) / "dashboard"
+        for name in (*REQUIRED, "data/README.md", "data/.gitkeep"):
+            if (ROOT / name).is_file():
+                (cls.copy / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / name, cls.copy / name)
+        (cls.copy / "data").mkdir(exist_ok=True)
+        for argv in (("init", "-q"), ("add", "-A"),
+                     ("commit", "-q", "-m", "The project, as a clone has it")):
+            git_in(cls.copy, *argv)
+        # The README's first two commands, as it gives them.
+        for entry in ("tools/demo.py", "build.py"):
+            subprocess.run((sys.executable, str(cls.copy / entry)), cwd=cls.copy,
+                           env=PLANTED_GIT, capture_output=True, timeout=300)
+        packages = (cls.copy / ".venv" / "lib"
+                    / f"python{sys.version_info[0]}.{sys.version_info[1]}"
+                    / "site-packages" / "pip")
+        packages.mkdir(parents=True)
+        (cls.copy / ".venv" / "pyvenv.cfg").write_text(
+            "include-system-site-packages = false\n", encoding="utf-8")
+        (packages / "__init__.py").write_text(
+            '"""What `python3 -m venv .venv` installs before 3.13."""\n',
+            encoding="utf-8")
+        try:
+            os.symlink("secretary@clubhouse.4242:1760000000", cls.copy / cls.LOCK)
+        except OSError:
+            pass                        # a system with no links has no such lock
+        cls.child = None
+        # The copy is a clone of its own, and nothing of a repository that ran
+        # this suite is its: a test of base's that asks git without git_env()
+        # asks the copy's.
+        if not cls.runs_itself(cls.NESTED):
+            cls.child = subprocess.run(
+                (sys.executable, "-m", "unittest", *cls.NESTED),
+                cwd=cls.copy / "tests", capture_output=True, text=True,
+                timeout=600, env=git_env(PYTHONDONTWRITEBYTECODE="1"))
+
+    def test_the_copy_is_a_club_s_with_its_cards_its_config_and_its_site(self):
+        cards = list((self.copy / "data").rglob("*.pdf"))
+        self.assertTrue(cards, "the copy has no card in data/")
+        for made in ("config.toml", "site/index.html",
+                     ".venv/lib/python{0}.{1}/site-packages/pip/__init__.py"
+                     .format(*sys.version_info)):
+            with self.subTest(path=made):
+                self.assertTrue((self.copy / made).is_file(),
+                                f"the copy has no {made}")
+        if os.name == "posix":          # where an editor's lock is a link
+            self.assertTrue(os.path.islink(self.copy / self.LOCK),
+                            f"the copy has no {self.LOCK}")
+        done = subprocess.run(("git", "rev-parse", "--verify", "-q", "HEAD"),
+                              cwd=self.copy, capture_output=True, env=git_env())
+        self.assertEqual(done.returncode, 0, "the copy is not a clone with a commit")
+
+    def test_each_test_it_names_passes_in_it(self):
+        self.assertIsNotNone(self.child, f"{self.NESTED} would run this class "
+                                         f"again inside its own copy")
+        printed = (self.child.stdout + self.child.stderr).strip()
+        self.assertEqual(self.child.returncode, 0,
+                         f"in a club's copy:\n{printed}")
+        # And none skipped: a test that skips in a club's copy guards nothing there.
+        self.assertEqual(printed.splitlines()[-1], "OK", printed[-2000:])
+
+    def test_nothing_it_names_can_skip_in_the_copy_on_any_system(self):
+        reached, ruled_out = [], set()
+        for name in self.NESTED:
+            module, _, entry = name.partition(".")
+            source = (ROOT / "tests" / f"{module}.py").read_text(encoding="utf-8")
+            for line, why in skips_reached(source, entry):
+                if why in self.SKIPS_RULED_OUT:
+                    ruled_out.add(why)
+                else:
+                    reached.append(f"{module}.py:{line} {why}")
+        self.assertEqual(reached, [], "each can skip in a club's copy, on some "
+                                      "system or in some copy, and so fail it")
+        self.assertEqual(sorted(set(self.SKIPS_RULED_OUT) - ruled_out), [],
+                         "ruled out, and no test named here can take it now")
+
+    def test_a_skip_in_a_base_a_decorator_or_a_helper_is_reached(self):
+        source = (
+            "import os, unittest\n"                                   # 1
+            "def helper():\n"                                         # 2
+            "    deeper()\n"                                          # 3
+            "def deeper():\n"                                         # 4
+            "    raise unittest.SkipTest('deep in a helper')\n"       # 5
+            "def unasked():\n"                                        # 6
+            "    raise unittest.SkipTest('in a function none calls')\n"  # 7
+            "@unittest.skipIf(os.name != 'posix', 'on the base')\n"   # 8
+            "class Base(unittest.TestCase):\n"                        # 9
+            "    def setUp(self):\n"                                  # 10
+            "        self.skipTest(f'in {os.name}')\n"                # 11
+            "class Named(Base):\n"                                    # 12
+            "    def planted(self):\n"                                # 13
+            "        helper()\n"                                      # 14
+            "    @unittest.skipUnless(True, reason='on the test')\n"  # 15
+            "    def test_named(self):\n"                             # 16
+            "        self.planted()\n"                                # 17
+            "    @unittest.skip('on another test')\n"                 # 18
+            "    def test_other(self):\n"                             # 19
+            "        pass\n")                                         # 20
+        named = [(5, "deep in a helper"), (8, "on the base"),
+                 (11, "f'in {os.name}'"), (15, "on the test")]
+        self.assertEqual(skips_reached(source, "Named.test_named"), named)
+        self.assertEqual(skips_reached(source, "Named"),
+                         sorted(named + [(18, "on another test")]))
+        self.assertEqual(skips_reached(source, "Base"),
+                         [(8, "on the base"), (11, "f'in {os.name}'")])
+
+    def test_it_runs_none_of_itself(self):
+        self.assertEqual(self.runs_itself(self.NESTED), [])
+        # The module, the class and one of its tests each run it; a neighbour,
+        # and a class whose name only begins like this one's, do not.
+        mine = f"test_project_complete.{type(self).__name__}"
+        itself = ["test_project_complete", mine, f"{mine}.test_it_runs_none_of_itself"]
+        others = ["test_cli", f"{mine}Too", "test_project_complete.TestAFresh"
+                                           "CheckoutIsEmptyOfOnesOwnData"]
+        self.assertEqual(self.runs_itself(itself + others), itself)
+        # No name at all is every test, this class among them.
+        self.assertEqual(self.runs_itself(()), [""])
+
+    def test_every_test_that_walks_the_folder_is_one_it_names(self):
+        found = set()
+        for path in sorted((ROOT / "tests").glob("test_*.py")):
+            found |= walkers_of_the_folder(path.stem,
+                                           path.read_text(encoding="utf-8"))
+        # Seen written out, through a helper it is handed to, and through a name.
+        for walker in ("test_project_complete.TestEveryFileOfCodeThatShipsIsOnTheList"
+                       ".test_every_one_is_required_or_exempt_for_a_reason",
+                       "test_scheduled.TestTheWrapperNeverWritesIntoTheCheckout"
+                       ".test_print_schedule_names_the_real_script_and_writes_nothing",
+                       "test_scheduled._reports_listing"):
+            self.assertIn(walker, found, "the finder no longer sees this walk")
+        unasked = sorted(walker for walker in found - set(self.WALKS_UNRUN)
+                         if not any(walker == name or walker.startswith(f"{name}.")
+                                    for name in self.NESTED))
+        self.assertEqual(unasked, [], "each walks this folder and is never run in "
+                                      "a club's copy of it")
+        self.assertEqual(sorted(set(self.WALKS_UNRUN) - found), [],
+                         "named as walking the folder, and no longer does")
 
 
 class TestTheReportsFolderIsNeitherShippedNorScanned(unittest.TestCase):
@@ -590,7 +1687,7 @@ class TestTheReportsFolderIsNeitherShippedNorScanned(unittest.TestCase):
         for path in ("reports/2026-09-24_040002.txt", "reports/last-run.json"):
             with self.subTest(path=path):
                 result = subprocess.run(("git", "check-ignore", "-q", path),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True, env=git_env())
                 self.assertEqual(result.returncode, 0,
                                  f"{path} is not gitignored, and a report names "
                                  f"every player")
@@ -646,7 +1743,7 @@ class TestTheCopyWithoutNamesIsNeitherCommittedNorScanned(unittest.TestCase):
             probe = f"{path}/last-run.json" if kind == "folder" else path
             with self.subTest(path=probe):
                 result = subprocess.run(("git", "check-ignore", "-q", probe),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True, env=git_env())
                 self.assertEqual(result.returncode, 0,
                                  f"{probe} is not gitignored")
             self.assertEqual(git("ls-files", path).split(), [])
@@ -716,7 +1813,7 @@ class TestGitIgnoresTheProposalDiscoverWritesBesideAConfig(unittest.TestCase):
         for path in proposals:
             with self.subTest(path=path):
                 result = subprocess.run(("git", "check-ignore", "-q", path),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True, env=git_env())
                 self.assertEqual(result.returncode, 0,
                                  f"{path} is not gitignored, so a club would "
                                  f"publish its members' names on the next "
@@ -936,7 +2033,7 @@ class TestTheDesignNotesStayPrivate(unittest.TestCase):
             relative = path.relative_to(ROOT).as_posix()
             with self.subTest(note=relative):
                 result = subprocess.run(("git", "check-ignore", "-q", relative),
-                                        cwd=ROOT, capture_output=True)
+                                        cwd=ROOT, capture_output=True, env=git_env())
                 self.assertEqual(result.returncode, 0,
                                  f"{relative} is not gitignored and would be "
                                  f"published to GitHub")
@@ -1467,12 +2564,22 @@ class TestEveryCommandCanSayWhichVersionItIs(unittest.TestCase):
         self.empty = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
 
-    def ask(self, entry: str) -> subprocess.CompletedProcess:
+    def ask(self, entry: str,
+            project: Path | None = None) -> subprocess.CompletedProcess:
         # Run from a directory with no `data/`, no `config.toml` and nothing else
         # in it, because that is the state of the copy this flag exists for.
-        return subprocess.run((sys.executable, str(ROOT / entry), "--version"),
+        return subprocess.run((sys.executable, str((project or ROOT) / entry),
+                               "--version"),
                               cwd=self.empty, capture_output=True, text=True,
                               timeout=120)
+
+    @staticmethod
+    def files_in(project: Path) -> list[str]:
+        """Every file under *project* but bytecode, by its path there."""
+        return sorted((Path(folder) / name).relative_to(project).as_posix()
+                      for folder, folders, names in os.walk(project)
+                      if "__pycache__" not in Path(folder).parts
+                      for name in names)
 
     def version(self) -> str:
         import matchcentre
@@ -1539,9 +2646,34 @@ class TestEveryCommandCanSayWhichVersionItIs(unittest.TestCase):
         # output folder. A command that writes a `config.toml` or a `site/` on its
         # way to printing one line is one that cannot be run on a folder somebody
         # else owns.
+        #
+        # Asked of a fresh copy's commands, not this folder's (4.524). This
+        # folder is a club's as often as not, with the demo's season in data/
+        # before anything asked, and the test failed there for cards no version
+        # flag wrote (/tmp/mcf/ub/scratch/before-repro.txt). A copy made here has
+        # no card until one is written, so what it holds afterwards is a
+        # difference from a baseline taken in this test, which no earlier test
+        # can have filled. Rejected: a skip wherever data/ holds a card, which is
+        # wherever the README has been followed.
+        #
+        # And each command must answer in the copy, as the tests above have it
+        # answer here: one the copy does not carry, or that needs a file the
+        # copy leaves out, would fail to start, write nothing, and pass both
+        # checks below unasked. Planted, scripts/tool.py writing a card and then
+        # its line did exactly that while the answer went unread
+        # (/tmp/mcf/ub/scratch/repair1-version.txt).
+        import matchcentre
+        holder = tempfile.TemporaryDirectory(prefix="test-version-")
+        self.addCleanup(holder.cleanup)
+        project = copy_of_a_fresh_checkout(Path(holder.name) / "project")
+        before = self.files_in(project)
         for entry in ENTRY_POINTS:
             with self.subTest(command=entry):
-                self.ask(entry)
+                done = self.ask(entry, project)
+                self.assertEqual((done.returncode, done.stdout.strip()),
+                                 (0, matchcentre.version_line()),
+                                 f"python3 {entry} --version did not answer in a "
+                                 f"fresh copy: {done.stderr[-800:]}")
                 left = sorted(p.name for p in self.empty.iterdir())
                 self.assertEqual(left, [], f"python3 {entry} --version wrote "
                                            f"{left} into the directory it was run "
@@ -1552,17 +2684,11 @@ class TestEveryCommandCanSayWhichVersionItIs(unittest.TestCase):
         # handled after the work instead of during the parse -- which is how one
         # gets written by hand -- prints the right line and leaves a fictional
         # season behind it.
-        #
-        # Asserted as an absence rather than as a difference from a baseline taken
-        # at the top of this test, because the tests above have already asked every
-        # command the same question: by the time a baseline was measured the
-        # season would already be there, and every later run would write the same
-        # bytes to the same paths and look like a difference of nothing.
-        cards = sorted(p.relative_to(ROOT).as_posix()
-                       for p in (ROOT / "data").rglob("*.pdf"))
-        self.assertEqual(cards, [], f"asking for a version left {len(cards)} "
-                                    f"scorecard(s) in the project's data folder: "
-                                    f"{cards}")
+        written = sorted(set(self.files_in(project)) - set(before))
+        cards = [name for name in written if name.endswith(".pdf")]
+        self.assertEqual(written, [], f"asking for a version wrote {len(written)} "
+                                      f"file(s) into the project, {len(cards)} of "
+                                      f"them scorecards: {written}")
 
     def test_no_command_builds_the_line_for_itself(self):
         # The equality test above catches the copies drifting apart only while every

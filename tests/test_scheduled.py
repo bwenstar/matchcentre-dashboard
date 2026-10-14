@@ -1592,16 +1592,89 @@ class TestTheCronLineIsQuotedEscapedAndSilent(StubRootCase):
 class TestTheWrapperNeverWritesIntoTheCheckout(unittest.TestCase):
     """With the default root it names this checkout, and still creates nothing."""
 
+    @staticmethod
+    def entries(root: Path) -> list[tuple[str, int, int | None]]:
+        """Each entry at the top of *root*: its name, its own time, and the time
+        of what it leads to, or None where it leads nowhere.
+
+        Both times (4.524). Followed alone, as base had it, an editor's lock file
+        beside build.py, a link to a name that is not a file, raised in a club's
+        copy before anything was asked (/tmp/mcf/ub/scratch/before-symlink.txt).
+        Read alone, as 4.524 first had it, a link's own time missed a report
+        written through a reports/ that links to a folder kept elsewhere, which
+        base caught (/tmp/mcf/ub/scratch/repair1-wrapper.txt). Rejected: leaving
+        links out, which would miss one the wrapper wrote.
+        """
+        return sorted((p.name, p.lstat().st_mtime_ns,
+                       p.stat().st_mtime_ns if p.exists() else None)
+                      for p in root.iterdir() if p.name != "__pycache__")
+
     def test_print_schedule_names_the_real_script_and_writes_nothing(self):
-        before = sorted((p.name, p.stat().st_mtime_ns) for p in ROOT.iterdir()
-                        if p.name != "__pycache__")
+        before = self.entries(ROOT)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(scheduled.main(["--print-schedule"]), 0)
         self.assertIn(f" {pasteable(str(ROOT / 'tools' / 'scheduled.py'))} ",
                       out.getvalue())
-        self.assertEqual(sorted((p.name, p.stat().st_mtime_ns) for p in ROOT.iterdir()
-                                if p.name != "__pycache__"), before)
+        self.assertEqual(self.entries(ROOT), before)
+
+
+class TestTheWrapperTestReadsALinkAsALinkAndAsWhereItLeads(unittest.TestCase):
+    """The test above, asked of a planted checkout with a link of each kind in it.
+
+    A class of their own (4.524, repair 2). In the test's class, which
+    test_project_complete runs in a club's copy and asks to end "OK", their
+    skip where a lock is not a link ended that run "OK (skipped=2)" on any
+    system but a POSIX one, and failed it there
+    (/tmp/mcf/ub/scratch/repair2-windows.txt). What they ask is of the test,
+    and not of the copy it runs in. Rejected: dropping the skip, when Windows
+    makes a link only for an account allowed to; and "OK (skipped=2)" taken
+    as a pass in the copy, which passes the next test that skips there too.
+    """
+
+    TEST = "test_print_schedule_names_the_real_script_and_writes_nothing"
+
+    def planted(self) -> Path:
+        """A checkout with a lock beside build.py that links to nothing, and a
+        reports/ that links to a folder kept elsewhere, unchanged since 2001."""
+        if os.name != "posix":
+            self.skipTest("a lock that is a link is a POSIX editor's")
+        holder = tempfile.TemporaryDirectory(prefix="test-planted-wrapper-")
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name) / "dashboard"
+        elsewhere = Path(holder.name) / "reports-kept-elsewhere"
+        root.mkdir()
+        elsewhere.mkdir()
+        (root / "build.py").write_text("", encoding="utf-8")
+        os.symlink("secretary@clubhouse.4242:1760000000", root / ".#build.py")
+        os.symlink(elsewhere, root / "reports", target_is_directory=True)
+        os.utime(elsewhere, ns=(10**18, 10**18))
+        return root
+
+    def asked_of(self, root: Path, *, writes: bool) -> str:
+        """What the test above says of *root*, with a wrapper standing in that
+        prints the line, and first writes a report if *writes*: nothing when it
+        passes."""
+        def wrapper(argv):
+            if writes:
+                (root / "reports" / "build-1.txt").write_text("A report.\n",
+                                                              encoding="utf-8")
+            print(f" {pasteable(str(root / 'tools' / 'scheduled.py'))} ")
+            return 0
+        case = TestTheWrapperNeverWritesIntoTheCheckout(self.TEST)
+        with mock.patch.dict(globals(), ROOT=root), \
+                mock.patch.object(scheduled, "main", wrapper):
+            try:
+                getattr(case, self.TEST)()
+            except case.failureException as caught:
+                return str(caught)
+        return ""
+
+    def test_a_lock_that_links_to_nothing_is_not_followed(self):
+        self.assertEqual(self.asked_of(self.planted(), writes=False), "")
+
+    def test_a_report_written_through_a_linked_folder_is_seen(self):
+        self.assertIn("'reports'", self.asked_of(self.planted(), writes=True))
 
 
 # --- the real program -------------------------------------------------------

@@ -7397,7 +7397,21 @@ class TestNoClubSpecificsLeaked(unittest.TestCase):
 
     @classmethod
     def shipped_files(cls):
-        for path in sorted(ROOT.rglob("*")):
+        # In a work tree, the files git tracks and the ones it would add, and not
+        # whatever else the folder holds (4.524). A copy that has built a
+        # dashboard for a club these terms name has that club's config.toml in
+        # it, gitignored as it should be, and the scan read it: measured on a
+        # clone whose config.toml names an invented club, with the terms
+        # patched to that name, 1 club-specific reference
+        # (/tmp/mcf/ub/scratch/before-leakscan.txt). Outside a work tree, as in
+        # an unzipped release, every file. Rejected: config.toml left out by
+        # name, which still reads public.toml, the proposals and any file
+        # --config names.
+        from test_project_complete import files_git_would_ship
+        paths = files_git_would_ship(ROOT)
+        if paths is None:
+            paths = ROOT.rglob("*")
+        for path in sorted(paths):
             if not path.is_file():
                 continue
             if set(path.relative_to(ROOT).parts) & cls.SKIP_DIRS:
@@ -7485,6 +7499,54 @@ class TestNoClubSpecificsLeaked(unittest.TestCase):
             "  example.py:1: 'odile ecrin' in slugify(\"Odile Écrin\")",
             "  example.py:2: 'odile-ecrin' in \"odile-ecrin\"",
             "  example.py:3: 'zelie marchetti' in ZELIE MARCHETTI"])
+
+    def planted(self, root: Path, *, git: bool) -> list[str]:
+        """What :meth:`shipped_files` reads of a planted project at *root*: a
+        README.md and a build.py, and a config.toml and a public.toml that each
+        name an invented club, where .gitignore names only the first. In a git
+        work tree of its own if *git*, with the first two committed.
+        """
+        from test_project_complete import git_in
+        (root / ".gitignore").write_text("/config.toml\n", encoding="utf-8")
+        for name in ("README.md", "build.py", "config.toml", "public.toml"):
+            (root / name).write_text('name = "Wattle Hollow Tennis Club"\n',
+                                     encoding="utf-8")
+        if git:
+            git_in(root, "init", "-q")
+            git_in(root, "add", "README.md", "build.py")
+            git_in(root, "commit", "-q", "-m", "A planted project")
+        with mock.patch.dict(globals(), ROOT=root):
+            return [path.relative_to(root).as_posix()
+                    for path in self.shipped_files()]
+
+    def test_a_file_git_ignores_is_not_read_and_one_it_would_add_is(self):
+        # Fictional. The config a build writes is not what a clone receives, and
+        # a public.toml the rules forgot is, as are the files committed (4.524).
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self.planted(Path(tmp), git=True),
+                             ["README.md", "build.py", "public.toml"])
+
+    def test_outside_a_work_tree_every_file_is_read(self):
+        # An unzipped release: no git to ask, so the folder is what ships.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self.planted(Path(tmp), git=False),
+                             ["README.md", "build.py", "config.toml", "public.toml"])
+
+    def test_inside_a_checkout_that_ignores_it_every_file_is_read_too(self):
+        # A release unzipped into a home folder kept in git, whose .gitignore is
+        # "*": git would add nothing here, so asked alone it read nothing, and
+        # the scan passed on no file at all (/tmp/mcf/ub/scratch/fail-first.txt).
+        import tempfile
+        from test_project_complete import git_in
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".gitignore").write_text("*\n", encoding="utf-8")
+            git_in(Path(tmp), "init", "-q")
+            root = Path(tmp) / "matchcentre-dashboard"
+            root.mkdir()
+            self.assertEqual(self.planted(root, git=False),
+                             ["README.md", "build.py", "config.toml", "public.toml"])
 
     def test_the_foundation_modules_name_no_particular_club(self):
         # A generic tool that ships one club's name in its examples reads as

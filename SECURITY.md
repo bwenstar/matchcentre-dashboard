@@ -31,8 +31,9 @@ it is the most serious kind this project can have.** Nothing was broken into:
 somebody trusted the flag and published their club's membership, and an issue
 tracker is public forever. The same goes for anything that gets identifying text
 out by a route that was meant to shape it — a report line composed after the
-scrub, a value the redactor never learned because the page did not parse, an error
-message quoting bytes off the card.
+scrub, a value the redactor never learned because the page did not parse, a path
+or a value it did learn but printed in part because a date or a number in it was
+shaped first, an error message quoting bytes off the card or naming its file.
 
 Please report that privately, and please do not paste the leaking line anywhere
 public, including in the report about it. Which line of the report it appeared in

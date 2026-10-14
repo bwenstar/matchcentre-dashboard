@@ -3799,7 +3799,15 @@ python3 -m unittest discover -s tests -t tests
 
 Nothing needs installing, nothing beyond this computer is contacted (the tests for
 `tools/fetch.py` start a web server on 127.0.0.1 and stop it again), and none of your
-cards are read.
+cards are read. In a git clone, run it in the copy you build your dashboard in: the
+cards in `data/`, the `config.toml` and the `site/` a build leaves there change
+nothing it reports, because the tests about what ships ask git. A folder unzipped
+from a release has no git of its own to ask, even inside a checkout of something
+else, and a computer without git has none at all, so there one test,
+`test_no_config_of_anybody_elses_ships_with_the_project`, takes the `config.toml` in
+the folder for one the release carried, and fails. Run the suite before the first
+build, or before copying your `config.toml` in when you upgrade, and that test has
+nothing to fail on.
 Every scorecard the tests use is generated on the spot — the tool can write a
 scorecard PDF as well as read one, which is also what `tools/demo.py` uses — so
 the suite runs the same on a machine that has never seen a real card.

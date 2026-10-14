@@ -3682,12 +3682,17 @@ class TestARunFromSomewhereElseSaysWhereTheCardsAre(CliCase):
     HEADING = "### It says `no such directory: data` and I am looking straight at it"
 
     def project(self, cards: int = 0, name: str = "project") -> Path:
-        """A copy of this project somewhere a test can fill its ``data/`` in."""
-        fake = self.cwd / name
-        shutil.copytree(ROOT, fake, ignore=shutil.ignore_patterns(
-            "__pycache__", ".git", "site", "data", "docs", "notes", "tests",
-            "config.toml", "reports"))
-        (fake / "data").mkdir()
+        """A copy of this project somewhere a test can fill its ``data/`` in.
+
+        The program and an empty ``data/``, and not this folder less a list of
+        what to leave out (4.524): a club's copy had an editor's lock file beside
+        build.py, a link to nothing, and copying the folder raised on it in
+        seventeen tests here (/tmp/mcf/ub/scratch/before-symlink.txt); a .venv
+        was copied whole for each. Rejected: copying links as links, which still
+        copies whatever else a club keeps there.
+        """
+        from test_demo import copy_of_the_program
+        fake = copy_of_the_program(self.cwd / name)
         if cards:
             for card in sorted((self.cwd / "data").rglob("*.pdf"))[:cards]:
                 shutil.copy2(card, fake / "data" / card.name)
@@ -12789,6 +12794,25 @@ class TestTheReadmeQuotesBothEmptyHandedReports(unittest.TestCase):
     their screen against what is on the page needs the lines in the order the program
     printed them, and a line-by-line check would pass on a block assembled from both
     reports at once, which is exactly the confusion being fixed.
+
+    Each run is a fresh copy's own ``build.py`` (4.524). This folder's looks beside
+    itself for cards, so in a club's copy with the demo's season in its ``data/`` it
+    rightly added where they were to the empty run's block, and the README's quote
+    of a fresh checkout failed there and nowhere else ("Ran 18 tests ... FAILED
+    (failures=3)" with two others, /tmp/mcf/ub/scratch/before-repro.txt). Rejected:
+    a skip wherever ``data/`` holds a card, which leaves the block unchecked in the
+    copy a club reads it beside.
+
+    And each block is printed twice over: by the copy's ``build.py`` typed in the
+    copy, and by the same ``build.py`` run from a folder beside it that holds only
+    a ``data/`` of its own -- the run the paragraph above the blocks speaks of, with
+    no card beside ``build.py`` to send anybody to. The first repair kept only the
+    run in the copy, and a mutant adding a line to the empty report whenever the run
+    was from somewhere else (d5b) passed the whole suite, where the base, which ran
+    from somewhere else, had caught it (/tmp/mcf/ub/scratch/repair2-elsewhere.txt).
+    From the other folder first, while the copy is still as a checkout has it.
+    Rejected: an empty-report twin in TestARunFromSomewhereElseSaysWhereTheCardsAre,
+    which asks after the one line it expects and not the block the README quotes.
     """
 
     EMPTY = "### Nothing was found"
@@ -12797,32 +12821,47 @@ class TestTheReadmeQuotesBothEmptyHandedReports(unittest.TestCase):
     # number. Six broken files is also the realistic shape of the problem: a club
     # copies a round out of a shared folder and every one of them is the wrong thing.
     BROKEN = 6
+    IN_ITS_PROJECT = "in its own project"
+    ELSEWHERE = "from another folder"
 
     @classmethod
     def setUpClass(cls):
         cls.readme = (ROOT / "README.md").read_text(encoding="utf-8")
         cls._tmp = tempfile.TemporaryDirectory()
         root = Path(cls._tmp.name)
+        from test_project_complete import copy_of_a_fresh_checkout
 
-        empty = root / "empty"
-        (empty / "data").mkdir(parents=True)
-        cls.empty_report = cls.run_build(empty)
+        empty = copy_of_a_fresh_checkout(root / "empty")
+        cls.reports = {cls.EMPTY: {}, cls.REFUSED: {}}
+        for heading, broken in ((cls.EMPTY, 0), (cls.REFUSED, cls.BROKEN)):
+            elsewhere = cls.with_cards(root / f"elsewhere-{broken}", broken)
+            cls.reports[heading][cls.ELSEWHERE] = cls.run_build(empty, elsewhere)
+        cls.reports[cls.EMPTY][cls.IN_ITS_PROJECT] = cls.run_build(empty)
 
-        refused = root / "refused"
-        (refused / "data").mkdir(parents=True)
-        for number in range(cls.BROKEN):
-            (refused / "data" / f"card{number}.pdf").write_bytes(
-                b"%PDF-1.4\nnot a scorecard\n")
-        cls.refused_report = cls.run_build(refused)
+        refused = cls.with_cards(copy_of_a_fresh_checkout(root / "refused"),
+                                 cls.BROKEN)
+        cls.reports[cls.REFUSED][cls.IN_ITS_PROJECT] = cls.run_build(refused)
 
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
     @staticmethod
-    def run_build(cwd: Path) -> str:
-        done = subprocess.run((sys.executable, str(BUILD)), cwd=cwd,
-                              capture_output=True, text=True, timeout=600)
+    def with_cards(folder: Path, broken: int) -> Path:
+        """*folder* with a ``data/`` holding *broken* files that are not cards."""
+        (folder / "data").mkdir(parents=True, exist_ok=True)
+        for number in range(broken):
+            (folder / "data" / f"card{number}.pdf").write_bytes(
+                b"%PDF-1.4\nnot a scorecard\n")
+        return folder
+
+    @staticmethod
+    def run_build(project: Path, cwd: Path | None = None) -> str:
+        """``python3 build.py`` of *project*, typed in *cwd* or else in *project*,
+        as the README has it typed."""
+        done = subprocess.run((sys.executable, str(project / "build.py")),
+                              cwd=cwd or project, capture_output=True, text=True,
+                              timeout=600)
         return done.stdout + done.stderr
 
     def quoted(self, heading: str) -> list[str]:
@@ -12840,11 +12879,18 @@ class TestTheReadmeQuotesBothEmptyHandedReports(unittest.TestCase):
                   "prints.\nquoted:\n  " + "\n  ".join(wanted)
                   + f"\n\nwhat it printed:\n{report}")
 
+    def assert_printed_wherever_it_is_run(self, heading: str):
+        runs = self.reports[heading]
+        self.assertEqual(sorted(runs), sorted((self.IN_ITS_PROJECT, self.ELSEWHERE)))
+        for place, report in runs.items():
+            with self.subTest(run=place):
+                self.assert_block_printed(heading, report)
+
     def test_the_empty_folder_block_is_the_one_it_prints(self):
-        self.assert_block_printed(self.EMPTY, self.empty_report)
+        self.assert_printed_wherever_it_is_run(self.EMPTY)
 
     def test_the_refused_folder_block_is_the_one_it_prints(self):
-        self.assert_block_printed(self.REFUSED, self.refused_report)
+        self.assert_printed_wherever_it_is_run(self.REFUSED)
 
     def test_the_two_blocks_are_not_the_same_answer(self):
         # The whole point of the fix. If a later edit collapses them back into one
