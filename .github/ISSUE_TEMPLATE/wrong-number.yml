@@ -20,7 +20,7 @@ body:
     attributes:
       label: The first line of the build.py report
       description: >
-        `matchcentre-dashboard 0.2.0-rc.1  (python 3.12.3 on linux)`. The same version
+        `matchcentre-dashboard 0.2.0  (python 3.12.3 on linux)`. The same version
         is in the footer of the dashboard page itself.
     validations:
       required: true
