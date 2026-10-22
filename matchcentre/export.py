@@ -315,8 +315,9 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         # "declared" then, and declared with no length is how the report and the
         # page tell a length refused from one nobody gave.
         "rounds_total": None if length_refused else competition.rounds_total,
-        # The regular rounds with cards, as the length counts them; the finals are
-        # in `rounds_present`, and flagged in `rounds`.
+        # The regular rounds played, as the length counts them: those with cards,
+        # and those declared washed out, card or none (4.535). The finals are in
+        # `rounds_present`, and flagged in `rounds`.
         "rounds_played": len(competition.rounds_played(matches)),
         "rounds_present": played,
         # And those rounds' fixtures, played of listed, for the foot beneath that
@@ -910,6 +911,9 @@ def _fixtures(matches: Sequence[Match], competition: Competition,
                 "card_missing": (number, home, away) in gaps,
                 "cards": len(counts.get((number, home, away), ())),
                 "keys": list(named.get((number, home, away), ())),
+                # Declared washed out, the fixture or its whole round (4.535): no
+                # card is coming, and it is no fixture still to play.
+                "washed_out": rnd.washed(home, away),
             })
 
     # Cards for fixtures the declared draw does not list are a validation error
@@ -921,6 +925,7 @@ def _fixtures(matches: Sequence[Match], competition: Competition,
                                                                  competition.rounds)):
         if key in scheduled:
             continue
+        rnd = competition.rounds.get(match.round)
         out.append({
             "round": match.round,
             "date": match.date,
@@ -932,7 +937,32 @@ def _fixtures(matches: Sequence[Match], competition: Competition,
             "card_missing": False,      # it is the card
             "cards": len(counts[key]),
             "keys": list(named[key]),
+            "washed_out": bool(rnd and rnd.washed(match.home, match.away)),
         })
+
+    # And a fixture declared washed out that no entry above is, either way round,
+    # because the round has no card of it and no draw lists it: on the page as what
+    # it was, rather than nowhere (4.535).
+    entered = {(f["round"], frozenset((f["home"], f["away"]))) for f in out}
+    for number in competition.round_order:
+        rnd = competition.rounds[number]
+        for home, away in rnd.washouts:
+            if (number, frozenset((home, away))) in entered:
+                continue
+            entered.add((number, frozenset((home, away))))
+            out.append({
+                "round": number,
+                "date": rnd.date,
+                "home": home,
+                "away": away,
+                "home_name": competition.team_name(home),
+                "away_name": competition.team_name(away),
+                "played": False,
+                "card_missing": False,
+                "cards": 0,
+                "keys": [],
+                "washed_out": True,
+            })
     return out, duplicates
 
 
@@ -960,6 +990,11 @@ def _rounds(matches: Sequence[Match], competition: Competition,
             # keeps no copy of the rule (4.452). `played` keeps its meaning, a round
             # with a card, which Latest round and rounds_played go by.
             "cards_played": sum(1 for m in played if m.counts_as_played),
+            # Declared washed out whole, card or none, which the page heads it by;
+            # a fixture of it washed out is said on the fixture (4.535). The round
+            # is among `meta.rounds_played` either way, and `played` keeps its
+            # meaning, a round with a card, which Latest round goes by.
+            "washed_out": rnd.washed_out,
             "is_finals": rnd.is_finals,
             # Only ever filled in when the team list was declared or the club
             # stated the bye itself (F1). Empty here means "nobody said", not

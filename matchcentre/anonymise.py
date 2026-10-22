@@ -158,7 +158,7 @@ _CLASSES = {
         matches[].sets[].{away_games,completed,doubles,home_games,margin,slot}
         matches[].sets[].{status,winner}
         matches[].sets[].{nobody_played,printed_away_games,printed_home_games}
-        fixtures[].{card_missing,cards,date,played,round} fixtures[].keys[]
+        fixtures[].{card_missing,cards,date,played,round,washed_out} fixtures[].keys[]
         head_to_head{}.{draws,finals,games_high,games_low,played,undecided}
         head_to_head{}.{wins_high,wins_low}
         players[].{available,fill_in_appearances,games_diff,games_lost}
@@ -172,6 +172,7 @@ _CLASSES = {
         players[].rating_history[].{doubles,round,singles}
         players[].streak.{length,type}
         rounds[].{cards,cards_played,date,is_finals,number,numbered,played,source}
+        rounds[].washed_out
         rounds[].keys[]
         teams[].{counted,drawn,games_diff,games_lost,games_won,lost,played}
         teams[].{points,points_average,position,sets_diff,sets_lost,sets_won}

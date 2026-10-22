@@ -16792,9 +16792,13 @@ class TestTheListsTheNotesAndTheLoaderNameAreSentences(unittest.TestCase):
             with self.subTest(named=named):
                 # is_finals since 4.445, which skips a final's round; number and
                 # the card's two teams since 4.444, which counts a round's own
-                # cards' teams as accounted for.
+                # cards' teams as accounted for; washed_out, washouts and
+                # has_washout since 4.535, which counts a washout's teams as
+                # accounted for too, and a round with one as a round come.
                 drawn = SimpleNamespace(source="cards", fixtures=(("aces", "owls"),),
-                                        byes=byes, is_finals=False, number="1")
+                                        byes=byes, is_finals=False, number="1",
+                                        washed_out=False, washouts=(),
+                                        has_washout=False)
                 note, = discover_mod._shortfall_notes(
                     "c", {"1": drawn},
                     [SimpleNamespace(round="1", home="aces", away="owls")], teams,

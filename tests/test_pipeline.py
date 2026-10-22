@@ -10044,6 +10044,11 @@ class FiveMondaysCase(unittest.TestCase):
     CARDED: tuple[str, ...] = ("1", "2", "3")
     THURSDAY: tuple[str, ...] = ()
     UNPLAYED = ""
+    # Rounds washed out, as CompetitionConfig.washouts holds them; rounds whose
+    # second card is not written; and whether the byes are typed at all (4.535).
+    WASHOUTS: dict[str, tuple[tuple[str, str], ...]] = {}
+    HALF: tuple[str, ...] = ()
+    DECLARE_BYES = True
     TEAMS = {
         "HILLTOP ACES": ("Ada Quill", "Bea Rook", "Cy Moss"),
         "RIVERSIDE ROCKETS": ("Dee Fane", "Eli Gorse", "Fay Holt"),
@@ -10071,6 +10076,8 @@ class FiveMondaysCase(unittest.TestCase):
         for number in cls.CARDED:
             pairs, _ = cls.draw(int(number))
             for home, away in pairs:
+                if number in cls.HALF and (home, away) == pairs[1]:
+                    continue
                 index += 1
                 folder = data / f"Round{number}"
                 folder.mkdir(parents=True, exist_ok=True)
@@ -10091,7 +10098,8 @@ class FiveMondaysCase(unittest.TestCase):
                 for name in cls.TEAMS}
         declared = config_mod.CompetitionConfig(
             id="monday-c", day="Monday", division="C", teams=tuple(cls.TEAMS),
-            byes=byes, rounds_total=10)
+            byes=byes if cls.DECLARE_BYES else {}, rounds_total=10,
+            **({"washouts": cls.WASHOUTS} if cls.WASHOUTS else {}))
         cards, rejected = scorecard.read_tree(data)
         cls.found = discover_mod.discover(
             cards, rejected, root=data,
@@ -10207,6 +10215,1053 @@ class TestAByeDeclaredForARoundStillToComeIsNotCreditedUnderAverage(FiveMondaysC
             sorted(m.round for m in stats.with_byes(self.found.matches["monday-c"],
                                                      self.competition) if m.is_bye),
             ["1", "2", "3"])
+        self.assertEqual(self.told(), [])
+
+
+WASHOUT_DRAW = {**SIX_DRAW, "4": ((0, 4), (1, 3), (2, 5)), "5": ((0, 5), (1, 2), (3, 4))}
+WASHOUT_DATES = {**SIX_DATES, "4": "2026-04-28", "5": "2026-05-05"}
+
+
+def write_washout_season(root: Path, *, carded: dict[str, int], cancelled: bool,
+                         config: str, short: bool = False,
+                         moved: tuple[str, ...] = ()) -> Path:
+    """Six teams, five Tuesdays, into ``root/data``, and *config* as ``root/config.toml``.
+
+    Each round's first ``carded[round]`` fixtures get a card, all of them won 20-15
+    by the home side; with *cancelled*, round 4's third fixture, Lakeside Spinners v
+    Northside Nets, gets a card too, ticked Match Cancelled with every row 0-0, as
+    Match Centre exports a night rained off before it began; with *short*, a card
+    of two finished rubbers and two 0-0, ``VS`` and no tick, a night the rain
+    stopped part way. The cards of a round in *moved* are dated the Thursday after,
+    so routing files them under a Thursday competition. Fictional, from cardwriter.
+    """
+    data = root / "data"
+    index = 0
+    for number, pairs in WASHOUT_DRAW.items():
+        for k, (home, away) in enumerate(pairs):
+            late = number == "4" and k == 2
+            called_off = cancelled and late
+            stopped = short and late
+            if k >= carded[number] and not (called_off or stopped):
+                continue
+            index += 1
+            folder = data / f"R{number}"
+            folder.mkdir(parents=True, exist_ok=True)
+            hn, an = SIX_NAMES[home], SIX_NAMES[away]
+            hp, ap = SIX_TEAMS[hn], SIX_TEAMS[an]
+            scores = (((0, 0),) * 4 if called_off
+                      else ((6, 2), (6, 3), (0, 0), (0, 0)) if stopped
+                      else ((6, 2), (6, 3), (2, 6), (6, 4)))
+            date = WASHOUT_DATES[number]
+            if number in moved:
+                import datetime
+                date = (datetime.date.fromisoformat(date)
+                        + datetime.timedelta(days=2)).isoformat()
+            cw.write_card_file(folder / f"{index}.pdf", cw.CardSpec(
+                date=date, round_label=number, division="C",
+                court=f"{index:02d}", match_id=f"800{index:04d}",
+                home_name=hn, away_name=an, rows=rows_for(scores, hp, ap),
+                cancelled=called_off,
+                winner=cw.NO_TICK if called_off or stopped else cw.AUTO,
+                verb="VS" if called_off or stopped else cw.AUTO,
+                home_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                                  for i, n in enumerate(hp)),
+                away_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                                  for i, n in enumerate(ap))))
+    (root / "config.toml").write_text(config, encoding="utf-8")
+    return data
+
+
+def washout_config(*, washouts: str = "", unplayed: str = "", draw: bool = False,
+                   teams: bool = True, leaves_out: tuple = (), byes: dict = {},
+                   expected: str = "", total: bool = True,
+                   draw_rounds: tuple = (), extra: str = "") -> str:
+    """The season's ``config.toml``: ``rounds_total = 5``, the teams, and the table.
+
+    With *draw*, every round's fixtures declared, or those of *draw_rounds* where it
+    names any, less the ``(round, index)`` pairs in *leaves_out*, and a ``bye`` line
+    for each round in *byes*; *expected* is the ``[competitions.tue-c.expected]``
+    table's lines. Without *total*, no ``rounds_total``; *extra* is appended as
+    typed.
+    """
+    lines = []
+    if unplayed:
+        lines += ["[rules]", f'unplayed = "{unplayed}"', ""]
+    lines += ["[competitions.tue-c]", 'day = "Tuesday"', 'division = "C"']
+    if total:
+        lines.append("rounds_total = 5")
+    if teams:
+        lines.append("teams = [" + ", ".join(f'"{n.title()}"' for n in SIX_NAMES)
+                     + "]")
+    if washouts:
+        lines += ["", "[competitions.tue-c.washouts]", washouts.strip()]
+    if expected:
+        lines += ["", "[competitions.tue-c.expected]", expected.strip()]
+    if draw:
+        for number, pairs in WASHOUT_DRAW.items():
+            if draw_rounds and number not in draw_rounds:
+                continue
+            lines += ["", "[[competitions.tue-c.rounds]]", f'number = "{number}"',
+                      f'date = "{WASHOUT_DATES[number]}"',
+                      "fixtures = [" + ", ".join(
+                          f'["{SIX_NAMES[h].title()}", "{SIX_NAMES[a].title()}"]'
+                          for k, (h, a) in enumerate(pairs)
+                          if (number, k) not in leaves_out) + "]"]
+            if number in byes:
+                lines.append(f'bye = "{byes[number]}"')
+    if extra:
+        lines += ["", extra.strip()]
+    return "\n".join(lines) + "\n"
+
+
+class WashoutSeasonCase(unittest.TestCase):
+    """Six teams, five rounds, a round and a fixture rained off (4.535).
+
+    Rounds 1, 2 and 5 have their three cards each. Round 3 left none: the whole
+    round was washed out. Round 4 has two, and its third fixture, Lakeside Spinners
+    v Northside Nets, left none, or with ``CANCELLED`` a Match Cancelled card: rain
+    from eight o'clock, after the early matches had finished. ``WASHOUTS`` is the
+    table's lines; the config has the six teams and ``rounds_total = 5``. Read,
+    discovered, validated and exported in-process, as ``build.py`` does.
+    """
+
+    WASHOUTS = ""
+    UNPLAYED = ""
+    CANCELLED = False
+    SHORT = False
+    DRAW = False
+    LEAVES_OUT: tuple = ()
+    DRAW_BYES: dict = {}
+    EXPECTED = ""
+    TEAMS = True
+    TOTAL = True
+    DRAW_ROUNDS: tuple = ()
+    MOVED: tuple = ()
+    EXTRA = ""
+    CARDED = {"1": 3, "2": 3, "3": 0, "4": 2, "5": 3}
+    LATE = ("lakeside-spinners", "northside-nets")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        data = write_washout_season(
+            root, carded=cls.CARDED, cancelled=cls.CANCELLED, short=cls.SHORT,
+            moved=cls.MOVED,
+            config=washout_config(washouts=cls.WASHOUTS, unplayed=cls.UNPLAYED,
+                                  draw=cls.DRAW, teams=cls.TEAMS,
+                                  leaves_out=cls.LEAVES_OUT, byes=cls.DRAW_BYES,
+                                  expected=cls.EXPECTED, total=cls.TOTAL,
+                                  draw_rounds=cls.DRAW_ROUNDS, extra=cls.EXTRA))
+        cls.config = config_mod.load(root / "config.toml")
+        cls.cards, cls.rejected = scorecard.read_tree(data)
+        cls.found = discover_mod.discover(cls.cards, cls.rejected, root=data,
+                                          config=cls.config)
+        cls.competition, = [comp for comp in cls.found.club.competitions
+                            if comp.id == "tue-c"]
+        cls.matches = cls.found.matches["tue-c"]
+        cls.report = validate.validate(cls.matches, cls.competition,
+                                       club=cls.found.club, cards=cls.cards,
+                                       rejected=cls.rejected)
+        cls.season = export.build_season(
+            cls.matches, competition=cls.competition, source_dir=data,
+            generated="2026-06-01T00:00:00", club=cls.found.club, cards=cls.cards,
+            rejected=cls.rejected)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def notes(self, words: str) -> list[str]:
+        return [" ".join(note.split()) for note in self.found.notes
+                if words in " ".join(note.split())]
+
+    def findings(self, rule: str) -> list[validate.Issue]:
+        return [issue for issue in self.report.issues if issue.rule == rule]
+
+    def round_(self, number: str) -> dict:
+        found = [r for r in self.season["rounds"] if r["number"] == number]
+        self.assertEqual(len(found), 1, f"round {number} is not in the document once")
+        return found[0]
+
+    def fixtures(self, number: str) -> dict[tuple[str, str], dict]:
+        return {(f["home"], f["away"]): f for f in self.season["fixtures"]
+                if f["round"] == number}
+
+    def counted(self) -> dict[str, int]:
+        return {team["slug"]: team["counted"] for team in self.season["teams"]}
+
+    def averaged(self) -> dict[str, int]:
+        return {team["slug"]: team["points_breakdown"]["averaged_matches"]
+                for team in self.season["teams"]}
+
+
+class TestARoundWashedOutWithNoCardIsSaidHowToDeclareIt(WashoutSeasonCase):
+    """4.535: a round with no card between rounds that have cards is a question.
+
+    Measured before (/tmp/mcw/scratch/before/zero-none/out.txt): round 3 is in no
+    note, the report's ``cards were found for 4 regular rounds (1, 2, 4 and 5)``
+    aside, and ``4 of 5 played`` gives no reason; the club in front of it had to ask
+    what to do. The note names the round and both answers, the washout line and the
+    cards to export, on a round no line of the file accounts for. Rejected: naming
+    rounds the cards have not reached, which every build of a season in progress
+    would print, and judging by the date, which the gap notes never do (4.433).
+    """
+
+    CARDED = {"1": 3, "2": 3, "3": 0, "4": 2, "5": 0}
+
+    def test_the_round_is_told_with_the_line_that_declares_it(self):
+        note, = self.notes("round 3 has no card")
+        self.assertEqual(
+            note, "tue-c: round 3 has no card, though round 4 has. If it was "
+                  "washed out, say so with 3 = true under "
+                  "[competitions.tue-c.washouts], and it counts as a round played; "
+                  "if not, its cards are still to export.")
+
+    def test_a_round_the_cards_have_not_reached_is_not_told(self):
+        # Round 5 has no card and no round after it has: still to come, as far as
+        # anything here can tell, and told nothing, as card-missing tells it nothing.
+        self.assertEqual(self.notes("round 5 has no card"), [])
+
+
+class TestTheRoundsBeforeTheFirstWithCardsAreNotTold(WashoutSeasonCase):
+    """4.535: the hint asks about rounds between rounds with cards, and no others.
+
+    A club whose rounds are not numbered from 1, a grade that began a week late, is
+    told nothing about the weeks before its first card; round 1 here has none, and
+    rounds 2 to 5 have theirs. Rejected: counting from round 1, which would ask such
+    a club every build about rounds its season never had.
+    """
+
+    CARDED = {"1": 0, "2": 3, "3": 3, "4": 3, "5": 3}
+
+    def test_round_1_is_not_told(self):
+        self.assertEqual(self.notes("no card, though"), [])
+
+class TestTwoRoundsInARunWithNoCardAreToldAsOne(WashoutSeasonCase):
+    """4.535: rounds 2 and 3 with no card, before round 4's, are one note."""
+
+    CARDED = {"1": 3, "2": 0, "3": 0, "4": 2, "5": 3}
+
+    def test_the_run_is_told_once_with_the_line_for_each(self):
+        self.assertEqual(self.notes("no card, though"), [
+            "tue-c: rounds 2 and 3 have no card, though round 4 has. If they were "
+            "washed out, say so with a line for each under "
+            "[competitions.tue-c.washouts], as 2 = true, and they count as rounds "
+            "played; if not, their cards are still to export."])
+
+
+class TestARunOfThreeRoundsWithNoCardIsToldFromAndTo(WashoutSeasonCase):
+    """4.535: three rounds or more are told from the first to the last."""
+
+    CARDED = {"1": 3, "2": 0, "3": 0, "4": 0, "5": 3}
+
+    def test_the_run_is_told_from_its_first_round_to_its_last(self):
+        note, = self.notes("no card, though")
+        self.assertTrue(note.startswith(
+            "tue-c: rounds 2 to 4 have no card, though round 5 has."), note)
+
+
+class TestARunARoundDeclaredWashedOutSplitsIsToldEitherSideOfIt(WashoutSeasonCase):
+    """4.535: a round a line accounts for is no gap, and the run is told round by round.
+
+    Round 3 declared washed out leaves rounds 2 and 4 with no card and nothing said
+    of them; each is told as the round it is, round 2 by the washout that shows the
+    season went past it. Rejected: one note over the three, which would ask about a
+    round the club has already answered.
+    """
+
+    CARDED = {"1": 3, "2": 0, "3": 0, "4": 0, "5": 3}
+    WASHOUTS = "3 = true"
+
+    def test_each_round_either_side_is_told_on_its_own(self):
+        self.assertEqual([note.split(". If")[0]
+                          for note in self.notes("has no card, though")],
+                         ["tue-c: round 2 has no card, though round 3 is declared "
+                          "washed out",
+                          "tue-c: round 4 has no card, though round 5 has"])
+
+
+class TestAWashedOutRoundIsARoundPlayedAndItsTeamsAreNotMissing(WashoutSeasonCase):
+    """4.535: a round, and a fixture of another, declared washed out, under ``zero``.
+
+    Measured before (/tmp/mcw/scratch/before/zero-table/out.txt): the table was
+    ignored as a setting nobody knows, the season read ``4 of 5 played``, round 3 was
+    not in the document, and round 4 was told ``accounts for none of Lakeside
+    Spinners and Northside Nets ... find the cards``. Now the round is a round played,
+    as a round of Match Cancelled cards always was (4.452), and on the page with no
+    card; the fixture is listed, washed out, with no card asked for; and under
+    ``unplayed = "zero"`` nothing is counted for either, so every team's count is
+    what it was. Rejected: counting the round only once a card arrives, which no
+    card of a rained-off night ever does, and listing the fixture as one still to
+    play.
+    """
+
+    WASHOUTS = '3 = true\n4 = [["Lakeside Spinners", "Northside Nets"]]'
+
+    def test_the_round_is_one_of_the_rounds_played(self):
+        self.assertEqual(self.season["meta"]["rounds_played"], 5)
+        self.assertEqual(self.competition.rounds_played(self.matches),
+                         ["1", "2", "3", "4", "5"])
+        self.assertEqual(self.findings("F3"), [])
+
+    def test_the_round_is_on_the_page_washed_out_with_no_card(self):
+        self.assertEqual(
+            {key: self.round_("3")[key]
+             for key in ("washed_out", "cards", "cards_played", "played")},
+            {"washed_out": True, "cards": 0, "cards_played": 0, "played": False})
+        self.assertIs(self.round_("4")["washed_out"], False)
+
+    def test_the_fixture_is_listed_washed_out_and_no_card_is_asked_for(self):
+        fixture = self.fixtures("4")[self.LATE]
+        self.assertEqual({key: fixture[key] for key in
+                          ("washed_out", "played", "card_missing", "cards")},
+                         {"washed_out": True, "played": False, "card_missing": False,
+                          "cards": 0})
+        self.assertEqual({pair: f["washed_out"] for pair, f in
+                          self.fixtures("4").items() if pair != self.LATE},
+                         {("hilltop-aces", "eastwood-bears"): False,
+                          ("riverside-rockets", "westfield-hawks"): False})
+
+    def test_no_note_calls_its_teams_missing_or_its_round_unaccounted(self):
+        self.assertEqual(self.notes("accounts for none of"), [])
+        self.assertEqual(self.notes("has no card"), [])
+
+    def test_the_rounds_note_tells_the_cards_from_the_washout(self):
+        note, = self.notes("regular rounds")
+        self.assertEqual(note, "tue-c: cards were found for 4 regular rounds (1, 2, "
+                               "4 and 5), round 3 is declared washed out, and the "
+                               "season is declared as 5 rounds long.")
+
+    def test_nothing_is_counted_for_it_under_zero(self):
+        self.assertEqual(self.counted(), {
+            "hilltop-aces": 4, "riverside-rockets": 4, "lakeside-spinners": 3,
+            "westfield-hawks": 4, "eastwood-bears": 4, "northside-nets": 3})
+        self.assertEqual(set(self.averaged().values()), {0})
+
+    def test_no_finding_is_raised_by_a_washout_the_cards_agree_with(self):
+        for rule in ("washout-contradicted", "washout-team", "card-missing",
+                     "no-result"):
+            with self.subTest(rule=rule):
+                self.assertEqual(self.findings(rule), [])
+
+
+class TestAWashoutIsCreditedTheTeamsAverageWhereTheRulesSaySo(WashoutSeasonCase):
+    """4.535: under ``unplayed = "average"`` a washout pays what a bye does.
+
+    Measured before (/tmp/mcw/scratch/before/average-table/out.txt): nobody was
+    credited round 3, nor Lakeside Spinners and Northside Nets round 4, so the six
+    counted 4, 4, 3, 4, 4 and 3 matches and the ladder was in progress. The rule a
+    club sets for "a bye, a washout, a week called off" now reaches a washout with no
+    card, as it reached one with a Match Cancelled card: every team counts five,
+    round 3 credited to all six and round 4 to the two, once each.
+    """
+
+    WASHOUTS = '3 = true\n4 = [["Lakeside Spinners", "Northside Nets"]]'
+    UNPLAYED = "average"
+
+    def test_every_team_counts_every_round_of_the_season(self):
+        self.assertEqual(set(self.counted().values()), {5})
+        self.assertEqual(self.season["meta"]["ladder_state"], "complete")
+
+    def test_each_washout_is_credited_once_to_each_of_its_teams(self):
+        self.assertEqual(self.averaged(), {
+            "hilltop-aces": 1, "riverside-rockets": 1, "lakeside-spinners": 2,
+            "westfield-hawks": 1, "eastwood-bears": 1, "northside-nets": 2})
+
+    def test_the_ladder_history_has_the_washed_out_round_in_it(self):
+        history = {team["slug"]: [entry["round"] for entry in team["ladder_history"]]
+                   for team in self.season["teams"]}
+        self.assertEqual(set(map(tuple, history.values())),
+                         {("1", "2", "3", "4", "5")})
+
+
+class TestAFinalWashedOutIsInNoLadder(WashoutSeasonCase):
+    """4.535: a final declared washed out credits nobody on the ladder (F11).
+
+    A final earns no ladder points, played or not, and its rests were never
+    credited, the ladder's matches holding none of its cards. The first version of
+    this item counted a washed-out final as a round come in ``stats.with_byes`` and
+    credited all six teams its washout under ``average``, a match more each on the
+    regular season's ladder (found reading the code against F11). The final is on
+    the page, washed out, and in no count of the rounds played.
+    """
+
+    WASHOUTS = "SF = true"
+    UNPLAYED = "average"
+
+    def test_nobody_is_credited_for_it(self):
+        self.assertEqual(set(self.averaged().values()), {0})
+        self.assertEqual(self.counted(), {
+            "hilltop-aces": 4, "riverside-rockets": 4, "lakeside-spinners": 3,
+            "westfield-hawks": 4, "eastwood-bears": 4, "northside-nets": 3})
+
+    def test_it_is_on_the_page_as_a_final_washed_out_and_no_round_played(self):
+        final = self.round_("SF")
+        self.assertEqual((final["is_finals"], final["washed_out"]), (True, True))
+        self.assertEqual(self.season["meta"]["rounds_played"], 4)
+
+
+class TestACardWithAResultOverrulesTheWashoutDeclaredForIt(WashoutSeasonCase):
+    """4.535: a washout the cards contradict is reported, and the cards win.
+
+    Results come only from the cards, so a fixture declared washed out whose card
+    has a result is scored as its card says and its teams are credited nothing
+    beside it, and ``washout-contradicted`` names the line and the cards, once a
+    line: a warning, as ``bye-contradicted`` is, the likeliest story being a round
+    typed for another. Here round 5 is declared washed out whole, its three cards
+    each won 20-15, and round 2 one fixture of it, under ``average``. Rejected: an
+    error, which would fail every build over a line the cards have already
+    overruled; and "nothing is credited", false of a team a whole round's washout
+    still stands for where its card is not in.
+    """
+
+    WASHOUTS = ('5 = true\n2 = [["Hilltop Aces", "Lakeside Spinners"]]\n'
+                '1 = [["Hilltop Aces", "Lakeside Spinners"]]\n'
+                '4 = [["Hilltop Aces", "Eastwood Bears"], '
+                '["Riverside Rockets", "Westfield Hawks"]]')
+    UNPLAYED = "average"
+
+    def test_each_line_the_cards_contradict_is_one_warning(self):
+        found = self.findings("washout-contradicted")
+        self.assertEqual([(i.severity, i.subject) for i in found],
+                         [(validate.WARNING, "R1"), (validate.WARNING, "R2"),
+                          (validate.WARNING, "R4"), (validate.WARNING, "R5")])
+        one, two, four, five = (" ".join(i.message.split()) for i in found)
+        # A card of the line's teams against others names who they played.
+        self.assertEqual(one, "round 1: the washouts table has Hilltop Aces v "
+                              "Lakeside Spinners washed out, but a card has Hilltop "
+                              "Aces playing Riverside Rockets and a card has Lakeside "
+                              "Spinners playing Westfield Hawks. The cards win, and "
+                              "their teams are credited nothing for the washout.")
+        self.assertEqual(four, "round 4: the washouts table has Hilltop Aces v "
+                               "Eastwood Bears and Riverside Rockets v Westfield Hawks "
+                               "washed out, but the cards of Hilltop Aces v Eastwood "
+                               "Bears and Riverside Rockets v Westfield Hawks have "
+                               "results. The cards win, and their teams are credited "
+                               "nothing for the washout.")
+        self.assertEqual(two, "round 2: the washouts table has Hilltop Aces v Lakeside "
+                              "Spinners washed out, but its card has a result. The "
+                              "card wins, and its teams are credited nothing for the "
+                              "washout.")
+        self.assertEqual(five, "round 5: the washouts table has the whole round "
+                               "washed out, but 3 of its cards have results: Hilltop "
+                               "Aces v Northside Nets, Riverside Rockets v Lakeside "
+                               "Spinners and Westfield Hawks v Eastwood Bears. The "
+                               "cards win, and their teams are credited nothing for "
+                               "the washout.")
+
+    def test_the_cards_are_scored_and_nothing_is_credited_beside_them(self):
+        self.assertEqual(self.averaged(), dict.fromkeys(self.averaged(), 0))
+        self.assertEqual(self.counted(), {
+            "hilltop-aces": 4, "riverside-rockets": 4, "lakeside-spinners": 3,
+            "westfield-hawks": 4, "eastwood-bears": 4, "northside-nets": 3})
+
+
+class TestACancelledCardOfADeclaredWashoutIsToldNothingMore(WashoutSeasonCase):
+    """4.535: the washout's own card is not asked about once the club has said why.
+
+    With round 4's late fixture exported as Match Centre writes a night rained off,
+    Match Cancelled and every row 0-0, the run gave ``no-result``: ``recorded as
+    cancelled, so it is not counted in the ladder``. Declared washed out, the card
+    is the washout's, and the warning's question is answered; the fixture is marked
+    washed out under its card. A card with a result keeps every finding
+    (``washout-contradicted``), and a played card short of a result its
+    ``no-result``, as its games still count. Rejected: keeping the warning, which a
+    club that has declared every washout of its season still has to read through
+    every build.
+    """
+
+    WASHOUTS = '4 = [["Lakeside Spinners", "Northside Nets"]]'
+    CANCELLED = True
+
+    def test_the_card_is_given_no_no_result_warning(self):
+        self.assertEqual(self.findings("no-result"), [])
+
+    def test_the_fixture_is_marked_washed_out_under_its_card(self):
+        fixture = self.fixtures("4")[self.LATE]
+        self.assertEqual({key: fixture[key] for key in
+                          ("washed_out", "played", "cards", "card_missing")},
+                         {"washed_out": True, "played": True, "cards": 1,
+                          "card_missing": False})
+
+
+class TestAWashoutsOwnCardIsCreditedOnceUnderAverage(WashoutSeasonCase):
+    """4.535: the card of a fixture declared washed out is the one credit for it.
+
+    Under ``average`` a Match Cancelled card is credited the team's average already,
+    so the washout credits nothing beside it, or the two teams would be paid round 4
+    twice: each counts four, the others four, and the ladder is complete.
+    """
+
+    WASHOUTS = '4 = [["Lakeside Spinners", "Northside Nets"]]'
+    CANCELLED = True
+    UNPLAYED = "average"
+
+    def test_its_two_teams_are_credited_round_4_once(self):
+        self.assertEqual(self.averaged(), {
+            "hilltop-aces": 0, "riverside-rockets": 0, "lakeside-spinners": 1,
+            "westfield-hawks": 0, "eastwood-bears": 0, "northside-nets": 1})
+        self.assertEqual(set(self.counted().values()), {4})
+
+
+class TestACardStoppedShortOfAResultIsNoContradictionOfItsWashout(WashoutSeasonCase):
+    """4.535: a night the rain stopped part way is what a washout is.
+
+    Round 4's late fixture has a card of two rubbers finished and two never begun,
+    ``VS`` and no tick: played, and decided nothing. Declared washed out, it
+    contradicts nothing, since it has no result, and its ``no-result`` stays, as its
+    games are in the games column. The first version of this item called it
+    ``washout-contradicted``, "its card has a result", which it has not (the
+    mutation planning, /tmp/mcw/scratch/mutants535.py). Rejected: standing down its
+    ``no-result`` too, which would leave the games it put in the ladder unsaid.
+    """
+
+    WASHOUTS = '4 = [["Lakeside Spinners", "Northside Nets"]]'
+    SHORT = True
+
+    def test_the_card_contradicts_nothing(self):
+        self.assertEqual(self.findings("washout-contradicted"), [])
+
+    def test_its_no_result_is_still_said(self):
+        warning, = self.findings("no-result")
+        self.assertEqual(warning.subject, "R4 lakeside-spinners v northside-nets")
+
+
+class TestACancelledCardOfNoDeclaredWashoutIsStillToldItCountsForNothing(
+        WashoutSeasonCase):
+    """4.535's premise: without the line, the cancelled card is told as it was."""
+
+    CANCELLED = True
+
+    def test_the_card_is_given_its_no_result_warning(self):
+        warning, = self.findings("no-result")
+        self.assertEqual(warning.subject, "R4 lakeside-spinners v northside-nets")
+
+
+class TestADeclaredFixtureWashedOutIsNoCardToFind(WashoutSeasonCase):
+    """4.535: in a declared draw, a fixture washed out is no ``card-missing``.
+
+    Measured before, with the draw typed in and no washouts table, the run warned
+    ``card-missing`` for round 3's three fixtures and round 4's late one, and noted
+    round 3 as ``in the declared draw with no cards at all ... scorecards to find``.
+    Declared washed out, none of the four is a card to chase, and the fixtures stay
+    listed, washed out, where they are.
+    """
+
+    WASHOUTS = '3 = true\n4 = [["Northside Nets", "Lakeside Spinners"]]'
+    DRAW = True
+
+    def test_no_card_is_asked_for(self):
+        self.assertEqual(self.findings("card-missing"), [])
+        self.assertEqual(self.notes("no cards at all"), [])
+        self.assertEqual(self.notes("missing"), [])
+
+    def test_every_fixture_of_the_round_and_the_one_of_the_other_is_washed_out(self):
+        self.assertEqual({pair: f["washed_out"] for pair, f in self.fixtures("3").items()},
+                         {("hilltop-aces", "westfield-hawks"): True,
+                          ("riverside-rockets", "northside-nets"): True,
+                          ("lakeside-spinners", "eastwood-bears"): True})
+        self.assertIs(self.fixtures("4")[self.LATE]["washed_out"], True)
+        self.assertEqual(self.season["meta"]["rounds_played"], 5)
+
+    def test_a_fixture_the_draw_lists_is_listed_once(self):
+        # Typed the other way round in the table, and still the draw's fixture.
+        self.assertEqual(len([f for f in self.season["fixtures"] if f["round"] == "4"]),
+                         3)
+
+
+class TestAFixtureMissingBesideAWashoutIsCountedAgainstTheFixturesListed(
+        WashoutSeasonCase):
+    """4.535: a round of the draw with a card, a washout and a card missing.
+
+    The washout is no card to find, and the card that is missing is still asked
+    for, counted against the fixtures the draw lists: one of three has a card. The
+    washout is not a card; counted as one, the finding said two of three.
+    """
+
+    DRAW = True
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 1, "5": 3}
+    WASHOUTS = '4 = [["Lakeside Spinners", "Northside Nets"]]'
+
+    def test_only_the_card_missing_is_asked_for_and_counted_of_the_three(self):
+        warning, = self.findings("card-missing")
+        self.assertEqual(warning.subject, "R4 riverside-rockets v westfield-hawks")
+        self.assertIn("1 of the 3 fixtures the draw lists for that round do have "
+                      "one", " ".join(warning.message.split()))
+
+
+class TestACardTheDrawDoesNotListIsItsWashedOutFixtureOnce(WashoutSeasonCase):
+    """4.535: a washout with a card the declared draw leaves out is one fixture.
+
+    The card is listed as every card the draw does not list is (draw-mismatch says
+    why), marked washed out, and no second, empty fixture is made for the line.
+    """
+
+    DRAW = True
+    LEAVES_OUT = (("4", 2),)
+    CANCELLED = True
+    WASHOUTS = '4 = [["Lakeside Spinners", "Northside Nets"]]'
+
+    def test_the_card_is_the_fixture_and_is_washed_out(self):
+        four = [f for f in self.season["fixtures"] if f["round"] == "4"]
+        self.assertEqual(len(four), 3)
+        late = self.fixtures("4")[self.LATE]
+        self.assertEqual({key: late[key] for key in ("cards", "played", "washed_out")},
+                         {"cards": 1, "played": True, "washed_out": True})
+
+
+class TestASheetAfterARoundWashedOutIsComparedAndSaysSo(WashoutSeasonCase):
+    """4.535: the association's sheet after a last round rained off is compared.
+
+    The check asked whether a card had reached the sheet's round, and a round
+    washed out has none, so a sheet typed after the last night of a season whose
+    last night was washed out was ``ahead`` of the cards for good, and compared
+    nothing. The round has come: the sheet is compared, and the team's evidence
+    calls the round washed out rather than a bye. Under ``zero`` it credits nothing,
+    and Hilltop Aces' four wins agree with the sheet's 24.
+    """
+
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 3, "5": 0}
+    WASHOUTS = "5 = true"
+    EXPECTED = 'after_round = 5\n"Hilltop Aces" = { points = 24.0, played = 4 }'
+
+    def test_the_sheet_is_compared_and_the_round_called_washed_out(self):
+        compared = sheet_mod.compare(self.matches, self.competition,
+                                     self.config.competition("tue-c").expected)
+        self.assertEqual(compared.status, sheet_mod.COMPARED)
+        check, = compared.checks
+        self.assertEqual(check.evidence[-1], "R5 washed out")
+        self.assertEqual(check.weeks_off, ("5",))
+
+
+class TestARestAndAFixtureOfATeamWashedOutAreAWarning(WashoutSeasonCase):
+    """4.535: ``bye-and-fixture`` where the team's round is washed out costs nothing.
+
+    The finding is a warning before a round has come, since no figure depends on it,
+    and an error once it has, the rest being refused and so unpaid. A team washed
+    out is credited the washout, which is worth what the rest is under either
+    ``unplayed``, so no figure depends on the line either: here round 3 rests
+    Hilltop Aces, has them playing Westfield Hawks, and is washed out whole. The
+    first version of this item made it an error saying the team was short the bye,
+    which it was not (the review's #5). Rejected: an error over two lines that pay
+    the same.
+    """
+
+    DRAW = True
+    DRAW_BYES = {"3": "Hilltop Aces"}
+    WASHOUTS = "3 = true"
+
+    def test_the_contradiction_is_a_warning_that_says_why(self):
+        finding, = self.findings("bye-and-fixture")
+        self.assertEqual((finding.severity, finding.subject),
+                         (validate.WARNING, "R3 hilltop-aces"))
+        self.assertIn("The team is credited the round's washout whichever line is "
+                      "true, so no figure depends on it.",
+                      " ".join(finding.message.split()))
+
+
+class TestARestAndAFixtureInARoundWashedOutForOthersStopTheRun(WashoutSeasonCase):
+    """4.535: once a round has come by a washout, a rest refused is a bye owed.
+
+    Round 3 rests Hilltop Aces and has them playing Westfield Hawks, and only
+    Riverside Rockets v Northside Nets is declared washed out: the round has come,
+    the Aces are no team washed out, and the rest refused leaves them short the bye
+    if the rest is the true line, as in a round with a card.
+    """
+
+    DRAW = True
+    DRAW_BYES = {"3": "Hilltop Aces"}
+    WASHOUTS = '3 = [["Riverside Rockets", "Northside Nets"]]'
+
+    def test_the_contradiction_is_an_error(self):
+        finding, = self.findings("bye-and-fixture")
+        self.assertEqual((finding.severity, finding.subject),
+                         (validate.ERROR, "R3 hilltop-aces"))
+
+
+class TestARestAndAFixtureInARoundNobodyHasReachedAreAWarning(WashoutSeasonCase):
+    """4.535's premise: the same draw with round 3 not declared washed out."""
+
+    DRAW = True
+    DRAW_BYES = {"3": "Hilltop Aces"}
+
+    def test_the_contradiction_is_a_warning(self):
+        finding, = self.findings("bye-and-fixture")
+        self.assertEqual(finding.severity, validate.WARNING)
+
+
+class TestADeclaredDrawWithoutTheWashoutsStillAsksForTheCards(WashoutSeasonCase):
+    """4.535's premise, through the declared draw: four fixtures with no card."""
+
+    DRAW = True
+
+    def test_each_fixture_with_no_card_is_told(self):
+        self.assertEqual(sorted(i.subject for i in self.findings("card-missing")),
+                         ["R3 hilltop-aces v westfield-hawks",
+                          "R3 lakeside-spinners v eastwood-bears",
+                          "R3 riverside-rockets v northside-nets",
+                          "R4 lakeside-spinners v northside-nets"])
+
+
+class TestAFixtureWashedOutInTheLastRoundLeavesItsOtherCardsToFind(WashoutSeasonCase):
+    """4.535: a round with a washout has come, so its other teams are short a card.
+
+    Round 5, the last, has no card, and only Hilltop Aces v Northside Nets is
+    declared washed out. The round counted as played and the ladder complete, while
+    its other four teams were in no note: a round with no card and none after it is
+    one still to come, and the washout had not made it one that came (the review's
+    #2). It has come, and the four are told as a round short of cards; the rounds
+    note says what the round has, a fixture washed out and no card.
+    """
+
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 3, "5": 0}
+    WASHOUTS = '5 = [["Hilltop Aces", "Northside Nets"]]'
+
+    def test_its_other_teams_are_told_as_short_of_cards(self):
+        note, = self.notes("round 5 accounts for none of")
+        self.assertTrue(note.startswith(
+            "tue-c: round 5 accounts for none of Eastwood Bears, Lakeside Spinners, "
+            "Riverside Rockets and Westfield Hawks."), note)
+
+    def test_the_rounds_note_says_a_fixture_of_it_was_washed_out(self):
+        note, = self.notes("regular rounds")
+        self.assertEqual(note, "tue-c: cards were found for 4 regular rounds (1, 2, "
+                               "3 and 4), round 5 has a fixture declared washed out "
+                               "and no card, and the season is declared as 5 rounds "
+                               "long.")
+
+
+class TestAFixtureWashedOutInTheLastRoundOfTheDrawLeavesItsOtherCardsToFind(
+        WashoutSeasonCase):
+    """4.535: with the draw typed in, the same round's two other fixtures are cards to find.
+
+    ``card-missing`` names each, and says why the season is past them, a fixture
+    of their round washed out; discovery's note counts the round's cards against
+    its fixtures, where it said ``which is what a round nobody has played yet looks
+    like`` (the review's #2).
+    """
+
+    DRAW = True
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 3, "5": 0}
+    WASHOUTS = '5 = [["Hilltop Aces", "Northside Nets"]]'
+
+    def test_each_card_missing_is_asked_for(self):
+        found = self.findings("card-missing")
+        self.assertEqual(sorted(i.subject for i in found),
+                         ["R5 riverside-rockets v lakeside-spinners",
+                          "R5 westfield-hawks v eastwood-bears"])
+        self.assertIn("nothing at all was read for that round, though a fixture of it "
+                      "is declared washed out, so the night came",
+                      " ".join(found[0].message.split()))
+
+    def test_the_round_is_told_as_short_and_not_as_still_to_come(self):
+        self.assertEqual(self.notes("nobody has played yet"), [])
+        self.assertEqual(len(self.notes("round 5 has cards for 0 of its 3 declared "
+                                        "fixtures")), 1)
+
+
+class TestADeclaredRoundWithNoCardBeforeARoundWashedOutIsCardsToFind(WashoutSeasonCase):
+    """4.535: in a declared draw, a round the season went past by a washout.
+
+    Round 4 has no card, and round 5, the last, is washed out whole: round 4's three
+    fixtures are cards to find, as they would be before a round of cards, and the
+    note says what showed the season went past it, which is no card. Before, round
+    4 was told ``which is what a round nobody has played yet looks like``.
+    """
+
+    DRAW = True
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 0, "5": 0}
+    WASHOUTS = "5 = true"
+
+    def test_the_round_is_told_as_gone_past_by_the_washout(self):
+        note, = self.notes("is in the declared draw with no cards at all")
+        self.assertEqual(note, "tue-c: round 4 is in the declared draw with no cards "
+                               "at all, and a later round is declared washed out, so "
+                               "the season has moved past it. Those are scorecards to "
+                               "find, not a round nobody has played.")
+
+    def test_each_of_its_fixtures_is_a_card_missing_since_round_5_was_washed_out(self):
+        found = self.findings("card-missing")
+        self.assertEqual(len(found), 3)
+        self.assertIn("nothing at all was read for that round, and round 5 is "
+                      "declared washed out, so the season is past it",
+                      " ".join(found[0].message.split()))
+
+
+class TestARestAndAFixtureInAFinalWashedOutAreAWarning(WashoutSeasonCase):
+    """4.535: a final washed out pays no rest and no washout, so nothing depends on it.
+
+    The semi-final rests Hilltop Aces and has them playing Riverside Rockets, and is
+    declared washed out whole. A final is in no ladder (F11): its rest is paid
+    nothing whether refused or not, and its washout credits nobody, so the finding
+    is the warning a round not come gives, and does not say the team is credited
+    the washout.
+    """
+
+    DRAW = True
+    EXTRA = ('[[competitions.tue-c.rounds]]\nnumber = "SF"\n'
+             'fixtures = [["Hilltop Aces", "Riverside Rockets"]]\nbye = "Hilltop Aces"')
+    WASHOUTS = "SF = true"
+
+    def test_the_contradiction_is_a_warning_and_claims_no_credit(self):
+        finding, = self.findings("bye-and-fixture")
+        self.assertEqual(finding.severity, validate.WARNING)
+        self.assertIn("Nothing has been read for that round yet, so no figure depends "
+                      "on it", " ".join(finding.message.split()))
+
+
+class TestARunARoundTheByesTableRestsSplitsIsToldEitherSideOfIt(WashoutSeasonCase):
+    """4.535: a round the byes table rests the whole grade in is no gap, nor a round come.
+
+    Rounds 2 to 4 have no card and every team rests in round 3, a week the grade
+    had off: round 3 is accounted for, and splits the run, so rounds 2 and 4 are
+    each told on their own, by round 5's cards. Rejected: telling round 3 too, which
+    the club has answered, and counting a week off as a round come, which the byes
+    table's own rule refuses (4.86).
+    """
+
+    CARDED = {"1": 3, "2": 0, "3": 0, "4": 0, "5": 3}
+    EXTRA = "[competitions.tue-c.byes]\n" + "\n".join(
+        f'"{name.title()}" = 3' for name in SIX_NAMES)
+
+    def test_each_round_either_side_is_told_by_the_round_after_the_run(self):
+        self.assertEqual([note.split(". If")[0]
+                          for note in self.notes("has no card, though")],
+                         ["tue-c: round 2 has no card, though round 5 has",
+                          "tue-c: round 4 has no card, though round 5 has"])
+
+
+class TestARoundWithNoCardBeforeARoundWashedOutIsAskedAbout(WashoutSeasonCase):
+    """4.535: a round washed out reaches the season as a card does, for the rounds before.
+
+    Round 4 has no card and round 5 is washed out whole: round 4 is a round the
+    season went past, and is told as one, with what reached it.
+    """
+
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 0, "5": 0}
+    WASHOUTS = "5 = true"
+
+    def test_the_round_is_told_with_the_washout_after_it(self):
+        self.assertEqual(self.notes("has no card, though"), [
+            "tue-c: round 4 has no card, though round 5 is declared washed out. If "
+            "it was washed out, say so with 4 = true under "
+            "[competitions.tue-c.washouts], and it counts as a round played; if not, "
+            "its cards are still to export."])
+
+
+class TestARoundWhoseCardsWereFiledElsewhereIsNotToldAsAWashout(WashoutSeasonCase):
+    """4.535: the hint says nothing of a round a card filed under another night fits.
+
+    Round 3 was played on the Thursday, so its cards are filed under a Thursday
+    competition and tue-c has none of round 3. The hint told it as a washout to
+    declare or cards to export, and both are wrong, the first crediting a washout
+    nobody had under ``average`` (the review's #4). A round a card of two of the
+    competition's teams was filed under another night in is no gap this note can
+    speak of; 4.496 is the note that should.
+    """
+
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 3, "5": 3}
+    MOVED = ("3",)
+
+    def test_the_round_is_not_told_as_a_washout(self):
+        moved = {m.round for comp_id, found in self.found.matches.items()
+                 if comp_id != "tue-c" for m in found}
+        self.assertEqual(moved, {"3"})
+        self.assertEqual(self.notes("has no card, though"), [])
+
+
+class TestAWashoutPastTheLengthADrawGaveIsToldAsAWashout(WashoutSeasonCase):
+    """4.535: F3 and the writer tell a washout past the draw's length as a washout.
+
+    A draw of rounds 1 to 3, no ``rounds_total``, and round 4 declared washed out:
+    the season has played past the length the draw gave, which F3 stops the run
+    over. It said ``rounds_total is declared as 3``, which nobody typed, and the
+    writer's comment ``cards were found for 4 regular rounds``, which round 4 has
+    none of (the review's #7). Both now say the draw gave the length and that
+    round 4 is declared washed out.
+    """
+
+    DRAW = True
+    DRAW_ROUNDS = ("1", "2", "3")
+    TOTAL = False
+    CARDED = {"1": 3, "2": 3, "3": 3, "4": 0, "5": 0}
+    WASHOUTS = "4 = true"
+
+    def test_f3_says_the_draw_gave_the_length_and_round_4_is_a_washout(self):
+        error, = self.findings("F3")
+        self.assertEqual(" ".join(error.message.split()),
+                         "the declared draw lists 3 regular rounds, which with no "
+                         "rounds_total is the season's length, but 4 regular rounds "
+                         "have been played (1, 2, 3 and 4). Round 4 is declared "
+                         "washed out, which the draw does not list: add them under "
+                         "[[competitions.tue-c.rounds]] if the draw grew, or set "
+                         "rounds_total under [competitions.tue-c] if the draw is not "
+                         "the whole season.")
+
+    def test_the_writers_comment_says_so_too(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches=self.found.matches)
+        said = " ".join(re.sub(r"(?m)^# ?", "", text).split())
+        self.assertIn("The draw you declared gave the season 3 rounds, and round 4 is "
+                      "declared washed out, which it does not list, so that length is "
+                      "not written here.", said)
+
+
+class TestAWashoutNamingATeamNoCardNamesIsReported(WashoutSeasonCase):
+    """4.535: with the team list open, a name the cards do not have is a warning.
+
+    With the list declared, the loader refuses it, as it refuses a bye for a team the
+    list lacks. Open, there is nothing to hold it to until the cards are read, and a
+    misspelt team would otherwise be credited nothing, silently, while the team meant
+    stays a round short under ``average``.
+    """
+
+    TEAMS = False
+    WASHOUTS = '4 = [["Lakeside Spinners", "Northside Nest"]]'
+
+    def test_the_name_is_reported_with_the_round(self):
+        warning, = self.findings("washout-team")
+        self.assertEqual(warning.severity, validate.WARNING)
+        self.assertEqual(" ".join(warning.message.split()),
+                         "round 4: the washouts table names Northside Nest, which no "
+                         "card of tue-c names, so nothing was credited for it. "
+                         "Check the spelling against the team names the cards print.")
+
+
+class TestTheConfigWrittenFromTheCardsKeepsTheWashouts(WashoutSeasonCase):
+    """4.535: ``--discover --force`` writes the table back, and counts its rounds.
+
+    The writer keeps every table a club typed but the draw, and says what the page's
+    count of rounds played will be where no length is typed; that count is the
+    page's, washed-out rounds in it.
+    """
+
+    WASHOUTS = '3 = true\n4 = [["Lakeside Spinners", "Northside Nets"]]'
+
+    def test_the_table_is_written_back_and_loads_back_the_same(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches=self.found.matches)
+        self.assertIn('[competitions.tue-c.washouts]\n3 = true\n'
+                      '4 = [["Lakeside Spinners", "Northside Nets"]]\n', text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(text, encoding="utf-8")
+            again = config_mod.load(path)
+        self.assertEqual(again.competition("tue-c").washouts,
+                         self.config.competition("tue-c").washouts)
+
+    def test_the_rounds_played_it_quotes_count_the_washout(self):
+        bare = replace_competition(self.config, "tue-c", rounds_total=None)
+        text = config_mod.render(bare, competitions=[self.competition],
+                                 matches=self.found.matches)
+        said = " ".join(re.sub(r"(?m)^# ?", "", text).split())
+        self.assertIn('the dashboard says "5 rounds played"', said)
+
+
+class TestTheReportSaysWhatWasWashedOut(unittest.TestCase):
+    """4.535: the run's report says which rounds and fixtures were washed out.
+
+    The lines are the club's, and the report is where a club sees that they took:
+    beside the rounds line they move, in the words the page heads them with, a round
+    whole or each fixture by its teams. Through ``build.py --check``, as a club runs
+    it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        data = write_washout_season(
+            root, carded=WashoutSeasonCase.CARDED, cancelled=False,
+            config=washout_config(
+                washouts='3 = true\n4 = [["Lakeside Spinners", "Northside Nets"]]'))
+        done = subprocess.run(
+            (sys.executable, str(ROOT / "build.py"), "--check", "--data", str(data),
+             "--config", str(root / "config.toml"),
+             "--generated", "2026-06-01T00:00:00"),
+            cwd=root, capture_output=True, text=True, timeout=600)
+        cls.code, cls.out = done.returncode, done.stdout + done.stderr
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_the_washouts_are_said_beside_the_rounds_they_count_in(self):
+        flat = " ".join(self.out.split())
+        self.assertIn("rounds 5 of 5 played washed out round 3, the whole round; "
+                      "round 4, Lakeside Spinners v Northside Nets draw cards", flat)
+        self.assertEqual(self.code, 0, self.out)
+
+def replace_competition(config, comp_id: str, **changes):
+    """*config* with one section's fields changed, as a club's edit would leave it."""
+    competitions = dict(config.competitions)
+    competitions[comp_id] = dataclasses.replace(competitions[comp_id], **changes)
+    return dataclasses.replace(config, competitions=competitions)
+
+
+class TestAByeInARoundWashedOutWholeIsCreditedOnceTheRoundHasCome(FiveMondaysCase):
+    """4.535: a five-team round rained off pays its rest as well as its washouts.
+
+    ``stats.with_byes`` credits a rest only in a round the season has reached, and it
+    told that by the cards (4.433), so a round washed out with no card paid its
+    resting team nothing under ``average`` while the four who were rained off were
+    credited. The round has come once it is declared washed out: here round 4, cards
+    for rounds 1, 2, 3 and 5, and every team counts five.
+    """
+
+    CARDED = ("1", "2", "3", "5")
+    UNPLAYED = "average"
+    WASHOUTS = {"4": ()}
+
+    def test_every_team_counts_the_five_rounds(self):
+        self.assertEqual({team["slug"]: team["counted"] for team in self.season["teams"]},
+                         dict.fromkeys(("eastwood-bears", "hilltop-aces",
+                                        "lakeside-spinners", "riverside-rockets",
+                                        "westfield-hawks"), 5))
+        self.assertEqual(self.season["meta"]["rounds_played"], 5)
+
+    def test_the_rest_and_the_washouts_are_one_credit_each(self):
+        credited = [m for m in stats.ladder_matches(self.found.matches["monday-c"],
+                                                    self.competition)
+                    if m.round == "4"]
+        self.assertEqual(sorted(m.home for m in credited),
+                         ["eastwood-bears", "hilltop-aces", "lakeside-spinners",
+                          "riverside-rockets", "westfield-hawks"])
+
+    def test_crediting_twice_credits_nothing_more(self):
+        # with_byes is idempotent given no cards, a washout's credit as a rest's.
+        once = stats.with_byes(self.found.matches["monday-c"], self.competition)
+        self.assertEqual(stats.with_byes(once, self.competition), once)
+
+
+class TestTheTeamARoundsWashoutsLeaveOffIsStillItsBye(FiveMondaysCase):
+    """4.535: a washout accounts for its teams, so a round's one team off is its bye.
+
+    No byes typed here. Round 2 has one card, and its other fixture is declared
+    washed out; round 4 has no card, and both its fixtures are. Each leaves one team
+    of the five off, and with the list declared that team is the round's bye, as
+    it is in a round of two cards. Before, round 2 was told ``accounts for none of``
+    three teams, and round 4, with no card and nothing typed, was no round at all.
+    """
+
+    CARDED = ("1", "2", "3", "5")
+    HALF = ("2",)
+    DECLARE_BYES = False
+
+    @classmethod
+    def setUpClass(cls):
+        two, _ = cls.draw(2)
+        four, _ = cls.draw(4)
+        cls.WASHOUTS = {"2": (two[1],), "4": four}
+        super().setUpClass()
+
+    def test_each_round_has_its_bye(self):
+        self.assertEqual({number: self.competition.byes_for(number)
+                          for number in ("2", "4")},
+                         {"2": ("riverside-rockets",), "4": ("westfield-hawks",)})
+
+    def test_no_round_is_told_as_short_of_cards(self):
         self.assertEqual(self.told(), [])
 
 

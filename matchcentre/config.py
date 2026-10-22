@@ -182,6 +182,9 @@ class CompetitionConfig:
     codes: dict[str, int] = field(default_factory=dict)
     rounds: tuple[RoundConfig, ...] = ()
     byes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # [competitions.<id>.washouts], by round: the fixtures of it the rain stopped, as
+    # the club typed them, and () where it stopped the whole round (4.535).
+    washouts: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
     scoring: str = ""
     sets: str = ""
     unplayed: str = ""
@@ -1242,7 +1245,7 @@ def _competitions(value: object, path: Path, prefix: str,
     # warned about one section down, which is the worst of both answers.
     known = {"label", "day", "division", "season", "season_key", "rounds_total",
              "teams", "captains", "courts", "codes", "rounds",
-             "byes", "expected"} | set(RULES_SETTINGS)
+             "byes", "washouts", "expected"} | set(RULES_SETTINGS)
     out: dict[str, CompetitionConfig] = {}
     for comp_id, table in value.items():
         if not isinstance(table, dict):
@@ -1272,6 +1275,7 @@ def _competitions(value: object, path: Path, prefix: str,
                            f"competitions.{comp_id}.codes", path),
             rounds=_rounds(table.get("rounds"), comp_id, path, warnings),
             byes=_byes_table(table.get("byes"), comp_id, teams, path),
+            washouts=_washouts_table(table.get("washouts"), comp_id, teams, path),
             scoring=str(table.get("scoring", "") or ""),
             sets=str(table.get("sets", "") or ""),
             unplayed=_unplayed(table.get("unplayed"),
@@ -1296,6 +1300,7 @@ def _competitions(value: object, path: Path, prefix: str,
             # A table it compares no line of is named whole, and not line by line.
             expected_refused=tuple(lost) if sheet and sheet.lines else (),
         )
+        _refuse_rested_and_washed_out(out[str(comp_id)], path)
     _refuse_double_claims(out, path, multi=multi)
     return out
 
@@ -1489,6 +1494,133 @@ def _byes_table(value: object, comp_id: str, teams: tuple[str, ...],
         if numbers:
             out[name] = tuple(numbers)
     return out
+
+
+def _washouts_table(value: object, comp_id: str, teams: tuple[str, ...],
+                    path: Path) -> dict[str, tuple[tuple[str, str], ...]]:
+    """``[competitions.<id>.washouts]``: the rounds, or fixtures of them, rained off.
+
+    ::
+
+        [competitions.tuesday-division-a1.washouts]
+        9 = true
+        7 = [["Hilltop Aces", "Riverside Rockets"]]
+
+    Keyed by round, because a washout is a night rather than a team's: ``true`` is
+    the whole round, the week a club has no card of at all, and a list of
+    ``[home, away]`` pairs the fixtures of it the rain stopped while the rest were
+    played. One fixture may leave off its outer brackets, as one round in the byes
+    table may. ``false`` and an empty list say nothing was, so a club can turn a
+    line off without deleting it (4.535).
+
+    A team here that is not in a declared ``teams`` list stops the run, as it does
+    in the byes table and for the same reason: under ``unplayed = "average"`` a
+    washout credits each of its teams, and a typo would credit nobody while the
+    team meant stayed a round short. With the list open it is taken on trust, and
+    the run reports a name no card has (``washout-team``).
+    """
+    if value is None:
+        return {}
+    where = f"[competitions.{comp_id}.washouts]"
+    if not isinstance(value, dict):
+        raise ConfigError(f"{path}: {where} should be a section of round = true "
+                          f"or round = [[\"Home\", \"Away\"]] lines")
+    known = {slugify_or_none(name) for name in teams} - {None}
+    out: dict[str, tuple[tuple[str, str], ...]] = {}
+    lines: set[str] = set()
+    for key, entry in value.items():
+        number = round_key(str(key))
+        if number in lines:
+            # `9` and `" 9"` are one round, its spaces no part of a label, and the
+            # second line replaced the first with nothing said.
+            raise ConfigError(f"{path}: {where} has round {number} on two lines. "
+                              f"Keep the one that is true.")
+        lines.add(number)
+        if not number:
+            # A round of no label is a round no card can be filed under, and on
+            # the page a heading of nothing, as an unnumbered draw block would be.
+            raise ConfigError(f"{path}: {where} has a line with no round before "
+                              f"its =. Write the round as the cards print it, as "
+                              f"9 = true.")
+        label = f"{where} round {number}"
+        shape = (f"Write {toml_key(number)} = true for the whole round, or "
+                 f"{toml_key(number)} = [[\"Home\", \"Away\"]] for the fixtures "
+                 f"of it that were washed out.")
+        if isinstance(entry, bool):
+            if entry:
+                out[number] = ()
+            continue
+        if not isinstance(entry, list):
+            raise ConfigError(f"{path}: {label} should be true or a list of "
+                              f"fixtures, got {entry!r}. {shape}")
+        if not entry:
+            continue
+        if all(isinstance(item, str) for item in entry):
+            # One fixture, its outer brackets left off: `9 = ["Home", "Away"]`.
+            pairs = [entry]
+        elif all(isinstance(item, list) for item in entry):
+            pairs = entry
+        else:
+            raise ConfigError(f"{path}: {label} mixes team names and fixtures, "
+                              f"got {entry!r}. {shape}")
+        fixtures: list[tuple[str, str]] = []
+        seen: dict[str, str] = {}
+        for pair in pairs:
+            if len(pair) != 2 or not all(isinstance(name, str) for name in pair):
+                raise ConfigError(f"{path}: {label}: a fixture is two team names, "
+                                  f"home then away, got {pair!r}. {shape}")
+            home, away = (name.strip() for name in pair)
+            slugs = []
+            for name in (home, away):
+                slug = slugify_or_none(name)
+                if slug is None:
+                    raise ConfigError(f"{path}: {label} names {name!r}, which is "
+                                      f"not a team name. {shape}")
+                if known and slug not in known:
+                    raise ConfigError(
+                        f"{path}: {label} names {name!r}, which is not one of this "
+                        f"competition's teams. A washout credits a team under "
+                        f"unplayed = \"average\", so an unrecognised name here is "
+                        f"refused rather than guessed at. Declared: "
+                        f"{in_words(sorted(teams))}")
+                slugs.append(slug)
+            if slugs[0] == slugs[1]:
+                raise ConfigError(f"{path}: {label} has {home} playing itself. "
+                                  f"{shape}")
+            for slug, name in zip(slugs, (home, away)):
+                if slug in seen:
+                    raise ConfigError(f"{path}: {label} has {name} in two fixtures. "
+                                      f"A team plays once a night: keep the fixture "
+                                      f"that was washed out.")
+                seen[slug] = name
+            fixtures.append((home, away))
+        out[number] = tuple(fixtures)
+    return out
+
+
+def _refuse_rested_and_washed_out(comp: CompetitionConfig, path: Path) -> None:
+    """A team its round rests and has in a fixture washed out, refused (4.535).
+
+    Two of the club's own lines answering what one team did that night, the byes
+    table or the round's ``bye`` and the washouts table, and only its author can
+    say which is true; the ladder would credit the night either way, so nothing
+    else would ever mention it. A whole round washed out over a team resting is no
+    contradiction: in a five-team grade somebody rests every week, rain or not.
+    """
+    rests: dict[str, list[str]] = {number: list(names)
+                                   for number, names in comp.byes_by_round().items()}
+    for rnd in comp.rounds:
+        rests.setdefault(rnd.number, []).extend(rnd.byes)
+    for number, fixtures in comp.washouts.items():
+        resting = {slugify_or_none(name) for name in rests.get(number, ())}
+        for home, away in fixtures:
+            for name in (home, away):
+                if slugify_or_none(name) in resting:
+                    raise ConfigError(
+                        f"{path}: [competitions.{comp.id}] round {number} rests "
+                        f"{name} and has {home} v {away} washed out. Those are two "
+                        f"answers to what {name} did that night: keep the line "
+                        f"that is true.")
 
 
 # What a figure in the sheet table was typed as when it is not one: kept apart from
@@ -1896,8 +2028,14 @@ def toml_string(value: str) -> str:
 
 
 def toml_key(key: str) -> str:
-    """Bare where it can be, quoted where it must be."""
-    if key and all(c.isalnum() or c in "-_" for c in key):
+    """Bare where it can be, quoted where it must be.
+
+    TOML's bare keys are ASCII letters, digits, ``-`` and ``_``. ``str.isalnum`` is
+    true of every letter and figure in Unicode, so a key of one word in another
+    script, a team ``Ñandúes`` or a round ``３``, went out bare, and the file the
+    writer had just written would not load (4.535).
+    """
+    if key and all(c.isascii() and (c.isalnum() or c in "-_") for c in key):
         return key
     return toml_string(key)
 
@@ -2740,8 +2878,9 @@ def _seasons_section(config: Config, comps) -> list[str]:
 def _competition_section(config: Config, comp, matches=(), *,
                          own: list[str] | tuple = ()) -> list[str]:
     from . import export as export_mod
-    from .competition import Provenance, rounds_played_words
-    from .sheet import rounds_listed
+    from .competition import (Provenance, Round, is_finals_label,
+                              rounds_played_words)
+    from .sheet import beyond_words
 
     declared = config.competition(comp.id)
     header = f"[competitions.{toml_key(comp.id)}]"
@@ -2799,7 +2938,14 @@ def _competition_section(config: Config, comp, matches=(), *,
     # played, and so was a week the byes table rests the whole grade in; counted
     # with the finals, a final was a round of the season's length. Counted as the
     # run after it counts them, which has no draw to read a typed ``finals`` in.
-    after = replace(comp, rounds={})
+    # The washouts are kept, as the rewrite keeps their table, so a round rained
+    # off is counted played here as it is on the page (4.535).
+    after = replace(comp, rounds={number: Round(number=number,
+                                                is_finals=is_finals_label(number),
+                                                washed_out=rnd.washed_out,
+                                                washouts=rnd.washouts)
+                                  for number, rnd in comp.rounds.items()
+                                  if rnd.washed_out or rnd.washouts})
     played = len(after.rounds_played(matches))
     # Live whenever the club gave the length, in rounds_total or through its draw:
     # the draw is not written back, and the length it gave would go with it. Not a
@@ -2818,8 +2964,8 @@ def _competition_section(config: Config, comp, matches=(), *,
         if comp.draw_outgrown_by:
             lines.extend(_comment_flow(
                 f"The draw you declared gave the season {length} "
-                f"round{'' if length == 1 else 's'}, and cards were found for "
-                f"{rounds_listed(comp.draw_outgrown_by)}, "
+                f"round{'' if length == 1 else 's'}, and "
+                f"{beyond_words(comp.draw_outgrown_by, {m.round for m in matches})}, "
                 f"which it does not list, so that length is not written here."))
         elif past:
             # Said as the draw's is. Without it, a length the draw had given went
@@ -2931,6 +3077,7 @@ def _competition_section(config: Config, comp, matches=(), *,
         "# The number your published draw gives each team."))
 
     lines.extend(_byes_lines(config, comp))
+    lines.extend(_washouts_lines(comp.id, declared))
     lines.extend(_expected_lines(config, comp, names))
 
     lines.append("")
@@ -3030,6 +3177,34 @@ def _bye_lines(team: str, numbers, *, indent: str = "") -> list[str]:
               for n, week in zip(numbers, weeks)]
     return toml_lines(f"{toml_key(team)} = {toml_value(rounds)}", width=WIDTH,
                       indent=indent)
+
+
+def _washouts_lines(comp_id: str, declared: CompetitionConfig | None) -> list[str]:
+    """``[competitions.<id>.washouts]`` as the club typed it, or nothing (4.535).
+
+    Kept, as the byes are, because ``--discover --force`` drops the draw and keeps
+    every table a club typed: a rewrite that lost this would take the rounds it
+    names out of the rounds played. Written by round, in the order the season
+    runs, each fixture as the loader gave it back, so one typed without its outer
+    brackets comes back with them, and a line that said nothing was washed out
+    does not come back at all. No template where there is none: a washout is
+    rare, and the README, the example file and the run that meets a round with no
+    card say how one is typed. In the order of the declared draw, which places a
+    final it names its own way (4.71).
+    """
+    washouts = declared.washouts if declared else {}
+    if not washouts:
+        return []
+    from .competition import round_sort_key
+    draw = {rnd.number: rnd for rnd in declared.rounds}
+    lines = ["", f"[competitions.{toml_key(comp_id)}.washouts]"]
+    for number in sorted(washouts, key=lambda label: round_sort_key(label, draw)):
+        fixtures = washouts[number]
+        # A key is text however it is typed, so `9` and `"9"` load alike, and the
+        # round goes back bare where TOML allows it.
+        value = toml_value([list(pair) for pair in fixtures]) if fixtures else "true"
+        lines.extend(toml_lines(f"{toml_key(number)} = {value}", width=WIDTH))
+    return lines
 
 
 def _expected_lines(config: Config, comp, names: list[str]) -> list[str]:
@@ -3302,6 +3477,7 @@ def _declared_section(declared: CompetitionConfig) -> list[str]:
         lines.extend(("", f"[competitions.{key}.byes]"))
         for team in sorted(declared.byes):
             lines.extend(_bye_lines(team, declared.byes[team]))
+    lines.extend(_washouts_lines(declared.id, declared))
     lines.extend(_sheet_lines(declared.id, declared.expected))
     lines.append("")
     return lines

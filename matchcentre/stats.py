@@ -66,7 +66,7 @@ from .slugs import unslug
 
 __all__ = ["PRECISION", "match_sort_key", "chronological", "rounds_present",
            "round_display", "round_half_up", "round_stored", "set_win_pct",
-           "with_byes",
+           "with_byes", "washouts_standing",
            "card_against_rest", "rests_standing",
            "MissingCard", "fixtures_without_cards", "later_round_with_cards",
            "RoundCards", "round_cards", "unlisted_words",
@@ -889,6 +889,25 @@ def rests_standing(rnd: Round, matches: Iterable[Match]) -> tuple[str, ...]:
                  and card_against_rest(matches, rnd.number, team) is None)
 
 
+def washouts_standing(competition: Competition, number: str,
+                      matches: Iterable[Match]) -> tuple[str, ...]:
+    """The teams round *number* is washed out for that no card has playing in it.
+
+    The rule for whether a washout the club declared stands, read by the ladder and
+    by the check that says why one did not (4.535). A card with the team on it that
+    round is the record of its night: called off, or blank, it is the washout's own
+    card and is scored as such; with a result, the result counts and the washout is
+    ``washout-contradicted``. Either way nothing is credited beside it, or a team
+    would be paid twice for one night. Unlike a rest, a fixture in the round's own
+    draw does not refuse it: the fixture washed out is one the draw lists. A team the
+    competition does not have is in no ladder row to credit, as a bye for one is
+    not, and ``washout-team`` names it.
+    """
+    matches = tuple(matches)
+    return tuple(team for team in competition.washed_out_teams(number)
+                 if card_against_rest(matches, number, team) is None)
+
+
 def with_byes(matches: Sequence[Match], competition: Competition,
               cards: Sequence[Match] | None = None) -> list[Match]:
     """The matches, plus one scoreable ``BYE`` per bye the draw actually states.
@@ -919,21 +938,43 @@ def with_byes(matches: Sequence[Match], competition: Competition,
     judged by, and the byes it added are skipped the second time. Given *cards*,
     its output lacks the ones *matches* left out, which is why
     :func:`ladder_matches` is never fed its own.
+
+    And one ``CANCELLED`` match with no opponent per team a declared washout
+    leaves on no card (:func:`washouts_standing`), which the ladder scores as it
+    scores a Match Cancelled card: nothing under ``unplayed = "zero"``, the team's
+    own average under ``"average"`` (4.535). One per team and round, so a team
+    resting in a round washed out whole is credited its rest and no more. A round
+    declared washed out is a round played, as it is for the season's progress,
+    so its rests are credited too: the night came, and rained. Not a final's: a
+    final is in no ladder (F11), and *matches*, the ladder's, hold none of its
+    cards, so a final's rests were never credited and its washouts are not.
     """
     played = set(rounds_present(matches))
-    already = {(m.round, m.home) for m in matches if m.status is MatchStatus.BYE}
+    played.update(number for number, rnd in competition.rounds.items()
+                  if rnd.has_washout and not competition.is_finals_round(number))
+    already = {(m.round, m.home) for m in matches if m.is_bye}
+    judged = matches if cards is None else cards
     extra: list[Match] = []
     for number in competition.round_order:
         rnd = competition.rounds[number]
         if number not in played:
             continue
-        for team in rests_standing(rnd, matches if cards is None else cards):
+        resting = rests_standing(rnd, judged)
+        for team in resting:
             if (number, team) in already:
                 continue
             extra.append(Match(competition=competition.id, round=number,
                                home=team, away=NO_OPPONENT,
                                fmt=competition.fmt, rules=competition.rules,
                                date=rnd.date, sets=(), status=MatchStatus.BYE))
+        for team in washouts_standing(competition, number, judged):
+            if team in resting or (number, team) in already:
+                continue
+            extra.append(Match(competition=competition.id, round=number,
+                               home=team, away=NO_OPPONENT,
+                               fmt=competition.fmt, rules=competition.rules,
+                               date=rnd.date, sets=(),
+                               status=MatchStatus.CANCELLED))
     return list(matches) + extra
 
 
@@ -959,6 +1000,9 @@ class MissingCard:
     fixtures: int
     later: str
     unlisted: int
+    # The round itself, or the earliest after it, with a washout declared: what
+    # reached the round where no card did (4.535). "" for none.
+    washed: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -982,12 +1026,19 @@ class RoundCards:
 
 
 def round_cards(rnd: Round, matches: Iterable[Match]) -> RoundCards:
-    """*rnd*'s cards among *matches*, set against the fixtures the draw lists."""
+    """*rnd*'s cards among *matches*, set against the fixtures the draw lists.
+
+    A listed fixture the club declared washed out with no card is neither carded
+    nor missing: no card of it is coming (4.535).
+    """
     here = [m for m in matches if m.round == rnd.number and not m.is_bye]
     played = {frozenset((m.home, m.away)) for m in here}
     listed = {frozenset(pair) for pair in rnd.fixtures}
-    missing = tuple(pair for pair in rnd.fixtures if frozenset(pair) not in played)
-    return RoundCards(carded=len(rnd.fixtures) - len(missing), missing=missing,
+    missing = tuple(pair for pair in rnd.fixtures
+                    if frozenset(pair) not in played and not rnd.washed(*pair))
+    return RoundCards(carded=sum(1 for pair in rnd.fixtures
+                                 if frozenset(pair) in played),
+                      missing=missing,
                       unlisted=tuple(m for m in here
                                      if frozenset((m.home, m.away)) not in listed))
 
@@ -1023,6 +1074,9 @@ def later_round_with_cards(order: Iterable[str],
 def fixtures_without_cards(matches: Sequence[Match],
                            competition: Competition) -> list[MissingCard]:
     """Declared fixtures the season has gone past with no card, in draw order.
+
+    A round with a washout declared is one the season has reached, card or none,
+    and so is every round before it (4.535): the night came.
 
     The one absence in this program that needs no guesswork. Every other one has a
     second reading -- a team missing from a round might be resting, a round with no
@@ -1061,10 +1115,13 @@ def fixtures_without_cards(matches: Sequence[Match],
         carded[match.round].append(match)
     order = competition.round_order
     later = later_round_with_cards(order, carded)
+    washed = {number for number in order if competition.rounds[number].has_washout}
+    reached = later_round_with_cards(order, set(carded) | washed)
+    next_washed = later_round_with_cards(order, washed)
     out: list[MissingCard] = []
     for number in order:
         here = carded.get(number, ())
-        if not here and not later[number]:
+        if not here and not reached[number] and number not in washed:
             continue        # the season has not reached this round
         rnd = competition.rounds[number]
         counted = round_cards(rnd, here)
@@ -1072,7 +1129,9 @@ def fixtures_without_cards(matches: Sequence[Match],
             out.append(MissingCard(round=number, home=home, away=away,
                                    cards=counted.carded, fixtures=len(rnd.fixtures),
                                    later=later[number],
-                                   unlisted=len(counted.unlisted)))
+                                   unlisted=len(counted.unlisted),
+                                   washed=(number if number in washed
+                                           else next_washed[number])))
     return out
 
 

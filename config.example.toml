@@ -473,6 +473,24 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 "Nightjars" = [6]
 "Silvereyes" = [6]
 
+# Rounds, or fixtures of them, that were washed out. A round rained off before
+# anybody played leaves no card at all, and a fixture rained off late leaves
+# none either, so without a line here the round is missing from the rounds
+# played and its teams read as cards still to export. Keyed by round, as the
+# round is printed on the cards: true for the whole round, or the fixtures of it
+# that were washed out, each a pair of team names from the teams list above. The
+# rest of the round was played, and its cards say so.
+#
+# A washout counts as a round played, as a round of Match Cancelled cards does,
+# and is scored as [rules] unplayed says, as a bye is: nothing under "zero", the
+# team's own average under "average". A card always wins: a fixture listed here
+# whose card has a result is scored as the card says, with a warning.
+[competitions.wednesday-division-3.washouts]
+# Rain before the first ball: nobody played round 9.
+9 = true
+# Round 4's early matches finished; the late one never started.
+4 = [["Nightjars", "Silvereyes"]]
+
 # Your association's published sheet, typed in so that every build checks this
 # dashboard against it and names any team that disagrees, with both figures.
 # Optional, and nothing in it changes a figure on the page.

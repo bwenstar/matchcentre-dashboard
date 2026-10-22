@@ -2436,7 +2436,11 @@ function byeRow(slug) {
  * worked out in Python, where the draw and the rule that decides it live. Doing it
  * here would need the whole draw in a second language, and the two copies would
  * differ. The data health section names the card; this is the row a reader is
- * looking at when they wonder where it went. */
+ * looking at when they wonder where it went.
+ *
+ * And a third, asked first: a fixture the club declared washed out (`washed_out`,
+ * 4.535), which has no card and none to come. The hover says that and not what it
+ * earns, which a final's washout does not (F11). */
 function scheduledRow(fx) {
   var row = el('div', { class: 'match' });
   var line = el('div', { class: 'summary', style: { display: 'flex', 'flex-wrap': 'wrap',
@@ -2447,14 +2451,15 @@ function scheduledRow(fx) {
   // Through dotted() rather than concatenated, because a round declared without a
   // date and with no card to take one from printed "scheduled · " and stopped -- a
   // separator with nothing after it, which reads as something that failed to load.
-  var said = dotted([fx.card_missing ? 'no card yet' : 'scheduled', longDate(fx.date)]);
+  var said = dotted([fx.washed_out ? 'washed out' : (fx.card_missing ? 'no card yet' : 'scheduled'), longDate(fx.date)]);
   // One span either way, so the wording, the colour and the hover cannot drift apart
   // into three answers about one fixture. `applyAttrs` drops a null, so a fixture
   // nobody is waiting on carries no tooltip rather than an empty one.
   line.appendChild(el('span', {
     class: fx.card_missing ? 'meta missing' : 'meta',
-    title: fx.card_missing
-      ? 'The draw lists this fixture and no scorecard was read for it.' : null,
+    title: fx.washed_out
+      ? 'Declared washed out: no card of it is coming.'
+      : (fx.card_missing ? 'The draw lists this fixture and no scorecard was read for it.' : null),
     text: said }));
   row.appendChild(line);
   return row;
@@ -3381,8 +3386,9 @@ function renderTeam(main, slug) {
         'that is wrong leaves the data folder. The data health section names the ' +
         plural(named, 'file') + '.' }));
   }
+  // Not a fixture washed out, which has no card and none to come (4.535).
   var upcoming = (S.fixtures || []).filter(function (f) {
-    return !f.played && (f.home === t.slug || f.away === t.slug);
+    return !f.played && !f.washed_out && (f.home === t.slug || f.away === t.slug);
   });
   if (upcoming.length) {
     box.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px', 'margin-top': '10px' },
@@ -3548,8 +3554,9 @@ function teamH2HTable(t) {
   var showUndecided = anyUndecidedMeetings(records);
   var rows = others.map(function (o, i) {
     var rec = records[i];
+    // The meetings to come, which a fixture washed out is not (4.535).
     var scheduled = (S.fixtures || []).filter(function (f) {
-      return !f.played && ((f.home === t.slug && f.away === o.slug) ||
+      return !f.played && !f.washed_out && ((f.home === t.slug && f.away === o.slug) ||
         (f.home === o.slug && f.away === t.slug));
     });
     return {
@@ -3961,6 +3968,9 @@ function renderMatches(main) {
     // a round had not been played over rows for cards from that very round. The rows'
     // own answer settles the heading, so the two cannot disagree on one screen.
     var absent = fixtures.filter(function (f) { return f.card_missing; }).length;
+    // A washout the club declared, the whole round or a fixture of it (4.535), by
+    // the exporter's flags: no card is coming of it, and the heading says what it was.
+    var washed = r.washed_out || fixtures.some(function (f) { return f.washed_out; });
     // And a round with cards may be one nobody played, every card called off or left
     // blank, each saying below that it counts for nothing: headed "played" in green
     // over them, it was the heading and its rows disagreeing again (4.452). The team
@@ -3970,8 +3980,8 @@ function renderMatches(main) {
     // says what it is short of, in the colour of a card to chase, as a round short of
     // every card does.
     var nonePlayed = noCardPlayed(r);
-    var ifNone = absent ? plural(absent, 'card') + ' missing' : 'not played';
-    var state = r.played ? (nonePlayed ? ifNone : 'played') : (absent ? 'no cards yet' : 'not played yet');
+    var ifNone = absent ? plural(absent, 'card') + ' missing' : (washed ? 'washed out' : 'not played');
+    var state = r.played ? (nonePlayed ? ifNone : 'played') : (absent ? 'no cards yet' : (washed ? 'washed out' : 'not played yet'));
     var head2 = el('div', { class: 'round-head' }, [
       // A finals round never contributes ladder points (F11), and it is the
       // round's own non-numeric label that says it is one.
@@ -3988,10 +3998,12 @@ function renderMatches(main) {
     main.appendChild(head2);
     var box = el('div', { class: 'card' });
     if (!fixtures.length) {
+      // A round washed out whole with no draw typed has no fixture to list, and
+      // "No fixtures listed" over it read as a draw left out (4.535).
       box.appendChild(el('p', { class: 'empty-note',
         text: r.is_finals
           ? 'Pairings are set by ladder position once the regular rounds are in.'
-          : 'No fixtures listed for this round.' }));
+          : (r.washed_out ? 'The whole round was washed out.' : 'No fixtures listed for this round.') }));
     }
     if (r.is_finals) box.appendChild(finalsNote());
     // Every card of the fixture, in the order the build read them, which is the

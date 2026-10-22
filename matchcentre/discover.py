@@ -51,9 +51,9 @@ from .card import (Card, Rejection, date_forms, majority_letterhead, round_key,
 from .competition import (DRAW_DECLARED, DRAW_FROM_CARDS, Club, Competition,
                           CompetitionError, Player, Provenance, Round, Team,
                           competition_id, dedupe_fixtures, infer_byes,
-                          is_finals_label, merge_provenance, round_sort_key,
-                          rounds_played_words, season_order_key, year_of,
-                          years_played)
+                          is_finals_label, merge_provenance, round_number,
+                          round_sort_key, rounds_played_words, season_order_key,
+                          year_of, years_played)
 from .config import (CompetitionConfig, Config, mode_among_labels,
                      teams_instruction, toml_key, toml_value)
 from .model import Match, MatchStatus, Rating, SetResult, all_blank, rubber_award
@@ -535,7 +535,10 @@ def discover(cards: Iterable[Card], rejected: Iterable[Rejection], *,
     for competition, comp_matches, _, comp_notes, gaps_at in built_all:
         comp_notes[gaps_at:gaps_at] = _shortfall_notes(
             competition.id, competition.rounds, comp_matches, competition.teams,
-            competition.teams_declared, strays.get(competition.id, ()))
+            competition.teams_declared, strays.get(competition.id, ())) + (
+            [] if config.demo else _round_gone_past_notes(
+                competition, comp_matches,
+                _rounds_filed_elsewhere(competition, competitions, matches)))
         notes.extend((competition.season_key, note) for note in comp_notes)
     notes.extend((None, note) for note in _season_folder_notes(
         competitions, matches, config=config, root=root))
@@ -694,6 +697,81 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
                                       root=root))
     return competition, matches, usable, notes, gaps_at
 
+
+def _rounds_filed_elsewhere(comp: Competition, competitions: Sequence[Competition],
+                            matches: dict[str, list[Match]]) -> set[str]:
+    """The rounds a card of two of *comp*'s teams was filed under another competition in.
+
+    Of the same season key, as :func:`_filed_elsewhere` looks, and of any round,
+    where that function asks only of the rounds *comp* has: a round whose every card
+    went to another night is no round of *comp*'s at all (4.496).
+    """
+    return {match.round for other in competitions
+            if other.id != comp.id and other.season_key == comp.season_key
+            for match in matches[other.id]
+            if match.home in comp.teams and match.away in comp.teams}
+
+
+def _round_gone_past_notes(comp: Competition, matches: list[Match],
+                           elsewhere: Collection[str] = ()) -> list[str]:
+    """Numbered rounds with no card between rounds with cards, and nothing said of them.
+
+    The season has gone past such a round, as card-missing and the gap notes tell
+    it (4.433), and a round nothing accounts for is a washout nobody declared or
+    cards nobody exported. Measured on a fictional season whose third round was
+    rained off (/tmp/mcw/scratch/before/zero-none/out.txt), it was in no note, and
+    ``4 of 5 played`` gave no reason. So each run of such rounds is named with the
+    line that declares a washout and the other answer (4.535). A round the draw, the
+    byes table or the washouts table names is accounted for, and the gap notes speak
+    of it; so a club whose grade had a week off says so there.
+
+    Between the rounds the season has reached only, by a card or a washout, and
+    worked out a run at a time rather than a week at a time: a club whose rounds
+    are not numbered from 1 is told nothing about the weeks before its first, and a
+    card misread as round 2000000 costs one note and no loop through the weeks
+    before it. A round of *elsewhere*, one a card of two of the competition's teams
+    was filed under another night in (:func:`_rounds_filed_elsewhere`), is no gap
+    this can speak of: its card was read, and the answer is where it went (4.496).
+    Rejected: counting from round 1, and a round after the last reached, which every
+    build of a season in progress would be told of.
+    """
+    present = {round_number(number) for number in comp.rounds} - {None}
+    present.update(week for number in elsewhere
+                   if (week := round_number(number)) is not None)
+    carded = {m.round for m in matches}
+    reached = sorted({(week, number) for number in carded | {
+                          n for n, rnd in comp.rounds.items() if rnd.has_washout}
+                      if not comp.is_finals_round(number)
+                      and (week := round_number(number)) is not None})
+    where = f"[competitions.{toml_key(comp.id)}.washouts]"
+    notes: list[str] = []
+    for (before, _), (week, later) in zip(reached, reached[1:]):
+        low = before + 1
+        for high in [w - 1 for w in sorted(present) if before < w < week] + [week - 1]:
+            if low <= high:
+                notes.append(_gone_past_note(comp.id, low, high, later, where,
+                                             washed=later not in carded))
+            low = high + 2
+    return notes
+
+
+def _gone_past_note(comp_id: str, low: int, high: int, later: str, where: str, *,
+                    washed: bool = False) -> str:
+    """:func:`_round_gone_past_notes`'s note on the rounds *low* to *high*.
+
+    *washed* where round *later*, which reached them, has no card and a washout.
+    """
+    since = (f"round {later} is declared washed out" if washed
+             else f"round {later} has")
+    if low == high:
+        return (f"{comp_id}: round {low} has no card, though {since}. If it was "
+                f"washed out, say so with {low} = true under {where}, and it counts "
+                f"as a round played; if not, its cards are still to export.")
+    weeks = f"{low} and {high}" if high == low + 1 else f"{low} to {high}"
+    return (f"{comp_id}: rounds {weeks} have no card, though {since}. If they were "
+            f"washed out, say so with a line for each under {where}, as {low} = "
+            f"true, and they count as rounds played; if not, their cards are still "
+            f"to export.")
 
 def _off_night_dates(comp_id: str, cards: list[Card]
                      ) -> tuple[dict[str, str], list[str]]:
@@ -1679,6 +1757,7 @@ def _build_draw(comp_id: str, matches: list[Match], *,
     notes: list[str] = []
     played = {m.round for m in matches}
     stated = _stated_byes(declared, teams)
+    washouts = _stated_washouts(declared, teams)
 
     if declared and declared.rounds:
         rounds: dict[str, Round] = {}
@@ -1706,7 +1785,7 @@ def _build_draw(comp_id: str, matches: list[Match], *,
                                      default=""),
                 fixtures=fixtures,
                 byes=_byes_for(rnd.number, stated, rnd.byes, fixtures,
-                               teams, teams_declared),
+                               teams, teams_declared, washouts),
                 is_finals=rnd.is_finals, finals_typed=rnd.finals,
                 note=rnd.note, source=source)
         extra = sorted(played - set(rounds), key=round_sort_key)
@@ -1721,11 +1800,17 @@ def _build_draw(comp_id: str, matches: list[Match], *,
                 date=min((m.date for m in in_round if m.date), default=""),
                 fixtures=fixtures,
                 byes=_byes_for(number, stated, (), fixtures,
-                               teams, teams_declared),
+                               teams, teams_declared, washouts),
                 is_finals=is_finals_label(number), source=DRAW_FROM_CARDS)
         _add_bye_only_rounds(rounds, stated)
+        _add_washouts(rounds, washouts, stated, teams, teams_declared)
         outgrown: tuple[str, ...] = ()
-        if extra and declared.rounds_total is None:
+        # A washout of a round the draw does not list plays the season past the
+        # draw's length as a card of one does, and is said as a washout (4.535).
+        listed = {rnd.number for rnd in declared.rounds}
+        beyond = sorted({*extra, *(number for number in washouts
+                                   if number not in listed)}, key=round_sort_key)
+        if beyond and declared.rounds_total is None:
             # The length is the draw's, so the rounds it leaves out are what F3 has
             # to say about a season played past it. The scaffold follows the
             # no-draw branch below: the competition's own rule, before there is one.
@@ -1733,7 +1818,7 @@ def _build_draw(comp_id: str, matches: list[Match], *,
                                    rules=rules, rounds=rounds,
                                    rounds_total=declared.season_length)
             if scaffold.rounds_past_length(matches):
-                outgrown = tuple(extra)
+                outgrown = tuple(beyond)
         if extra and not outgrown:
             notes.append(
                 f"{comp_id}: cards were found for {rounds_listed(extra)}, "
@@ -1756,10 +1841,12 @@ def _build_draw(comp_id: str, matches: list[Match], *,
                            teams=teams, teams_declared=teams_declared)
     rounds = scaffold.rounds_from_matches(matches)
     for number, rnd in list(rounds.items()):
-        byes = _byes_for(number, stated, (), rnd.fixtures, teams, teams_declared)
+        byes = _byes_for(number, stated, (), rnd.fixtures, teams, teams_declared,
+                         washouts)
         if byes != rnd.byes:
             rounds[number] = replace(rnd, byes=byes)
     _add_bye_only_rounds(rounds, stated)
+    _add_washouts(rounds, washouts, stated, teams, teams_declared)
     total = declared.rounds_total if declared else None
     source = Provenance.DECLARED if total is not None else Provenance.DERIVED
     return (rounds, DRAW_FROM_CARDS, total, source, notes, ())
@@ -1788,7 +1875,9 @@ def _stated_byes(declared: CompetitionConfig | None,
 
 def _byes_for(number: str, stated: dict[str, tuple[str, ...]],
               in_round: tuple[str, ...], fixtures: tuple[tuple[str, str], ...],
-              teams: dict[str, Team], teams_declared: bool) -> tuple[str, ...]:
+              teams: dict[str, Team], teams_declared: bool,
+              washouts: dict[str, tuple[bool, tuple[tuple[str, str], ...]]]
+              ) -> tuple[str, ...]:
     """Who rests in one round: what the club said, or failing that, who is missing.
 
     A statement always wins, and a statement about *this* round switches inference
@@ -1797,13 +1886,19 @@ def _byes_for(number: str, stated: dict[str, tuple[str, ...]],
     Inference then covers every round the club said nothing about, which is the
     point: a club that writes down the two weeks its draw has byes in should not
     thereby lose the byes this program could already see in the other eight.
+
+    A fixture the club declared washed out accounts for its two teams as a card
+    would (4.535): rained off, a team is not missing, and the one team a round
+    still leaves off is its bye. A round washed out whole is no different: its
+    cards, if any, are its fixtures, and with none there is nobody to infer.
     """
     said = tuple(dict.fromkeys(
         [slug for slug in (_declared_slug(name, teams) for name in in_round)
          if slug] + list(stated.get(number, ()))))
     if said:
         return said
-    return infer_byes(fixtures, teams, teams_declared=teams_declared)
+    _, washed = washouts.get(number, (False, ()))
+    return infer_byes(fixtures + washed, teams, teams_declared=teams_declared)
 
 
 def _add_bye_only_rounds(rounds: dict[str, Round],
@@ -1821,6 +1916,44 @@ def _add_bye_only_rounds(rounds: dict[str, Round],
         rounds[number] = Round(number=number, byes=stated[number],
                                is_finals=is_finals_label(number),
                                source=DRAW_FROM_CARDS)
+
+
+def _stated_washouts(declared: CompetitionConfig | None, teams: dict[str, Team]
+                     ) -> dict[str, tuple[bool, tuple[tuple[str, str], ...]]]:
+    """``[competitions.<id>.washouts]`` by round: whether the whole, and the fixtures.
+
+    The fixtures as slug pairs, in the order typed and the way round typed, matched
+    to the teams already built as the draw's names are (:func:`_declared_slug`).
+    """
+    if declared is None:
+        return {}
+    return {number: (not fixtures,
+                     tuple((_declared_slug(home, teams), _declared_slug(away, teams))
+                           for home, away in fixtures))
+            for number, fixtures in declared.washouts.items()}
+
+
+def _add_washouts(rounds: dict[str, Round],
+                  washouts: dict[str, tuple[bool, tuple[tuple[str, str], ...]]],
+                  stated: dict[str, tuple[str, ...]], teams: dict[str, Team],
+                  teams_declared: bool) -> None:
+    """Each round's washouts on it, and a round for a washout no card or line has.
+
+    A round rained off whole leaves no card, so without a round of its own it was
+    in no count of the season's rounds and on no page (4.535). It exists carrying
+    only the washout and whatever rest is stated for it, as a round the byes table
+    alone names does (:func:`_add_bye_only_rounds`), and with the rest inferred where
+    the fixtures washed out leave one team of a closed list off. F2 is untouched: no
+    fixture is invented for it, and its fixtures washed out are the club's own.
+    """
+    for number, (whole, washed) in washouts.items():
+        rnd = rounds.get(number)
+        if rnd is None:
+            rnd = Round(number=number,
+                        byes=_byes_for(number, stated, (), (), teams, teams_declared,
+                                       washouts),
+                        is_finals=is_finals_label(number), source=DRAW_FROM_CARDS)
+        rounds[number] = replace(rnd, washed_out=whole, washouts=washed)
 
 
 def _declared_slug(name: str, teams: dict[str, Team]) -> str:
@@ -1916,7 +2049,12 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
     # apart by other cards and never by the clock -- the same rule, from the same
     # function, that decides `card-missing` in validate.py, because a club reading
     # this note and the dashboard must not be told two different things.
-    later = later_round_with_cards(order, {n for n, c in counts.items() if c})
+    # A round with a washout has come, card or none, and so have the rounds before
+    # it (4.535): `later` is what reached each round, `carded` the cards alone,
+    # which the note on the rounds with none words its reason by.
+    washed = {number for number in order if rounds[number].has_washout}
+    carded = later_round_with_cards(order, {n for n, c in counts.items() if c})
+    later = later_round_with_cards(order, {n for n, c in counts.items() if c} | washed)
     for number in order:
         rnd = rounds[number]
         absent = _unaccounted(rnd, teams, matches)
@@ -1935,7 +2073,7 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
             continue
         if rnd.is_finals:
             continue
-        if not (counts[number] or later[number]
+        if not (counts[number] or later[number] or number in washed
                 or any(stray.fits(number, absent) for stray in strays)):
             continue                    # a round still to come
         step = (f"declare the round's fixtures under "
@@ -1961,14 +2099,19 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
                 f"credited once you have checked the team list and declared it.")
 
     for passed, wording in (
-        (True, "in the declared draw with no cards at all, and there are cards for "
-               "later rounds, so the season has moved past {pronoun}. Those are "
-               "scorecards to find, not {a_round} nobody has played"),
-        (False, "in the declared draw with no cards at all, which is what {a_round} "
-                "nobody has played yet looks like. Nothing was scored for "
-                "{pronoun}"),
+        ("cards", "in the declared draw with no cards at all, and there are cards for "
+                  "later rounds, so the season has moved past {pronoun}. Those are "
+                  "scorecards to find, not {a_round} nobody has played"),
+        ("washout", "in the declared draw with no cards at all, and a later round is "
+                    "declared washed out, so the season has moved past {pronoun}. "
+                    "Those are scorecards to find, not {a_round} nobody has played"),
+        ("", "in the declared draw with no cards at all, which is what {a_round} "
+             "nobody has played yet looks like. Nothing was scored for "
+             "{pronoun}"),
     ):
-        listed = [n for n in awaiting if bool(later[n]) is passed]
+        listed = [n for n in awaiting
+                  if ("cards" if carded[n] else "washout" if later[n] else "")
+                  == passed]
         if not listed:
             continue
         notes.append(
@@ -1981,13 +2124,18 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
 
 def _unaccounted(rnd: Round, teams: dict[str, Team],
                  matches: list[Match]) -> list[str]:
-    """The teams of *teams* on no card, fixture or rest of *rnd*, in slug order.
+    """The teams on no card, fixture, rest or washout of *rnd*, in slug order.
 
     The cards count as the fixtures do: a declared round's card of a fixture it does
-    not list is that card's own finding, and its two teams are not missing.
+    not list is that card's own finding, and its two teams are not missing. So does
+    a fixture the club declared washed out, and a round washed out whole leaves
+    nobody off (4.535).
     """
+    if rnd.washed_out:
+        return []                   # rained off whole: nobody is missing (4.535)
     present = {slug for pair in rnd.fixtures for slug in pair}
     present.update(rnd.byes)
+    present.update(slug for pair in rnd.washouts for slug in pair)
     present.update(slug for m in matches if m.round == rnd.number
                    for slug in (m.home, m.away))
     return sorted(slug for slug in teams if slug not in present)
@@ -2064,7 +2212,10 @@ def _declared_round_notes(comp_id: str, rnd: Round, matches: list[Match],
         return []
     filed = [stray for stray in strays
              if any(stray.fits(rnd.number, pair) for pair in missing)]
-    if not counted.carded and not counted.unlisted and not filed:
+    # A round with a washout has come: its fixtures with no card are cards to
+    # find, told as a round short of them, and not a round still to come (4.535).
+    if (not counted.carded and not counted.unlisted and not filed
+            and not rnd.has_washout):
         awaiting.append(rnd.number)
         return []
 
@@ -3374,16 +3525,28 @@ def _assumption_notes(comp: Competition, config: Config,
         # Regular rounds against the length, as the length counts them, and the
         # finals with cards named after them: counted in, a final read as a round
         # past the length, "3 rounds" of a season "declared as 2 rounds long".
-        with_cards = comp.rounds_played(matches)
-        finals_played = comp.rounds_played(matches, finals=True)
+        #
+        # And the rounds declared washed out with no card of their own, said apart:
+        # they are among the rounds played, and no card was found for them (4.535).
+        with_cards = comp.rounds_with_cards(matches)
+        finals_played = comp.rounds_with_cards(matches, finals=True)
+        washed = [number for number in comp.rounds_played(matches)
+                  if number not in with_cards]
+        whole = [number for number in washed if comp.rounds[number].washed_out]
+        part = [number for number in washed if number not in whole]
         listed = f" ({in_words(with_cards)})" if with_cards else ""
         also = (f" and {len(finals_played)} finals "
                 f"{by_weeks(finals_played, 'round', 'rounds')} "
                 f"({in_words(finals_played)})" if finals_played else "")
+        rained = ((f", {rounds_listed(whole)} {by_weeks(whole, 'is', 'are')} "
+                   f"declared washed out" if whole else "")
+                  + (f", {rounds_listed(part)} "
+                     f"{by_weeks(part, 'has a fixture', 'have fixtures')} declared "
+                     f"washed out and no card" if part else ""))
         notes.append(
             f"{comp.id}: cards were found for {len(with_cards)} regular "
-            f"{by_weeks(with_cards, 'round', 'rounds')}{listed}{also}, and the "
-            f"season is declared as {comp.rounds_total} "
+            f"{by_weeks(with_cards, 'round', 'rounds')}{listed}{also}{rained}, and "
+            f"the season is declared as {comp.rounds_total} "
             f"round{'' if comp.rounds_total == 1 else 's'} long.")
 
     # F11: a round is finals only if a human said so or the card's own round

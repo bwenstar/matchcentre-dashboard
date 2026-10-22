@@ -28,7 +28,7 @@ from decimal import Decimal
 from . import stats
 from .competition import DRAW_DECLARED, Competition, round_sort_key
 from .config import ExpectedLine, ExpectedSheet
-from .model import Match
+from .model import Match, MatchStatus
 from .scope import in_words
 from .scoring import UNPLAYED_AVERAGE, UNPLAYED_ZERO, ScoringError
 from .slugs import nearest, slugify
@@ -103,6 +103,21 @@ def by_weeks(rounds, one: str, many: str) -> str:
 def rounds_listed(numbers) -> str:
     """``round 2``, ``rounds 2 and 4``, ``rounds 1, 2 and 4``, ``rounds 3 and 5 to 9``."""
     return f"{by_weeks(numbers, 'round', 'rounds')} {in_words(numbers)}"
+
+
+def beyond_words(numbers, carded) -> str:
+    """Rounds past a draw's length, by what put them there: cards, or a washout.
+
+    ``cards were found for round 5, and round 4 is declared washed out``, lower case
+    first, for F3 and the writer's comment alike; *carded* is the rounds with cards
+    (4.535).
+    """
+    cards = [number for number in numbers if number in carded]
+    washed = [number for number in numbers if number not in carded]
+    return in_words(
+        ([f"cards were found for {rounds_listed(cards)}"] if cards else [])
+        + ([f"{rounds_listed(washed)} {by_weeks(washed, 'is', 'are')} declared "
+            f"washed out"] if washed else []))
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,7 +275,11 @@ def compare(matches: list[Match] | tuple[Match, ...], competition: Competition,
     carded = {m.round for m in ordered if not m.is_bye}
     known = set(competition.round_order) | carded
     order = sorted(known | {number}, key=round_sort_key)
-    if not (number in carded or stats.later_round_with_cards(order, carded)[number]):
+    # A round declared washed out has come, card or none, as it has for the
+    # season's progress: a sheet after the last round, rained off, is a sheet the
+    # cards have reached (4.535).
+    reached = carded | {n for n, rnd in competition.rounds.items() if rnd.has_washout}
+    if not (number in reached or stats.later_round_with_cards(order, reached)[number]):
         regular = [r for r in carded if not competition.is_finals_round(r)]
         return replace(base, status=AHEAD,
                        latest_read=max(regular, key=round_sort_key, default="none"))
@@ -442,7 +461,10 @@ def _checked(counted: list[Match], flipped: list[Match], read: list[Match],
             if match.points_for(slug) is not None:
                 parts.append(next(paid))
                 continue
-            kind = "bye" if match.is_bye else "not played"
+            # A declared washout is credited as a rest is, a match with no opponent,
+            # and said as what it was (4.535).
+            kind = ("bye" if match.status is MatchStatus.BYE
+                    else "washed out" if match.is_bye else "not played")
             parts.append(f"{kind}, credited {next(paid)}" if credited else kind)
         evidence.append(f"R{number} " + " + ".join(parts))
         if all(m.points_for(slug) is None for m in here):

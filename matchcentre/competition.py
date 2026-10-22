@@ -180,6 +180,12 @@ class Round:
     and ``None`` where nothing was, which ``is_finals`` cannot say: there the label
     decided. F11 and discovery's finals note both ask it, so the two cannot differ
     on whether a round's finals were typed or read off its label (4.163).
+
+    ``washed_out`` and ``washouts`` are the club's ``[competitions.<id>.washouts]``
+    line for the round (4.535): the whole round rained off, or these fixtures of it,
+    as slug pairs in the order typed and either way round. Never read off a card:
+    a Match Cancelled card says it was called off and not why, and the card is the
+    record of the fixture it names whatever this says.
     """
 
     number: str
@@ -190,6 +196,18 @@ class Round:
     note: str = ""
     source: str = DRAW_FROM_CARDS
     finals_typed: bool | None = None
+    washed_out: bool = False
+    washouts: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def has_washout(self) -> bool:
+        """Whether the club declared the round, or any fixture of it, washed out."""
+        return self.washed_out or bool(self.washouts)
+
+    def washed(self, home: str, away: str) -> bool:
+        """Whether *home* v *away* is declared washed out, either way round."""
+        return self.washed_out or frozenset((home, away)) in {
+            frozenset(pair) for pair in self.washouts}
 
     @property
     def teams(self) -> tuple[str, ...]:
@@ -336,7 +354,7 @@ class Competition:
 
     def rounds_played(self, matches: Iterable[Match], *,
                       finals: bool = False) -> list[str]:
-        """The regular rounds with cards, in the order the season runs; with *finals*, the finals.
+        """The regular rounds played, in the season's order; with *finals*, the finals.
 
         The rounds a season's progress counts, and so the one count of them: the
         report's, season.json's ``rounds_played``, the front page's, discovery's note,
@@ -346,10 +364,45 @@ class Competition:
         way, so a count with the finals in it read ``Round 3 of 2`` on a season of
         two rounds and a final. The finals with cards are asked for apart and said
         apart.
+
+        A round played is one with a card, or one the club declared washed out, the
+        whole of it or a fixture of it: the night came, and the association's sheet
+        counts it, as a round of Match Cancelled cards always was counted (4.452).
+        Rained off with no card to show it, it was a round short for the rest of the
+        season (4.535). :meth:`rounds_with_cards` is the count of the cards alone.
+        """
+        present = {m.round for m in matches}
+        present.update(number for number, rnd in self.rounds.items()
+                       if rnd.has_washout)
+        return sorted({number for number in present
+                       if self.is_finals_round(number) == finals},
+                      key=self.round_key)
+
+    def rounds_with_cards(self, matches: Iterable[Match], *,
+                          finals: bool = False) -> list[str]:
+        """:meth:`rounds_played`, a round washed out with no card of its own left out.
+
+        What discovery's note says cards were found for, beside the rounds it says
+        were declared washed out (4.535).
         """
         return sorted({m.round for m in matches
                        if self.is_finals_round(m.round) == finals},
                       key=self.round_key)
+
+    def washed_out_teams(self, number: str) -> tuple[str, ...]:
+        """The teams round *number* is declared washed out for (4.535).
+
+        Every team, in slug order, where the whole round was; the teams of its
+        fixtures that were, in the order typed, where some were; none where the club
+        said nothing of it. A team the competition does not have is kept, as a bye
+        for one is, and ``washout-team`` names it.
+        """
+        rnd = self.rounds.get(number)
+        if rnd is None:
+            return ()
+        if rnd.washed_out:
+            return tuple(sorted(self.teams))
+        return tuple(dict.fromkeys(slug for pair in rnd.washouts for slug in pair))
 
     def rounds_past_length(self, matches: Iterable[Match]) -> list[str]:
         """The regular rounds played, if there are more of them than ``rounds_total``.

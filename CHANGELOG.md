@@ -10,6 +10,35 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
+### Added
+
+- **`[competitions.<id>.washouts]`: a round, or some of its fixtures, washed
+  out.** `9 = true` declares the whole of round 9 rained off; `7 = [["Hilltop
+  Aces", "Riverside Rockets"]]` declares only that fixture of round 7, for a night
+  the early matches finished and the late ones never started. A washed-out round
+  counts as a round played with or without a card, as a round of Match Cancelled
+  cards always did, where before a round that left no card was missing from the
+  season's progress for good (`9 of 10 rounds played` after the last night). A
+  washout is scored as `[rules] unplayed` says, as a bye is, and a team resting in
+  a round washed out whole is credited its bye. Its teams are not reported as
+  missing cards, the Matches page heads the round and draws the fixture **washed
+  out**, and the run report prints a `washed out` line under `rounds`. A card wins:
+  a washout's own Match Cancelled or blank card is told nothing more, and one with
+  a result is scored as it says and reported as `washout-contradicted`. A team the
+  declared `teams` list lacks stops the run; with the list open it is reported as
+  `washout-team`. A run that finds a round with no card, before a later round that
+  has cards or is declared washed out, now names it and gives the line to type.
+  `--discover --force` writes the table back. README section: *A round, or some
+  of its matches, washed out*.
+
+### Fixed
+
+- `--discover --force` wrote a key of a letter or a figure outside ASCII bare: a
+  team named in one word of another script, such as `Ñandúes`, in the byes or
+  captains tables, or a round `３`. TOML allows only ASCII letters, digits, `-` and
+  `_` in a bare key, so the file it had just written would not load, and every run
+  after it stopped there. Such a key is now written in quotes.
+
 ## [0.2.0] — 2026-10-15
 
 ### Fixed

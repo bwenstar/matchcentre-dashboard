@@ -3626,6 +3626,21 @@ class TestTheExampleConfigIsARealConfig(unittest.TestCase):
                         f"the byes table rests a team the example's own teams list "
                         f"does not have: {sorted(set(comp.byes) - set(comp.teams))}")
 
+    def test_the_washouts_table_it_documents_is_the_table_the_loader_reads(self):
+        # 4.535. Both shapes a club may need, a round washed out whole and a fixture
+        # of one, each pair of the example's own teams, so a line copied off it
+        # loads, credits who it says and names nobody the teams list lacks.
+        comp = self.load().competition("wednesday-division-3")
+        self.assertTrue(comp.washouts, "the example no longer shows a washouts table")
+        self.assertEqual({bool(fixtures) for fixtures in comp.washouts.values()},
+                         {True, False}, "the example shows only one of the two "
+                                        "shapes a washout is typed in")
+        named = {name for fixtures in comp.washouts.values()
+                 for pair in fixtures for name in pair}
+        self.assertEqual(sorted(named - set(comp.teams)), [],
+                         "the washouts table names a team the example's own teams "
+                         "list does not have")
+
     def test_the_sheet_table_it_documents_is_the_table_the_loader_reads(self):
         # A live table, so a club copying it gets lines the loader keeps: one with
         # both figures and one with points only, which is the "only what you type is

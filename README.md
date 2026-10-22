@@ -950,15 +950,16 @@ you doing anything.
 
 What it cannot see is a round that left no cards behind:
 
-- a week nobody played at all — a long weekend, a washed-out round, a bye week for
-  the whole grade;
+- a week nobody played at all — a long weekend, a bye week for the whole grade
+  (a round that was rained off has a table of its own: see [A round, or some of
+  its matches, washed out](#a-round-or-some-of-its-matches-washed-out));
 - a round where *two or more* teams are missing, because that is far more likely
   to be a card that never got exported than two byes in one week;
 - a round of a five-team grade where the missing card and the bye happen together.
 
 For those, tell it. One line per team, in the rounds column your association
 already publishes — here for a five-team grade, where somebody rests every week
-and round 6 was rained off entirely:
+and round 6 fell on a long weekend, so the whole grade had it off:
 
 ```toml
 [competitions.saturday-division-a.byes]
@@ -977,14 +978,16 @@ single round needs no brackets: `"Brindle Quolls" = 3`.
 The whole column can go in on the first night. A round with no card of its own and
 none of a later round is a round still to come, decided by the cards and never by
 the date, as `card-missing` decides it: the report does not tell it as short of
-cards, and its byes count for nothing until its cards arrive.
+cards, and its byes count for nothing until its cards arrive, or until you
+declare it washed out.
 
 A round recorded in this table alone, with no cards for it in `data/`, is not
 among the rounds played that the season's progress counts: the table says who
 rests in a round, not that the round has come. A washed-out round whose
 `Match Cancelled` cards are in `data/` is among them, as the association's sheet
 counts it, and the Matches page heads it **not played**, or **card missing** while
-a fixture of your typed-in draw has no card yet.
+a fixture of your typed-in draw has no card yet. So is a round you declare washed
+out, with or without a card, as the next section says.
 
 Anything you leave out is still worked out from the cards, exactly as before, so
 there is no penalty for filling in only the weeks the tool got wrong. A team you
@@ -997,6 +1000,60 @@ The first run pre-fills this section for you with every bye it worked out,
 again. Uncomment nothing and nothing changes, and uncomment every line and
 nothing changes either: the section says in words how a line is typed, rather
 than showing an example line that would give a team byes it never had.
+
+### A round, or some of its matches, washed out
+
+A night the rain stopped before anybody played often leaves no card at all, and a
+fixture rained off late in the evening, after the early matches finished, leaves
+none either. Neither is anything the tool can see. Left alone, a round like that
+is missing from the rounds played, so a season whose ninth week was washed out
+reads `9 of 10 rounds played` long after its last night, and a fixture's two teams
+are reported as a card still to find. Say what happened, one line per round:
+
+```toml
+[competitions.tuesday-division-a1.washouts]
+9 = true                                     # the whole round
+7 = [["Hilltop Aces", "Riverside Rockets"]]  # only this fixture of it
+```
+
+`true` is the whole round. A list names the fixtures of the round that were
+washed out, each as `["home", "away"]` in the names your `teams` list uses, and
+the rest of the round was played: its cards say so. One fixture can leave off the
+outer brackets, `7 = ["Hilltop Aces", "Riverside Rockets"]`, and `false` says
+nothing was washed out, so a line can be switched off without deleting it. A run
+that finds a round with no card, before a later round that has cards or is
+declared washed out, names it and gives you the line to type.
+
+What a line does:
+
+- The round counts as a round played, with or without a card, as a round of
+  `Match Cancelled` cards always has, so the season's progress reaches its end.
+- A washout is scored as `unplayed` under `[rules]` says, the same as a bye:
+  nothing under `zero`, the team's own average under `average`. See [What a bye is
+  worth](#what-a-bye-is-worth). A team resting in a round washed out whole is
+  credited its bye, and once.
+- The Matches page heads the round **washed out**, and draws each washed-out
+  fixture as washed out, not as a card missing or a match still to play. Nobody is
+  reported as short of a card for it, and where a round's washed-out fixtures
+  leave one team of your `teams` list off, that team's bye is worked out as
+  usual.
+- The report prints a `washed out` line under `rounds`, so you can see the line
+  took.
+
+A card always wins. One ticked `Match Cancelled`, or left blank, is the washout's
+own card, and is told nothing more. One with a result is scored as the card says,
+its teams are credited nothing for the washout, and the line is reported as
+`washout-contradicted`, a warning: the likeliest story is a line typed under the
+wrong round. A team the line names that your declared `teams` list lacks stops
+the run, as it does in the byes table; while the list is unconfirmed it is
+reported as `washout-team` instead.
+
+If Match Centre has the fixture, exporting its card is just as good. A rained-off
+fixture usually still exists there, and its card, ticked `Match Cancelled`, says
+everything this line does. The table is for the night that left nothing to
+export. A match stopped partway, with games on its card, is the card's business
+and not this table's: see [A round was called off, and its card has scores on
+it](#a-round-was-called-off-and-its-card-has-scores-on-it).
 
 ### What a bye is worth
 
@@ -2886,6 +2943,18 @@ dashboard shows the rounds played with no percentage, and says that more have be
 played than the season was declared to run. The fixtures and matches under the
 count are the regular rounds' too, so they can be fewer than the *Matches played*
 tile below the box, which counts the whole season, finals and all.
+
+### The season is over, and the dashboard says a round short
+
+Every night has come and gone, and the front page still says `9 of 10 rounds
+played`. A round counts once a card of it is in `data/`, and a round the rain took
+before anybody played often left no card to export. Check Match Centre first: a
+fixture rained off usually still exists there, and its card, ticked `Match
+Cancelled`, is all the tool needs. If there is nothing to export, declare the round
+washed out, one line under `[competitions.<id>.washouts]`, as [A round, or some of
+its matches, washed out](#a-round-or-some-of-its-matches-washed-out) shows. Where
+a later round has cards, or is declared washed out, the report names the missing
+round and gives you the line to type.
 
 ### The same player appears twice, with half their matches each
 

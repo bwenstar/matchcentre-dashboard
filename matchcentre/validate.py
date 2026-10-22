@@ -48,8 +48,8 @@ from .model import (SIDES, Match, MatchStatus, SetResult, SetStatus, all_blank,
 from .scorecard import _given_up, box_award, forfeit_award
 from .scoring import Ruleset, ScoringError
 from .scoring import UNPLAYED_AVERAGE, UNPLAYED_ZERO
-from .sheet import (AHEAD, COMPARED, Comparison, TeamCheck, at_places, by_weeks,
-                    places_of, rounds_listed)
+from .sheet import (AHEAD, COMPARED, Comparison, TeamCheck, at_places,
+                    beyond_words, by_weeks, places_of, rounds_listed)
 from .scope import echoed, in_words
 from .slugs import did_you_mean, unslug
 from .stats import (card_against_rest, chronological, fixtures_without_cards,
@@ -275,6 +275,7 @@ def validate(matches: Sequence[Match], competition: Competition, *,
         _check_draw,                # declared draw vs the cards
         _check_missing_cards,       # a declared fixture with no card at all
         _check_byes,                # a rest the same round has the team playing
+        _check_washouts,            # a washout the cards contradict, or name nobody
         _check_rounds_total,        # F3
         _check_finals,              # F11
         _check_ladder,              # F10
@@ -587,6 +588,11 @@ def _check_status(ctx: _Context) -> list[Issue]:
                 subject=_label(match), detail=match.source))
         if not _no_result(match):
             continue        # a bye is normal; an unattributed forfeit is said above
+        if not match.counts_as_played and _washed_out(ctx.competition, match):
+            # The club has said why: its card is the washout's own, called off or
+            # left blank, and the question this would ask is answered (4.535). A
+            # card played and short of a result keeps it, as its games count.
+            continue
         need = match.fmt.min_sets_for_result
         why = (f"only {match.completed_sets} of the {need} sets needed for a result "
                "are complete"
@@ -609,6 +615,12 @@ def _check_status(ctx: _Context) -> list[Issue]:
                        if blank else ""),
             subject=_label(match), detail=match.source))
     return issues
+
+
+def _washed_out(competition: Competition, match: Match) -> bool:
+    """Whether *match*'s fixture is declared washed out, either way round (4.535)."""
+    rnd = competition.rounds.get(match.round)
+    return rnd is not None and rnd.washed(match.home, match.away)
 
 
 def _no_result(match: Match) -> bool:
@@ -2287,9 +2299,16 @@ def _check_missing_cards(ctx: _Context) -> list[Issue]:
                        f"for that round do have one")
         elif gap.unlisted:
             because = unlisted_words(gap.unlisted)
-        else:
+        elif gap.later:
             because = (f"nothing at all was read for that round while round "
                        f"{gap.later} has cards, so the season is past it")
+        elif gap.washed == gap.round:
+            because = ("nothing at all was read for that round, though a fixture of "
+                       "it is declared washed out, so the night came")
+        else:
+            because = (f"nothing at all was read for that round, and round "
+                       f"{gap.washed} is declared washed out, so the season is past "
+                       f"it")
         fixture = f"{comp.team_name(gap.home)} v {comp.team_name(gap.away)}"
         filed = [stray for stray in ctx.strays
                  if stray.fits(gap.round, (gap.home, gap.away))]
@@ -2375,7 +2394,11 @@ def _check_byes(ctx: _Context) -> list[Issue]:
     """
     issues: list[Issue] = []
     comp = ctx.competition
-    played = set(rounds_present(ctx.matches))
+    # A round declared washed out has come, card or none, as the ladder credits its
+    # rests, a final's apart (4.535).
+    played = set(rounds_present(ctx.matches)) | {
+        number for number, rnd in comp.rounds.items()
+        if rnd.has_washout and not comp.is_finals_round(number)}
     counted = ladder_matches(ctx.matches, comp)
     asked = {(gap.round, gap.home, gap.away)
              for gap in fixtures_without_cards(ctx.matches, comp)}
@@ -2397,7 +2420,13 @@ def _check_byes(ctx: _Context) -> list[Issue]:
             continue
         against = in_words(comp.team_name(away if home == team else home)
                            for home, away in listed)
-        if number in played:
+        if (team in comp.washed_out_teams(number)
+                and not comp.is_finals_round(number)):
+            # The washout pays what the rest would, under either `unplayed` (4.535).
+            severity = WARNING
+            then = ("The team is credited the round's washout whichever line is "
+                    "true, so no figure depends on it.")
+        elif number in played:
             severity = ERROR
             then = ("No bye was credited, so if the rest is the true line the team "
                     "is short the bye it was owed.")
@@ -2421,6 +2450,91 @@ def _check_byes(ctx: _Context) -> list[Issue]:
             detail="declared: " + ", ".join(f"{home} v {away}"
                                             for home, away in listed)))
     return issues
+
+
+# --- washouts ---------------------------------------------------------
+
+
+def _check_washouts(ctx: _Context) -> list[Issue]:
+    """Why a washout the club declared did not stand, said once a line (4.535).
+
+    :func:`~matchcentre.stats.washouts_standing` is the rule, and the ladder reads
+    it: a team on a card of the round is credited nothing for the washout.
+
+    ``washout-contradicted``: a card the line covers has a result, which counts. A
+    warning, as ``bye-contradicted`` is: the card wins and no figure is wrong by
+    the cards, and the likeliest story is a line typed under the wrong round. One
+    finding for the line, a round whole or its fixtures, naming the cards. A card
+    called off, or blank, is the washout's own and contradicts nothing; nor does
+    one the rain stopped short of a result, which is what a washout is, and whose
+    ``no-result`` says what it holds.
+
+    ``washout-team``: with the team list open, the line names a team no card of the
+    competition names, so it stood for nobody. A warning: a misspelt team is
+    credited nothing, which under ``unplayed = "average"`` leaves the team meant a
+    round short. With the list declared the loader refuses the name instead.
+    """
+    issues: list[Issue] = []
+    comp = ctx.competition
+    for number in comp.round_order:
+        rnd = comp.rounds[number]
+        if not rnd.has_washout:
+            continue
+        for slug in comp.washed_out_teams(number):
+            if slug not in comp.teams:
+                issues.append(Issue(
+                    rule="washout-team", severity=WARNING,
+                    message=f"round {number}: the washouts table names "
+                            f"{_declared_name(slug, comp)}, which no card of "
+                            f"{comp.id} names, so nothing was credited for it. "
+                            f"Check the spelling against the team names the cards "
+                            f"print.",
+                    subject=f"R{number} {slug}",
+                    detail=f"teams the cards name: {', '.join(sorted(comp.teams))}"))
+        washed = set(comp.washed_out_teams(number))
+        played = [m for m in chronological(ctx.matches, comp.rounds)
+                  if m.round == number and not m.is_bye and m.decided
+                  and (m.home in washed or m.away in washed)]
+        if not played:
+            continue
+        fixture = lambda m: f"{comp.team_name(m.home)} v {comp.team_name(m.away)}"
+        one = len(played) == 1
+        if rnd.washed_out:
+            said = "the whole round"
+            but = (f"{len(played)} of its cards "
+                   f"{'has a result' if one else 'have results'}: "
+                   f"{in_words(fixture(m) for m in played)}")
+        else:
+            said = in_words(f"{comp.team_name(home)} v {comp.team_name(away)}"
+                            for home, away in rnd.washouts)
+            own = [m for m in played if rnd.washed(m.home, m.away)]
+            strays = [m for m in played if m not in own]
+            parts = []
+            if own and len(own) == 1 and len(rnd.washouts) == 1:
+                parts.append("its card has a result")
+            elif own:
+                parts.append(f"the card{'' if len(own) == 1 else 's'} of "
+                             f"{in_words(fixture(m) for m in own)} "
+                             f"{'has a result' if len(own) == 1 else 'have results'}")
+            for m in strays:
+                team = m.home if m.home in washed else m.away
+                parts.append(f"a card has {comp.team_name(team)} playing "
+                             f"{comp.team_name(m.opponent_of(team))}")
+            but = in_words(parts)
+        issues.append(Issue(
+            rule="washout-contradicted", severity=WARNING,
+            message=f"round {number}: the washouts table has {said} washed out, but "
+                    f"{but}. The {'card wins' if one else 'cards win'}, and "
+                    f"{'its' if one else 'their'} teams are credited nothing for the "
+                    f"washout.",
+            subject=f"R{number}",
+            detail="; ".join(m.source or _label(m) for m in played)))
+    return issues
+
+
+def _declared_name(slug: str, comp: Competition) -> str:
+    """A team a line names that the competition does not have, as the line spelt it."""
+    return comp.team_name(slug) if slug in comp.teams else unslug(slug)
 
 
 # --- F3: rounds_total ---------------------------------------------------
@@ -2454,13 +2568,14 @@ def _check_rounds_total(ctx: _Context) -> list[Issue]:
         # about those rounds is not printed as well. "Rounds have", never one: a
         # draw gives a length only when it lists a regular round, and more than
         # that have been played. A typed length, below, can be 0.
+        said = beyond_words(unlisted, {m.round for m in ctx.matches})
         issues.append(Issue(
             rule="F3", severity=ERROR,
             message=f"the declared draw lists {total} regular "
                     f"round{'' if total == 1 else 's'}, which with no rounds_total "
                     f"is the season's length, but {len(regular)} regular rounds "
-                    f"have been played ({in_words(regular)}). Cards were found for "
-                    f"{rounds_listed(unlisted)}, which the draw does not list: add "
+                    f"have been played ({in_words(regular)}). {said[:1].upper()}"
+                    f"{said[1:]}, which the draw does not list: add "
                     f"them under [[competitions.{comp.id}.rounds]] if the draw grew, "
                     f"or set rounds_total under [competitions.{comp.id}] if the draw "
                     f"is not the whole season.",

@@ -4231,6 +4231,237 @@ class TestTheByesShorthand(unittest.TestCase):
                         f'number = "1"\n{written}\n'))
 
 
+class TestAWashoutIsTypedByRoundAsTheWholeRoundOrSomeOfItsFixtures(unittest.TestCase):
+    """``[competitions.<id>.washouts]``: a night rained off, whole or in part (4.535).
+
+    Before it, the loader said ``[competitions.tue-c] washouts is not a setting this
+    program understands and was ignored``, and the only line a club had for a round
+    rained off with no card to show it was a rest for every team in the byes table,
+    which keeps the round out of the rounds played: measured on a fictional season
+    of five rounds whose third was washed out (/tmp/mcw/scratch/probe.py), ``4 of 5
+    played``. Keyed by round, as a washout is a night and not a team's: ``9 = true``
+    is the whole round, and a list of ``[home, away]`` pairs is the fixtures of it
+    the rain stopped, the rest having been played. Rejected: a ``washed_out`` key in
+    the ``[[...rounds]]`` block, which makes a draw of the one block, a season a
+    round long where no ``rounds_total`` is typed; one line per team, the byes
+    table's shape, which cannot say which of a round's fixtures it was; and a time of
+    night, which no card left behind by a washout has to be held against.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+
+    HEAD = ('[competitions."monday-division-b"]\n'
+            'teams = ["Rockets", "Iguanas", "Aces", "Comets"]\n')
+
+    def loaded(self, text, *, head=HEAD):
+        path = self.dir / "config.toml"
+        path.write_text(head + text, encoding="utf-8")
+        return config_mod.load(path)
+
+    def declared(self, washouts, *, head=HEAD):
+        return self.loaded('[competitions."monday-division-b".washouts]\n' + washouts,
+                           head=head).competition("monday-division-b")
+
+    def test_a_whole_round_is_true_and_some_of_it_is_its_fixtures(self):
+        # An empty tuple is the whole round: there is no fixture to name when the
+        # round left no card and no draw is typed.
+        comp = self.declared('9 = true\n'
+                             '7 = [["Rockets", "Iguanas"], ["Aces", "Comets"]]\n')
+        self.assertEqual(comp.washouts, {"9": (),
+                                         "7": (("Rockets", "Iguanas"),
+                                               ("Aces", "Comets"))})
+
+    def test_one_fixture_needs_no_outer_brackets_and_a_label_may_be_a_word(self):
+        # The commonest line is one fixture, and `[["A", "B"]]` for it is the
+        # friction the byes table's `Rockets = 6` spares a club too.
+        self.assertEqual(self.declared('SF = ["Rockets", "Aces"]\n').washouts,
+                         {"SF": (("Rockets", "Aces"),)})
+
+    def test_false_or_an_empty_list_says_nothing_was_washed_out(self):
+        # A line a club turns off without deleting it, as `9 = false`, declares
+        # nothing; it is not refused, and it washes nothing out.
+        self.assertEqual(self.declared('9 = false\n8 = []\n').washouts, {})
+
+    def test_a_team_the_declared_list_does_not_name_stops_the_run(self):
+        # Under `unplayed = "average"` a washout credits each of its teams, so a
+        # misspelt one would credit nobody and leave the real team a round short.
+        with self.assertRaises(config_mod.ConfigError) as caught:
+            self.declared('7 = [["Rokcets", "Iguanas"]]\n')
+        self.assertIn("Rokcets", str(caught.exception))
+        self.assertIn("Rockets", str(caught.exception))
+
+    def test_a_team_twice_in_one_round_or_against_itself_is_refused(self):
+        # Either is a line that cannot be a night's fixtures, and which pairing was
+        # meant is the club's to say; each is told which it is.
+        for written, said in (
+                ('7 = [["Rockets", "Iguanas"], ["Rockets", "Aces"]]\n', "two fixtures"),
+                ('7 = [["Rockets", "rockets"]]\n', "playing itself")):
+            with self.subTest(written=written):
+                with self.assertRaises(config_mod.ConfigError) as caught:
+                    self.declared(written)
+                self.assertIn("round 7", str(caught.exception))
+                self.assertIn(said, str(caught.exception))
+
+    def test_a_value_that_is_neither_shape_is_refused_with_the_two_it_may_be(self):
+        # `bool` is an `int` in Python and a string is a sequence, so each shape is
+        # turned away by name rather than read as something it is not.
+        # A string as short as "no" would read as two teams of one letter each if
+        # it were taken for a list, so it is turned away as the string it is.
+        for written in ('9 = 1\n', '9 = "all"\n', '9 = "no"\n', '9 = [1, 2]\n',
+                        '9 = [["Rockets"]]\n',
+                        '9 = [["Rockets", "Iguanas", "Aces"]]\n', '9 = [true]\n',
+                        '9 = ["Rockets", ["Iguanas", "Aces"]]\n',
+                        '9 = { home = "Rockets" }\n'):
+            with self.subTest(written=written):
+                with self.assertRaises(config_mod.ConfigError) as caught:
+                    self.declared(written)
+                self.assertIn("9 = true", str(caught.exception))
+
+    def test_a_round_on_two_lines_is_refused(self):
+        # `9` and `" 9"` are one round, the spaces round a label being no part of it,
+        # and the second line silently replaced the first (the review's #6).
+        for written in ('9 = true\n" 9" = [["Rockets", "Iguanas"]]\n',
+                        '9 = false\n" 9" = true\n'):
+            with self.subTest(written=written):
+                with self.assertRaises(config_mod.ConfigError) as caught:
+                    self.declared(written)
+                self.assertIn("round 9 on two lines", str(caught.exception))
+
+    def test_a_line_with_no_round_is_refused(self):
+        # `"" = true` is valid TOML, and a round of no label would be one no card
+        # is filed under and a heading of nothing, as a draw block with no number.
+        for written in ('"" = true\n', '" " = true\n'):
+            with self.subTest(written=written):
+                with self.assertRaises(config_mod.ConfigError) as caught:
+                    self.declared(written)
+                self.assertIn("no round", str(caught.exception))
+
+    def test_a_team_rested_and_washed_out_in_one_round_is_refused(self):
+        # Two answers to what one team did that night, and both are the club's own
+        # lines; but a whole round washed out over a team resting in it is one: in
+        # a five-team grade somebody rests every week, rain or not.
+        for head in (self.HEAD + '[competitions."monday-division-b".byes]\n'
+                                 'Rockets = 7\n',
+                     self.HEAD + '[[competitions."monday-division-b".rounds]]\n'
+                                 'number = "7"\nbye = "Rockets"\n'):
+            with self.subTest(head=head):
+                with self.assertRaises(config_mod.ConfigError) as caught:
+                    self.declared('7 = [["Rockets", "Iguanas"]]\n', head=head)
+                self.assertIn("Rockets", str(caught.exception))
+                self.assertIn("round 7", str(caught.exception))
+                self.assertEqual(self.declared('7 = true\n', head=head).washouts,
+                                 {"7": ()})
+
+    def test_it_is_taken_on_trust_while_the_team_list_is_still_open(self):
+        # As the byes table is: there is nothing to check a name against yet. The
+        # run reports a name no card has (`washout-team`).
+        comp = self.declared('7 = [["Rokcets", "Iguanas"]]\n',
+                             head='[competitions."monday-division-b"]\n')
+        self.assertEqual(comp.washouts, {"7": (("Rokcets", "Iguanas"),)})
+
+    def test_the_table_is_no_longer_a_setting_that_was_ignored(self):
+        config = self.loaded('[competitions."monday-division-b".washouts]\n9 = true\n')
+        self.assertEqual(config.warnings, ())
+        self.assertEqual(config.competition("monday-division-b").washouts, {"9": ()})
+
+
+class TestTheWashoutsTableIsWrittenBackAsItWasRead(unittest.TestCase):
+    """``--discover --force`` keeps the washouts, as it keeps the byes (4.535).
+
+    The writer drops the draw and keeps every table a club typed, so a table it did
+    not know would be gone after the rewrite and the round with it from the rounds
+    played. Written by round, in the order the season runs, each fixture as typed, a
+    single fixture with its outer brackets as the loader gives it back. A section the
+    cards built and one no card was filed under alike.
+    """
+
+    COMP = "tuesday-division-c"          # make_competition's id
+    TYPED = '10 = true\n2 = ["Riverside Rockets", "aces"]\n"SF" = false\n'
+    WRITTEN = ["[competitions.tuesday-division-c.washouts]",
+               '2 = [["Riverside Rockets", "aces"]]',
+               "10 = true"]
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+        self.comp = make_competition(["riverside-rockets", "iguanas", "aces"])
+
+    def loaded(self, text: str):
+        path = self.dir / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return config_mod.load(path)
+
+    def typed(self):
+        return self.loaded(f'[competitions.{self.COMP}]\nday = "Tuesday"\n'
+                           f'[competitions.{self.COMP}.washouts]\n{self.TYPED}')
+
+    @staticmethod
+    def table(text: str, comp_id: str) -> list[str]:
+        lines = text.splitlines()
+        start = lines.index(f"[competitions.{comp_id}.washouts]")
+        end = next((i for i in range(start, len(lines)) if not lines[i].strip()),
+                   len(lines))
+        return [line for line in lines[start:end] if not line.startswith("#")]
+
+    def test_each_line_is_written_back_in_the_order_the_season_runs(self):
+        for built in ([self.comp], []):
+            with self.subTest(cards=bool(built)):
+                text = config_mod.render(self.typed(), competitions=built)
+                self.assertEqual(self.table(text, self.COMP), self.WRITTEN)
+
+    def test_it_loads_back_as_it_was_read(self):
+        config = self.typed()
+        for built in ([self.comp], []):
+            with self.subTest(cards=bool(built)):
+                again = self.loaded(config_mod.render(config, competitions=built))
+                self.assertEqual(again.warnings, ())
+                self.assertEqual(again.competition(self.COMP).washouts,
+                                 config.competition(self.COMP).washouts)
+
+    def test_a_round_toml_cannot_leave_bare_is_written_quoted(self):
+        # A fullwidth figure is a round label like any other (4.151), and TOML's
+        # bare keys are ASCII alone: written bare, `３ = true` was a file the next run
+        # could not load (the review's #3).
+        config = self.loaded(f'[competitions.{self.COMP}]\nday = "Tuesday"\n'
+                             f'[competitions.{self.COMP}.washouts]\n"３" = true\n')
+        text = config_mod.render(config, competitions=[self.comp])
+        self.assertIn('"３" = true', text.splitlines())
+        self.assertEqual(self.loaded(text).competition(self.COMP).washouts, {"３": ()})
+
+    def test_a_section_with_none_writes_no_table(self):
+        # Nothing to keep, and no template either: the README and the example file
+        # say how one is typed, and a run that met a gap in the rounds says it.
+        text = config_mod.render(self.loaded(f'[competitions.{self.COMP}]\n'
+                                             f'day = "Tuesday"\n'),
+                                 competitions=[self.comp])
+        self.assertNotIn(".washouts]", text)
+
+
+class TestAKeyIsWrittenBareOnlyWhereTOMLAllowsIt(unittest.TestCase):
+    """``config.toml_key``: bare for ASCII letters, digits, ``-`` and ``_``, else quoted.
+
+    TOML's bare keys are those characters alone. Asked by ``str.isalnum``, which is
+    true of every letter and figure in Unicode, a key of one word in another script
+    was written bare, a team called ``Ñandúes`` in the byes table as a round ``３``
+    in the washouts table, and the file the writer had just written would not load
+    (4.535's review, #3).
+    """
+
+    def test_keys_toml_reads_bare_are_bare_and_the_rest_quoted(self):
+        for key, written in (("rockets", "rockets"), ("Rocket-2_b", "Rocket-2_b"),
+                             ("９", '"９"'), ("Ñandúes", '"Ñandúes"'),
+                             ("Riverside Rockets", '"Riverside Rockets"')):
+            with self.subTest(key=key):
+                self.assertEqual(config_mod.toml_key(key), written)
+                self.assertEqual(tomllib.loads(f"{written} = 1"), {key: 1})
+
+
 class SheetTableCase(unittest.TestCase):
     """``[competitions.<id>.expected]``, loaded from a real file as a club types it."""
 

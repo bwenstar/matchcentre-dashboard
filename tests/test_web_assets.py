@@ -3515,6 +3515,25 @@ class TestARowWithNoCardSaysSoRatherThanScheduled(WebAssetCase):
         self.assertIn(counted.group(1), pill.group(0),
                       "the pill's colour ignores the count its words are chosen by")
 
+    def test_a_fixture_washed_out_says_so_before_either(self):
+        # 4.535: a fixture the club declared washed out has no card and none to
+        # come, so it is neither scheduled nor a card missing. Python says which
+        # (`washed_out`), and the row chooses on it before the other two.
+        body = self.body("scheduledRow")
+        chooser = re.search(r"([\w.]+)\s*\?\s*'washed out'\s*:\s*\(?\s*([\w.]+)\s*\?"
+                            r"\s*'no card yet'\s*:\s*'scheduled'", body)
+        self.assertIsNotNone(chooser, "a fixture washed out is said to be scheduled, "
+                                      "or a card missing")
+        self.assertEqual(chooser.group(1), "fx.washed_out")
+        self.assertEqual(chooser.group(2), "fx.card_missing")
+        # And its hover says it was declared and no card is coming, and nothing of
+        # what it earns: a final's washout earns nothing (F11), and the scoring
+        # line's "credited the team's own average" was false of one (the review's
+        # #1).
+        self.assertRegex(body, r"title: fx\.washed_out\s*\?\s*'Declared washed out: "
+                               r"no card of it is coming\.'",
+                         "a fixture washed out is not told why it has no card")
+
     def test_neither_wording_ends_in_a_separator_with_nothing_after_it(self):
         # Measured: a round declared with no date and no card to take one from
         # printed "scheduled · " and stopped, which reads as something that failed
@@ -3755,13 +3774,16 @@ class TestARoundWithCardsNoneOfWhichWasPlayedIsNotCalledPlayed(WebAssetCase):
         self.assertIsNotNone(found, "plural() is no longer one line that this reads")
         return self.value(found.group(1), {"n": n, "one": one, "many": many})
 
-    def heading(self, played: bool, none_played: bool, missing: int) -> tuple[str, str]:
+    def heading(self, played: bool, none_played: bool, missing: int,
+                washed=False) -> tuple[str, str]:
         """The words and the pill renderMatches heads a round with.
 
         Given whether the round has a card (``r.played``), what ``noCardPlayed``
         says of it, and how many of its fixtures are short a card (``card_missing``),
         as the function itself is given them. Every other name the two expressions
-        read is found by its own ``var`` line and worked out the same way.
+        read is found by its own ``var`` line and worked out the same way. *washed*
+        is whether a washout is declared in the round, the whole of it or a fixture
+        (4.535): the exporter's flags, bound to the one line that reads them.
         """
         body = jslint.without_comments(self.body("renderMatches"))
         asked = re.search(r"var (\w+) = " + self.ASKS + r"\(r\);", body)
@@ -3775,7 +3797,11 @@ class TestARoundWithCardsNoneOfWhichWasPlayedIsNotCalledPlayed(WebAssetCase):
         pill = re.search(r"class: ('pill ' \+ [^\n]*?) \}, \[\n", body)
         self.assertIsNotNone(pill, "the round heading has no pill to colour")
         names = {"r.played": played, asked.group(1): none_played,
-                 counted.group(1): missing, "plural": self.plural}
+                 counted.group(1): missing, "plural": self.plural,
+                 "r.washed_out": washed}
+        flagged = re.search(r"var (\w+) = [^\n]*\.washed_out[^\n]*;\n", body)
+        if flagged:
+            names[flagged.group(1)] = washed
 
         def local(name):
             found = re.search(r"\bvar " + re.escape(name) + r" = ([^\n]*);\n", body)
@@ -3870,6 +3896,58 @@ class TestARoundWithCardsNoneOfWhichWasPlayedIsNotCalledPlayed(WebAssetCase):
                                  "called off is headed as if the missing card had "
                                  "said whether anybody played")
 
+    # 4.535: a washout the club declared, a whole round or some fixtures of one.
+
+    def test_a_round_washed_out_is_headed_washed_out_in_the_muted_pill(self):
+        """A round declared washed out, with no card or with its cards called off.
+
+        Measured before, in headless Chrome on a fictional season with round 3 rested
+        whole in the byes table, the nearest a club could come to saying it rained
+        (/tmp/mcw/scratch/before/zero-byes/matches-dom.html): ``Round 3``, no date,
+        ``not played yet`` in the muted pill, over ``No fixtures listed for this
+        round.`` and a bye for every team. The round the club declared washed out
+        is headed in the words it was declared in, in the pill of a round nobody
+        played, with or without cards. Rejected: ``not played``, which a club reads as
+        the cards' word, and ``called off``, false of a fixture rained off before it
+        began, where no card was.
+        """
+        for shape in ((False, False, 0), (True, True, 0)):
+            with self.subTest(card=shape[0]):
+                self.assertEqual(self.heading(*shape, washed=True),
+                                 ("washed out", ""))
+
+    def test_a_card_still_missing_is_said_before_the_washout(self):
+        # A fixture short of its card may be the one somebody played, whatever the
+        # rest of the round did: the washout is no answer for it (4.452).
+        self.assertEqual(self.heading(True, True, 1, washed=True),
+                         ("card missing", "warning"))
+        self.assertEqual(self.heading(False, False, 2, washed=True),
+                         ("no cards yet", "warning"))
+
+    def test_a_round_played_beside_a_fixture_washed_out_is_played(self):
+        self.assertEqual(self.heading(True, False, 0, washed=True), ("played", "good"))
+
+    def test_the_heading_reads_the_exporters_flags_and_keeps_no_rule_of_its_own(self):
+        body = jslint.without_comments(self.body("renderMatches"))
+        flagged = re.search(r"var (\w+) = ([^\n]*\.washed_out[^\n]*);\n", body)
+        self.assertIsNotNone(flagged, "renderMatches() never asks whether the round "
+                                      "has a washout declared")
+        self.assertIn("r.washed_out", flagged.group(2),
+                      "a round washed out whole, with no fixture to flag, is not asked")
+        self.assertRegex(flagged.group(2), r"\bf\.washed_out\b",
+                         "a round with one fixture washed out is not asked")
+        chosen = re.search(r"var \w+ = ([^\n]*'not played yet'[^\n]*);\n", body)
+        self.assertIn(flagged.group(1), chosen.group(1),
+                      "the heading chooses its words without the washout")
+
+    def test_a_round_washed_out_whole_says_so_where_its_fixtures_would_be(self):
+        # No draw typed and no card: the box under the heading said "No fixtures
+        # listed for this round.", which reads as a draw left out.
+        code = jslint.without_comments(self.body("renderMatches"))
+        self.assertRegex(code, r"r\.washed_out\s*\?\s*'The whole round was washed "
+                               r"out\.'\s*:\s*'No fixtures listed for this round\.'",
+                         "a round washed out whole is said to have no fixtures listed")
+
     def test_a_final_nobody_played_is_not_named_among_the_finals_played(self):
         # A final with a card missing and the rest called off is left out too, as one
         # with every card missing always was: the line names what the cards say was
@@ -3926,6 +4004,38 @@ class TestARoundWithCardsNoneOfWhichWasPlayedIsNotCalledPlayed(WebAssetCase):
                               "Latest round skips a washed-out last week for an older "
                               "one, or shows a round with no card")
 
+
+class TestAFixtureWashedOutIsNoFixtureStillToPlay(WebAssetCase):
+    """A fixture declared washed out is not counted among those to come (4.535).
+
+    The fixtures the exporter lists include those a club declared washed out, so the
+    Matches page can draw them, and two other places read the list as the fixtures
+    not yet played: the team page's ``N fixtures still to play, next: ...`` and the
+    head-to-head table's column of rounds to come. Each would have counted a night
+    the rain took as one still to play. Python says which fixtures those are, and
+    both lists leave them out by its flag.
+    """
+
+    def filters(self, name: str) -> list[str]:
+        code = jslint.without_comments(self.body(name))
+        found = re.findall(r"\(S\.fixtures \|\| \[\]\)\.filter\(function \(f\) "
+                           r"\{\s*return ([^;]*);\s*\}\)", code)
+        self.assertTrue(found, f"{name}() no longer picks fixtures by one expression")
+        return found
+
+    def test_the_team_page_counts_none_of_them_still_to_play(self):
+        picked, = self.filters("renderTeam")
+        self.assertRegex(picked, r"!f\.played && !f\.washed_out",
+                         "a fixture washed out is told as one the team still has "
+                         "to play")
+
+    def test_the_head_to_head_lists_none_of_them_to_come(self):
+        picked, = self.filters("teamH2HTable")
+        self.assertRegex(picked, r"!f\.played && !f\.washed_out",
+                         "a fixture washed out is listed among the meetings to come")
+
+    def test_the_exporter_writes_the_flag_the_page_reads(self):
+        self.assertIn('"washed_out"', (ROOT / "matchcentre" / "export.py").read_text())
 
 class TestAnUndatedMatchLeavesNoSeparatorStanding(WebAssetCase):
     """A match with no date printed its separators with nothing between them.

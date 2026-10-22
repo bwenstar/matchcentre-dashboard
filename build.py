@@ -1785,6 +1785,27 @@ def _rejected_section(report: _Report, rejected) -> None:
         report.line(line, always=True)
 
 
+def _washed_out(season: dict) -> str:
+    """The rounds and fixtures declared washed out, as the report says them (4.535).
+
+    ``round 9, the whole round; round 7, Grinders v Phantoms``, in the order the
+    season runs, read off the document as the page reads it: a round its
+    ``washed_out`` flags whole, and each fixture flagged in any other. ``""`` for
+    none, and the report prints no line.
+    """
+    parts = []
+    for rnd in season.get("rounds", []):
+        if rnd.get("washed_out"):
+            parts.append(f"round {rnd['number']}, the whole round")
+            continue
+        fixtures = [f"{fx['home_name']} v {fx['away_name']}"
+                    for fx in season.get("fixtures", [])
+                    if fx["round"] == rnd["number"] and fx.get("washed_out")]
+        if fixtures:
+            parts.append(f"round {rnd['number']}, {in_words(fixtures)}")
+    return "; ".join(parts)
+
+
 def _competition_section(report: _Report, season: dict, *,
                          sheet: sheet_mod.Comparison | None = None,
                          anonymised: anonymise_mod.Anonymised | None = None
@@ -1820,6 +1841,10 @@ def _competition_section(report: _Report, season: dict, *,
     else:
         report.field("rounds", f"{meta['rounds_played']} of "
                                f"{meta['rounds_total']} played")
+    washed = _washed_out(season)
+    if washed:
+        # Beside the count they are in, so a club sees its lines took (4.535).
+        report.sentence("washed out", washed)
     report.field("draw", f"{meta['draw_source']} ({prov['draw']})")
     # The state's words are the document's, as F10's and the pages' are: played
     # where every team's counted is its P, and counted where not (4.458).
