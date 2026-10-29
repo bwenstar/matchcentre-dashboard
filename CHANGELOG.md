@@ -10,6 +10,8 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-29
+
 ### Added
 
 - **`[competitions.<id>.washouts]`: a round, or some of its fixtures, washed
@@ -30,6 +32,28 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
   has cards or is declared washed out, now names it and gives the line to type.
   `--discover --force` writes the table back. README section: *A round, or some
   of its matches, washed out*.
+- **`[rules] finals = "placings"`: a week of placing matches after the
+  season.** 1st v 2nd, 3rd v 4th, 5th v 6th and on down the final ladder, once
+  the regular season is over; with an odd number of teams the last plays
+  nobody and keeps its place. Each winner takes the higher place, and a draw,
+  a declared washout or a match called off leaves it with the team placed
+  higher; a card with no result places nobody. The week is a finals round
+  however Match Centre labels it: the first round numbered past
+  `rounds_total`, which before stopped the run with F3 and was scored into the
+  ladder, a finals label, or `Playoff`, `Playoffs` or `Placings`. The front
+  page has a **Placings** table, the Matches page heads the week **Placing
+  matches**, each team's page says where it was placed, the report prints a
+  `placings` line, and `season.json` carries `placings`. A card the final
+  ladder pairs nobody by is reported as `placing-pair`, the week's cards
+  before the season is over as `placing-early`, a pair with cards in two
+  finals rounds as `placing-repeat`, and the setting with no `rounds_total` or
+  no `teams` list as `placings-config`; a week read as the placings by its
+  number that the ladder pairs none of stops the run as `placing-week`, as a
+  `rounds_total` a round short would stop it without the setting. Without the
+  setting, F3 names the line to add when a round past `rounds_total` would be
+  the placing week. Settable per competition, where `finals = "none"` turns it
+  off. README section: *Finals, and placing matches after the season*.
+
 
 ### Fixed
 
@@ -38,6 +62,18 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
   captains tables, or a round `３`. TOML allows only ASCII letters, digits, `-` and
   `_` in a bare key, so the file it had just written would not load, and every run
   after it stopped there. Such a key is now written in quotes.
+- A finished season's ladder said it was in progress for good wherever byes or
+  washouts left its teams on unequal counts, which under `unplayed = "zero"` a
+  grade with a bye or a washout always has: the report's `ladder in progress`,
+  F10's warning, the dashboard's `ladder in progress` pill and its note, and
+  on a ladder ordered on a total no leader at all. Once every regular round
+  has come, as many as `rounds_total`, with every team of the confirmed
+  `teams` list on a card, a rest or a washout in each, the ladder is final
+  whatever its counts: the report says `ladder final: every regular round is
+  in`, F10 says nothing, the pill says `final ladder`, the note says `Final`,
+  and the team on top is named. A last round of nothing but blank cards is not
+  taken as played. README section: *The ladder says "in progress"*.
+
 
 ## [0.2.0] — 2026-10-15
 

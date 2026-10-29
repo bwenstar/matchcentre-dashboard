@@ -4034,7 +4034,7 @@ Which version a folder is, without running a build and without opening a file:
 
 ```bash
 python3 build.py --version
-# matchcentre-dashboard 0.2.0  (python 3.12.3 on linux)
+# matchcentre-dashboard 0.3.0  (python 3.12.3 on linux)
 ```
 
 Every command answers it, with the same line, and that line is also the first
