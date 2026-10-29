@@ -170,6 +170,20 @@ sets = "first-to-6"
 # the run says it was not read.
 # forfeit_points = 5
 
+# finals — what your finals are, after the regular rounds. One of:
+#   none      a finals round is left out of the ladder and places nobody. The
+#             default, and what leaving the line out means.
+#   placings  one week of placing matches after the regular rounds: 1st v 2nd,
+#             3rd v 4th and so on down the final ladder. Each winner takes the
+#             higher place; a draw, a washout or a match called off leaves it
+#             with the team placed higher; with an odd number of teams the last
+#             plays nobody and keeps its place. The week is a finals round
+#             however it is labelled: the first number past rounds_total, a
+#             finals label, or Playoff, Playoffs or Placings. It needs
+#             rounds_total and the teams list, to tell when the regular season
+#             is over.
+# finals = "placings"
+
 # format — the shape of a match: how many sets, and which are doubles.
 # This *is* read off your cards, from the marker column beside each set row, so
 # you do not need to set it. Declare it only if you would rather a card that
@@ -404,6 +418,7 @@ teams = ["Falcons", "Herons", "Currawongs", "Lorikeets", "Nightjars",
 # min_sets_for_result = 3
 # forfeit_award = "fixed"
 # forfeit_points = 5
+# finals = "none"
 
 # Captains, keyed by team name or team id. Read from the (C) marks on the cards
 # when you leave this out, and a first run writes those marks here with a # in
@@ -544,6 +559,9 @@ after_round = 5
 #             warning, unless you set finals = true to make it a finals round,
 #             or finals = false to keep it regular without the warning. Set it
 #             false, too, to score a round labelled as a final as a regular one.
+#             Under [rules] finals = "placings", the first number past
+#             rounds_total and a name like Playoff or Placings are finals rounds
+#             too.
 #   note      a free line shown against the round, for a washout or a
 #             rescheduled night.
 

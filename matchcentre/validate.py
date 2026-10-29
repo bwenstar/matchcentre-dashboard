@@ -37,7 +37,7 @@ from .card import (Card, ParsedSet, Rejection, letterhead_key, letterhead_spelli
                    majority_letterhead, states_no_result, thin_card_prints, verb_side)
 from .card import Totals
 from .competition import (DRAW_DECLARED, Club, Competition, Provenance,
-                          fixture_sort_key, is_finals_label,
+                          fixture_sort_key, is_finals_label, placing_weeks,
                           round_number, years_played)
 from .format import MatchFormat, SetRule, completed, plausible, set_winner
 from .config import DEFAULT_PATH, toml_key, toml_value
@@ -47,17 +47,17 @@ from .model import (SIDES, Match, MatchStatus, SetResult, SetStatus, all_blank,
                     retired_set_winner, rubber_award, stopped_short)
 from .scorecard import _given_up, box_award, forfeit_award
 from .scoring import Ruleset, ScoringError
-from .scoring import UNPLAYED_AVERAGE, UNPLAYED_ZERO
+from .scoring import FINALS_PLACINGS, UNPLAYED_AVERAGE, UNPLAYED_ZERO
 from .sheet import (AHEAD, COMPARED, Comparison, TeamCheck, at_places,
                     beyond_words, by_weeks, places_of, rounds_listed)
-from .scope import echoed, in_words
+from .scope import echoed, in_words, ordinal
 from .slugs import did_you_mean, unslug
 from .stats import (card_against_rest, chronological, fixtures_without_cards,
-                    ladder_counts, ladder_detail, ladder_levels,
+                    ladder_counts, ladder_detail, ladder_final, ladder_levels,
                     ladder_matches, ladder_played, ladder_state_of,
                     ordered_on_the_average, rests_standing, rounds_present,
                     same_result, same_scoreline, unlisted_words)
-from .stats import duplicates
+from .stats import duplicates, placings
 
 __all__ = ["Issue", "Report", "validate", "ERROR", "WARNING"]
 
@@ -279,6 +279,7 @@ def validate(matches: Sequence[Match], competition: Competition, *,
         _check_rounds_total,        # F3
         _check_finals,              # F11
         _check_ladder,              # F10
+        _check_placings,            # what keeps a placing match placing nobody
         _check_sheet_teams,         # sheet-team
         _check_sheet_reached,       # sheet-ahead
         _check_sheet,               # sheet-mismatch
@@ -2578,16 +2579,44 @@ def _check_rounds_total(ctx: _Context) -> list[Issue]:
                     f"{said[1:]}, which the draw does not list: add "
                     f"them under [[competitions.{comp.id}.rounds]] if the draw grew, "
                     f"or set rounds_total under [competitions.{comp.id}] if the draw "
-                    f"is not the whole season.",
+                    f"is not the whole season."
+                    + _placings_hint(comp, regular, ctx.matches),
             detail=f"rounds played: {', '.join(regular)}"))
     elif regular:
         issues.append(Issue(
             rule="F3", severity=ERROR,
             message=f"rounds_total is declared as {total} but {len(regular)} "
                     f"regular {by_weeks(regular, 'round has', 'rounds have')} been "
-                    f"played ({in_words(regular)}).",
+                    f"played ({in_words(regular)})."
+            + _placings_hint(comp, regular, ctx.matches),
             detail=f"rounds played: {', '.join(regular)}"))
     return issues
+
+
+def _placings_hint(comp: Competition, regular: list[str],
+                   matches: Sequence[Match]) -> str:
+    """The sentence that offers ``finals = "placings"``, where it is the answer.
+
+    Said where the format is the answer: the club has said nothing of its finals,
+    and one round played past the length would be the placing week under it
+    (:func:`~matchcentre.competition.placing_weeks`) and leave the season the
+    length declared. A week of 1st v 2nd, 3rd v 4th after the season, numbered on
+    as Match Centre may number it, stopped the run as a season played too long
+    (4.537). A club that typed ``"none"`` has answered it; a season of nought, or
+    rounds 4 to 10 of one declared three long, is a length typed wrong. And a week
+    of cards: a round past the length that only a washout names is a round the
+    draw or the length left out, as 4.535 tells it, and offered placings over it
+    the club was asked about a week nobody played.
+    """
+    if comp.finals or not comp.rounds_total:
+        return ""
+    weeks = placing_weeks(regular, length=comp.rounds_total, finals=FINALS_PLACINGS)
+    if (len(weeks) != 1 or len(regular) - 1 != comp.rounds_total
+            or not weeks & {m.round for m in matches}):
+        return ""
+    return (f" If round {echoed(next(iter(weeks)))} is a week of placing matches "
+            f"after the season, 1st v 2nd, 3rd v 4th and on down the ladder, set "
+            f'finals = "placings" under [rules] or [competitions.{comp.id}].')
 
 
 # --- F11: no finals in the ladder ---------------------------------------
@@ -2616,22 +2645,20 @@ def _check_finals(ctx: _Context) -> list[Issue]:
         # What the club typed after `finals =`, asked of the round as discovery's
         # finals note asks it: a value typed is not offered again, or doubted.
         typed = rnd.finals_typed if rnd is not None else None
+        # Under a finals format a round its label makes the placing week is one
+        # by the club's own declaration, and no regular round lost (4.537).
+        placing = comp.placing_week(number)
         if finals and scored[number]:
             count = len(scored[number])
             issues.append(Issue(
                 rule="F11", severity=WARNING,
-                message=f"round {echoed(number)} is a finals round, so its {count} "
-                        f"result{'' if count == 1 else 's'} "
-                        f"{'is' if count == 1 else 'are'} left out of the ladder: no "
-                        "points, and no games or sets in any team's row. The match "
-                        "is still on the Matches page and still counts towards the "
-                        "records of the players in it."
+                message=_finals_words(comp, number, count, placing=placing)
                         + (comp.finals_advice("finals = false",
                                               "if this round is really a regular one")
-                           if typed is None else ""),
+                           if typed is None and not placing else ""),
                 subject=f"R{number}",
                 detail=", ".join(_label(m) for m in scored[number])))
-        if (rnd is not None and rnd.is_finals and numeric
+        if (rnd is not None and rnd.is_finals and numeric and not placing
                 and comp.draw_source != DRAW_DECLARED):
             issues.append(Issue(
                 rule="F11", severity=ERROR,
@@ -2646,9 +2673,36 @@ def _check_finals(ctx: _Context) -> list[Issue]:
                 rule="F11", severity=WARNING,
                 message=f"round label {echoed(number, quoted=True)} is neither a "
                         "number nor a finals label this program recognises; it is "
-                        "being scored as a regular round.",
+                        "being scored as a regular round."
+                        + (comp.finals_advice("finals = true",
+                                              "if it is the week of placing matches")
+                           if comp.finals == FINALS_PLACINGS else ""),
                 subject=f"R{number}", detail=number))
     return issues
+
+
+def _finals_words(comp: Competition, number: str, count: int, *,
+                  placing: bool) -> str:
+    """F11's sentence for a finals round's results: out of the ladder, and why.
+
+    Under ``finals = "placings"`` they are the placing matches, which is what they
+    are for, and a round numbered past the season says that is why it is a final
+    at all (4.537).
+    """
+    results = (f"{count} result{'' if count == 1 else 's'} "
+               f"{'is' if count == 1 else 'are'}")
+    rest = ("no points, and no games or sets in any team's row. The match is still "
+            "on the Matches page and still counts towards the records of the players "
+            "in it.")
+    if comp.finals != FINALS_PLACINGS:
+        return (f"round {echoed(number)} is a finals round, so its {results} left "
+                f"out of the ladder: {rest}")
+    why = (f", numbered past the season's {comp.rounds_total} "
+           f"round{'' if comp.rounds_total == 1 else 's'}"
+           if placing and round_number(number) is not None else "")
+    return (f"round {echoed(number)} is the placing week{why} "
+            f'(finals = "placings"), so its {results} left out of the ladder and '
+            f"{'decides' if count == 1 else 'decide'} places instead: {rest}")
 
 
 # --- F10: does the ladder state a settled order? ------------------------
@@ -2666,7 +2720,9 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
     level on the average with a team that has counted more, which the next key
     places below it (:func:`stats.ladder_levels`). The state is
     :func:`stats.ladder_state_of`'s, the one rule the document's
-    ``meta.ladder_state`` is written by too (4.428).
+    ``meta.ladder_state`` is written by too (4.428). Nothing is said of a ladder
+    the regular season is over on (:func:`stats.ladder_final`): its counts are
+    the season's, and no card to come will even them (4.536).
     """
     issues: list[Issue] = []
     comp = ctx.competition
@@ -2701,7 +2757,7 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
             message=f"{detail}, so there is no ladder to present.",
             detail="0 counted matches"))
         return issues
-    if state == "in-progress":
+    if state == "in-progress" and not ladder_final(ctx.matches, comp):
         most = max(counted.values())
         short = sorted(slug for slug, n in counted.items() if n < most)
         fewer = (f"{in_words(short)} {'has' if len(short) == 1 else 'have'} "
@@ -2718,6 +2774,131 @@ def _check_ladder(ctx: _Context) -> list[Issue]:
         issues.append(Issue(
             rule="F10", severity=WARNING, message=message,
             detail="; ".join(f"{slug} {counted[slug]}" for slug in sorted(counted))))
+    return issues
+
+
+# --- placings: the matches a finals format places by (4.537) -----------
+
+
+def _check_placings(ctx: _Context) -> list[Issue]:
+    """Under ``finals = "placings"``, what keeps a placing match placing nobody.
+
+    The placings are :func:`stats.placings`'s, and these are what it cannot do: tell
+    when the regular season is over with no length or no team list the club closed
+    (``placings-config``); pair anybody before it is over, so a finals card already
+    in places nobody yet (``placing-early``); place a card between two teams the
+    final ladder does not pair (``placing-pair``); and choose between a pair's
+    cards in two finals rounds (``placing-repeat``). Warnings: the ladder is right
+    either way, and every place that stands is the cards' own.
+    """
+    comp = ctx.competition
+    if comp.finals != FINALS_PLACINGS:
+        return []
+    issues: list[Issue] = []
+    unknowable = [why for why, short in (
+        (("the season's length is not declared", "set rounds_total"),
+         comp.rounds_total is None),
+        (("the team list is read from the cards", "declare teams"),
+         not comp.teams_declared)) if short]
+    if unknowable:
+        issues.append(Issue(
+            rule="placings-config", severity=WARNING,
+            message=f'finals = "placings" is declared, but '
+                    f"{in_words(why for why, _ in unknowable)}, so nothing can say "
+                    f"when the regular season is over, and nobody is paired. "
+                    f"{in_words(step for _, step in unknowable)[:1].upper()}"
+                    f"{in_words(step for _, step in unknowable)[1:]} under "
+                    f"[competitions.{comp.id}].",
+            detail="; ".join(why for why, _ in unknowable)))
+        return issues
+    placed = placings(ctx.matches, comp)
+    cards = [ctx.matches[i] for i in placed.strays]
+    if placed.waiting:
+        if cards:
+            rounds = sorted({m.round for m in cards}, key=comp.round_key)
+            issues.append(Issue(
+                rule="placing-early", severity=WARNING,
+                message=f"the {rounds_listed([echoed(n) for n in rounds])} "
+                        f"{'card places' if len(cards) == 1 else 'cards place'} "
+                        f"nobody yet, because the regular season is not over on "
+                        f"the cards: {placed.waiting}.",
+                subject=f"R{rounds[0]}",
+                detail="; ".join(_label(m) for m in cards)))
+        return issues
+    issues.extend(_placing_week_unpaired(ctx, placed))
+    pairs = {slug: match for match in placed.matches
+             for slug in (match.higher, match.lower)}
+    for match in cards:
+        said = []
+        for slug in dict.fromkeys((match.home, match.away)):
+            if slug in pairs:
+                pair = pairs[slug]
+                other = pair.lower if slug == pair.higher else pair.higher
+                said.append(f"{comp.team_name(slug)} with "
+                            f"{comp.team_name(other)}")
+            elif placed.unpaired and placed.unpaired[1] == slug:
+                said.append(f"{comp.team_name(slug)} with nobody, "
+                            f"{ordinal(placed.unpaired[0])}")
+        issues.append(Issue(
+            rule="placing-pair", severity=WARNING,
+            message=f"round {echoed(match.round)}: {comp.team_name(match.home)} v "
+                    f"{comp.team_name(match.away)} is no placing match of the "
+                    f"ladder after round {echoed(placed.after)}, which pairs "
+                    f"{in_words(said)}, so it places nobody.",
+            subject=f"R{match.round}", detail=_label(match)))
+    for pair in placed.matches:
+        if pair.outcome != "repeat":
+            continue
+        issues.append(Issue(
+            rule="placing-repeat", severity=WARNING,
+            message=f"{comp.team_name(pair.higher)} v {comp.team_name(pair.lower)}, "
+                    f"{ordinal(pair.places[0])} v {ordinal(pair.places[1])}, has a "
+                    f"card in {rounds_listed([echoed(n) for n in pair.rounds])}, "
+                    f"so it places nobody until the card that is not the placing "
+                    f"match is taken out of the folder.",
+            subject=f"R{pair.rounds[0]}",
+            detail=f"{pair.higher} v {pair.lower}"))
+    return issues
+
+
+def _placing_week_unpaired(ctx: _Context, placed) -> list[Issue]:
+    """``placing-week``: a week read as the placings by its number pairs nobody (4.537).
+
+    Under placings the first week numbered past ``rounds_total`` is the placing week
+    (:func:`~matchcentre.competition.placing_weeks`), and so is the last round of a
+    season typed a round short: its cards are then left out of the ladder, which is
+    set from a round too few, and every one of them is a match the final ladder
+    pairs nobody by. With no format F3 stops that run; this stops it too, an error,
+    and says it is the length or the cards' pairs that are wrong. Not of a week a
+    label or the club's ``finals = true`` says is the placings, nor of one with a
+    card the ladder pairs. Its own rule and not F3's, which would withhold the
+    length from the document as one the cards played past, and here they have not.
+    Rejected: reading such a week as a regular round, which makes a placing week
+    the association paired otherwise a sixth round.
+    """
+    comp = ctx.competition
+    strays = {id(ctx.matches[i]) for i in placed.strays}
+    issues: list[Issue] = []
+    for number in comp.round_order:
+        rnd = comp.rounds[number]
+        cards = [m for m in ctx.matches if m.round == number and not m.is_bye]
+        if (not rnd.is_finals or rnd.finals_typed is not None
+                or round_number(number) is None or not comp.placing_week(number)
+                or not cards or not all(id(m) in strays for m in cards)):
+            continue
+        none = (f"none of its {len(cards)} cards is" if len(cards) > 1
+                else "its card is not")
+        issues.append(Issue(
+            rule="placing-week", severity=ERROR,
+            message=f"round {echoed(number)} is numbered past rounds_total = "
+                    f"{comp.rounds_total}, so it is read as the week of placing "
+                    f'matches (finals = "placings"), but {none}'
+                    f" a placing match of the ladder after round "
+                    f"{echoed(placed.after)}. If round {echoed(number)} is a regular "
+                    f"round, rounds_total is too short; if it is the placing week, "
+                    f"the cards pair teams the ladder does not.",
+            subject=f"R{number}",
+            detail="; ".join(_label(m) for m in cards)))
     return issues
 
 

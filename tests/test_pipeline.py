@@ -25333,5 +25333,1518 @@ class TestThePageNotesACardThatRecordsNothingNoMoreThanItsReportDoes(
                          (scorecard.NO_VERB, scorecard.thin_card_note(card.checks)))
 
 
+
+# --- 4.536 and 4.537: a season over, and the placing week after it ----------------
+#
+# The washout season's six teams and five Tuesdays, every regular match won 20-15
+# by the home side, which is the lower-numbered team of SIX_NAMES in every fixture,
+# so the ladder after round 5 is SIX_NAMES in order, every place apart: 30.0, 27.5,
+# 25.0, 22.5, 20.0 and 17.5 under games-bonus. Then a week of placing matches.
+
+PLACING_DATE = "2026-05-12"
+PLACING_SCORES = {
+    "home": ((6, 2), (6, 3), (2, 6), (6, 4)),
+    "away": ((2, 6), (3, 6), (6, 2), (4, 6)),
+    "draw": ((6, 4), (4, 6), (6, 4), (4, 6)),
+    "cancelled": ((0, 0),) * 4,
+    "blank": ((0, 0),) * 4,
+    "short": ((6, 2), (6, 3), (0, 0), (0, 0)),
+    "forfeit": ((0, 0),) * 4,
+}
+SIX_POINTS = {"hilltop-aces": 30.0, "riverside-rockets": 27.5,
+              "lakeside-spinners": 25.0, "westfield-hawks": 22.5,
+              "eastwood-bears": 20.0, "northside-nets": 17.5}
+SIX_SLUGS = tuple(SIX_POINTS)
+
+
+def write_placings_season(root: Path, *, config: str, teams: int = 6,
+                          label: str = "6", pairs: tuple = ((0, 1), (2, 3), (4, 5)),
+                          results: dict | None = None,
+                          carded: dict | None = None,
+                          blank: dict | None = None,
+                          skip: tuple = ()) -> Path:
+    """The placings season into ``root/data``, and *config* as ``root/config.toml``.
+
+    The first *teams* of SIX_NAMES: with five, the fixtures of the sixth are not
+    played and its opponent rests that week. Each round's first ``carded[round]``
+    fixtures get a card, every one by default, and the first ``blank[round]`` of
+    those are blank, every row 0-0 and no tick, and the fixtures *skip* names as
+    ``(round, home, away)`` get none. The placing week is *pairs*, home
+    first, each ``(home, away)`` under *label* or ``(label, home, away)``, played as
+    ``results[index]`` says: ``home`` by default, ``away``, ``draw`` (20-20 on games
+    and 2-2 on sets), ``cancelled`` (Match Cancelled), ``blank``, ``short`` (two
+    rubbers played and no result) or ``forfeit`` (the home side forfeits).
+    Fictional, from cardwriter.
+    """
+    data = root / "data"
+    carded = carded or {}
+    blank = blank or {}
+    results = results or {}
+    index = 0
+
+    def write(number, date, home, away, how):
+        nonlocal index
+        index += 1
+        folder = data / f"R{number}"
+        folder.mkdir(parents=True, exist_ok=True)
+        hn, an = SIX_NAMES[home], SIX_NAMES[away]
+        hp, ap = SIX_TEAMS[hn], SIX_TEAMS[an]
+        still = how in ("cancelled", "blank", "short")
+        cw.write_card_file(folder / f"{index}.pdf", cw.CardSpec(
+            date=date, round_label=number, division="C", court=f"{index:02d}",
+            match_id=f"810{index:04d}", home_name=hn, away_name=an,
+            rows=rows_for(PLACING_SCORES[how], hp, ap),
+            cancelled=how == "cancelled",
+            forfeited_by="home" if how == "forfeit" else None,
+            winner=cw.NO_TICK if still else cw.AUTO,
+            verb="VS" if still else cw.AUTO,
+            home_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                              for i, n in enumerate(hp)),
+            away_roster=tuple(cw.RosterRow(n, 2.5, 2.5, captain=i == 0)
+                              for i, n in enumerate(ap))))
+
+    for number, fixtures in WASHOUT_DRAW.items():
+        playing = [(h, a) for h, a in fixtures if h < teams and a < teams]
+        for k, (home, away) in enumerate(playing[:carded.get(number, len(playing))]):
+            if (number, home, away) not in skip:
+                write(number, WASHOUT_DATES[number], home, away,
+                      "blank" if k < blank.get(number, 0) else "home")
+    for k, pair in enumerate(pairs):
+        number, home, away = pair if len(pair) == 3 else (label, *pair)
+        write(number, PLACING_DATE, home, away, results.get(k, "home"))
+    (root / "config.toml").write_text(config, encoding="utf-8")
+    return data
+
+
+def placings_config(*, finals: str = "placings", where: str = "rules",
+                    total: bool = True, teams: int = 6, listed: bool = True,
+                    rules: str = "", extra: str = "", length: int = 5) -> str:
+    """The season's config: ``rounds_total = 5``, or *length*, the teams, and ``finals``.
+
+    *where* puts ``finals`` under ``[rules]`` or in the section (``comp``), or both
+    (``both``, the section's ``none``); *rules* is more of ``[rules]``. Without
+    *total*, no length; without *listed*, no team list; *extra* is appended as typed.
+    """
+    lines = []
+    if (finals and where in ("rules", "both")) or rules:
+        lines.append("[rules]")
+        if finals and where in ("rules", "both"):
+            lines.append(f'finals = "{finals}"')
+        if rules:
+            lines.append(rules.strip())
+        lines.append("")
+    lines += ["[competitions.tue-c]", 'day = "Tuesday"', 'division = "C"']
+    if total:
+        lines.append(f"rounds_total = {length}")
+    if listed:
+        lines.append("teams = [" + ", ".join(f'"{n.title()}"'
+                                             for n in SIX_NAMES[:teams]) + "]")
+    if where == "comp" and finals:
+        lines.append(f'finals = "{finals}"')
+    if where == "both":
+        lines.append('finals = "none"')
+    if extra:
+        lines += ["", extra.strip()]
+    return "\n".join(lines) + "\n"
+
+
+class PlacingsSeasonCase(unittest.TestCase):
+    """The placings season, read, discovered, validated and exported in-process."""
+
+    FINALS = "placings"
+    WHERE = "rules"
+    TOTAL = True
+    TEAMS = 6
+    LISTED = True
+    RULES = ""
+    EXTRA = ""
+    LABEL = "6"
+    PAIRS: tuple = ((0, 1), (2, 3), (4, 5))
+    RESULTS: dict = {}
+    CARDED: dict = {}
+    BLANK: dict = {}
+    SKIP: tuple = ()
+    LENGTH = 5
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        data = write_placings_season(
+            root, teams=cls.TEAMS, label=cls.LABEL, pairs=cls.PAIRS,
+            results=cls.RESULTS, carded=cls.CARDED, blank=cls.BLANK, skip=cls.SKIP,
+            config=placings_config(finals=cls.FINALS, where=cls.WHERE,
+                                   total=cls.TOTAL, teams=cls.TEAMS,
+                                   listed=cls.LISTED, rules=cls.RULES,
+                                   extra=cls.EXTRA, length=cls.LENGTH))
+        cls.root = root
+        cls.config = config_mod.load(root / "config.toml")
+        cls.cards, cls.rejected = scorecard.read_tree(data)
+        cls.found = discover_mod.discover(cls.cards, cls.rejected, root=data,
+                                          config=cls.config)
+        cls.competition, = [comp for comp in cls.found.club.competitions
+                            if comp.id == "tue-c"]
+        cls.matches = cls.found.matches["tue-c"]
+        cls.report = validate.validate(cls.matches, cls.competition,
+                                       club=cls.found.club, cards=cls.cards,
+                                       rejected=cls.rejected)
+        cls.season = export.build_season(
+            cls.matches, competition=cls.competition, source_dir=data,
+            generated="2026-06-01T00:00:00", club=cls.found.club, cards=cls.cards,
+            rejected=cls.rejected)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def findings(self, rule: str) -> list[validate.Issue]:
+        return [issue for issue in self.report.issues if issue.rule == rule]
+
+    def said(self, rule: str) -> list[str]:
+        return [" ".join(issue.message.split()) for issue in self.findings(rule)]
+
+    def placing(self, at: int) -> dict:
+        return self.season["placings"]["matches"][at]
+
+    def placed(self) -> list[tuple]:
+        """Each placing match as ``(places, outcome, first, second)``."""
+        return [(tuple(m["places"]), m["outcome"], m["first"], m["second"])
+                for m in self.season["placings"]["matches"]]
+
+    def round_(self, number: str) -> dict:
+        found = [r for r in self.season["rounds"] if r["number"] == number]
+        self.assertEqual(len(found), 1, f"round {number} is not in the document once")
+        return found[0]
+
+    def ladder(self) -> dict[str, tuple]:
+        return {t["slug"]: (t["position"], t["counted"], t["points"])
+                for t in self.season["teams"]}
+
+
+class TestARoundNumberedPastTheSeasonIsItsPlacingWeek(PlacingsSeasonCase):
+    """4.537: under ``finals = "placings"``, round 6 of a five-round season is a final.
+
+    Measured before (/tmp/mcw/finals/out, the probe /tmp/mcw/scratch/probe_finals.py):
+    labelled ``6``, the week of 1st v 2nd, 3rd v 4th and 5th v 6th stopped the run
+    on F3, ``rounds_total is declared as 5 but 6 regular rounds have been played``,
+    and was scored into the ladder, 2nd and 3rd level on 31.0 and 4th and 5th on
+    26.0. Now it is the placing week: a finals round, out of the ladder, and no F3.
+    Rejected: the round after the length alone, which a week moved on leaves
+    scored (the next class), and a name for it the club must type in a draw.
+    """
+
+    def test_it_is_a_finals_round_and_the_season_is_five_rounds(self):
+        self.assertTrue(self.round_("6")["is_finals"])
+        self.assertEqual([r["number"] for r in self.season["rounds"]
+                          if not r["is_finals"]], ["1", "2", "3", "4", "5"])
+        self.assertEqual((self.season["meta"]["rounds_played"],
+                          self.season["meta"]["rounds_total"]), (5, 5))
+
+    def test_nothing_stops_the_run(self):
+        self.assertEqual(self.findings("F3"), [])
+        self.assertEqual([i.rule for i in self.report.errors], [])
+
+    def test_the_ladder_is_the_five_rounds_alone(self):
+        self.assertEqual(self.ladder(), {
+            slug: (place, 5, SIX_POINTS[slug])
+            for place, slug in enumerate(SIX_SLUGS, start=1)})
+
+    def test_f11_says_it_is_the_placing_week_and_offers_no_way_back(self):
+        self.assertEqual(self.said("F11"), [
+            'round 6 is the placing week, numbered past the season\'s 5 rounds '
+            '(finals = "placings"), so its 3 results are left out of the ladder and '
+            "decide places instead: no points, and no games or sets in any team's "
+            "row. The match is still on the Matches page and still counts towards "
+            "the records of the players in it."])
+        self.assertEqual([i.severity for i in self.findings("F11")],
+                         [validate.WARNING])
+
+
+class TestAPlacingWeekMovedOnAWeekIsThePlacingWeekToo(PlacingsSeasonCase):
+    """4.537: a number past the season, not the one after it alone.
+
+    A placing week put back a week by rain is printed ``7`` after a five-round
+    season, and is no regular round either. Rejected: the round after the length
+    alone, which scored that week into the ladder and stopped the run on F3.
+    """
+
+    LABEL = "7"
+
+    def test_it_is_a_finals_round_and_nothing_stops_the_run(self):
+        self.assertTrue(self.round_("7")["is_finals"])
+        self.assertEqual([i.rule for i in self.report.errors], [])
+        self.assertEqual(self.season["placings"]["matches"][0]["rounds"], ["7"])
+
+
+class TestWithNoFormatTheSameWeekIsASeasonPlayedTooLong(PlacingsSeasonCase):
+    """4.537: undeclared, round 6 is a regular round, and F3 says what to declare.
+
+    The rule as it was, and F3's error, which now ends on the line that makes the
+    week a placing week where that is what would: the club in front of it had a
+    season the program said was too long, and no word of why. Rejected: reading a
+    round past the length as a final with no format declared, which drops a round
+    a club miscounted its season by out of its ladder.
+    """
+
+    FINALS = ""
+
+    def test_it_is_scored_as_a_regular_round(self):
+        self.assertFalse(self.round_("6")["is_finals"])
+        self.assertEqual({slug: counted for slug, (_, counted, _) in
+                          self.ladder().items()}, dict.fromkeys(SIX_SLUGS, 6))
+        self.assertIsNone(self.season["placings"])
+
+    def test_the_ladder_is_not_final(self):
+        # A season played past its length is no season over (F3).
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+    def test_f3_offers_the_format(self):
+        self.assertEqual(self.said("F3"), [
+            "rounds_total is declared as 5 but 6 regular rounds have been played "
+            "(1, 2, 3, 4, 5 and 6). If round 6 is a week of placing matches after "
+            "the season, 1st v 2nd, 3rd v 4th and on down the ladder, set finals = "
+            '"placings" under [rules] or [competitions.tue-c].'])
+
+
+class TestAPlacingsHintIsOneWeekOrNone(PlacingsSeasonCase):
+    """4.537: two rounds past a length of four is a length typed wrong, not placings.
+
+    Placings are a week, so F3 offers the format only where one round would be
+    it. Rejected: offering it over every round past the length, which tells a
+    club that typed its season a round short to make two rounds a placing week.
+    """
+
+    FINALS = ""
+    LENGTH = 4
+
+    def test_f3_offers_nothing(self):
+        said, = self.said("F3")
+        self.assertTrue(said.endswith("(1, 2, 3, 4, 5 and 6)."), said)
+
+
+class TestAWeekPastTheSeasonUnderNoneIsASeasonTooLongWithNoOffer(
+        PlacingsSeasonCase):
+    """4.537: ``finals = "none"`` plays as no line does, and is an answer F3 keeps.
+
+    The club that typed it has said its season ends in no placing week, so F3 does
+    not offer it one. Rejected: reading ``"none"`` as no line at all, which F3 then
+    offers ``"placings"`` over the line that refused it.
+    """
+
+    FINALS = "none"
+
+    def test_it_is_scored_as_a_regular_round(self):
+        self.assertFalse(self.round_("6")["is_finals"])
+        self.assertIsNone(self.season["placings"])
+
+    def test_f3_stops_the_run_and_offers_nothing(self):
+        said, = self.said("F3")
+        self.assertTrue(said.endswith("(1, 2, 3, 4, 5 and 6)."), said)
+
+
+class TestASectionsNoneTurnsRulesPlacingsOff(PlacingsSeasonCase):
+    """4.537: a section's own ``finals = "none"`` overrides [rules]'s placings."""
+
+    WHERE = "both"
+
+    def test_round_6_is_regular_and_the_run_stops_on_f3_with_no_offer(self):
+        self.assertFalse(self.round_("6")["is_finals"])
+        said, = self.said("F3")
+        self.assertNotIn("placing", said)
+        self.assertIsNone(self.season["placings"])
+
+
+class TestASectionsOwnPlacingsIsThePlacingWeek(PlacingsSeasonCase):
+    """4.537: ``finals`` in the section alone is read as under [rules]."""
+
+    WHERE = "comp"
+
+    def test_round_6_is_a_finals_round_and_places_the_teams(self):
+        self.assertTrue(self.round_("6")["is_finals"])
+        self.assertEqual(self.findings("F3"), [])
+        self.assertTrue(self.season["placings"]["set"])
+
+
+class TestARoundTypedRegularPastTheSeasonStaysAsTyped(PlacingsSeasonCase):
+    """4.537: ``finals = false`` on round 6 is the club's word, and F3 holds it to it."""
+
+    EXTRA = '[[competitions.tue-c.rounds]]\nnumber = "6"\nfinals = false\n'
+
+    def test_it_is_regular_and_f3_stops_the_run(self):
+        self.assertFalse(self.round_("6")["is_finals"])
+        self.assertEqual(len(self.findings("F3")), 1)
+
+
+class TestAPlacingWeekNamedSoIsThePlacingWeek(PlacingsSeasonCase):
+    """4.537: ``Playoff`` names the placing week under the format.
+
+    Measured before (the probe): labelled ``Playoff``, F11's warning that the label
+    is neither a number nor a finals label, F3's error, and the week in the ladder.
+    Under the format a label that names a placing match at either end is a final
+    (:func:`~matchcentre.competition.placing_week`), and without one it is what it
+    was (4.37).
+    """
+
+    LABEL = "Playoff"
+
+    def test_it_is_a_finals_round_with_no_label_warning(self):
+        self.assertTrue(self.round_("Playoff")["is_finals"])
+        self.assertEqual([i.rule for i in self.report.errors], [])
+        self.assertEqual(self.said("F11"), [
+            'round Playoff is the placing week (finals = "placings"), so its 3 '
+            "results are left out of the ladder and decide places instead: no "
+            "points, and no games or sets in any team's row. The match is still on "
+            "the Matches page and still counts towards the records of the players "
+            "in it."])
+
+
+class TestANameThatIsNoPlacingMatchIsToldHowToMakeItOne(PlacingsSeasonCase):
+    """4.537: ``Catch-up`` stays regular under the format, and is told the line.
+
+    Rejected: every name after the numbers, which scores a catch-up played after
+    round 5 out of the ladder it was played for.
+    """
+
+    LABEL = "Catch-up"
+
+    def test_it_is_regular_and_f11_offers_finals_true(self):
+        self.assertFalse(self.round_("Catch-up")["is_finals"])
+        self.assertIn(
+            "round label 'Catch-up' is neither a number nor a finals label this "
+            "program recognises; it is being scored as a regular round. Set finals "
+            "= true under [[competitions.tue-c.rounds]] if it is the week of "
+            "placing matches.", self.said("F11"))
+
+
+class TestWhichLabelsAreThePlacingWeek(unittest.TestCase):
+    """4.537: :func:`~matchcentre.competition.placing_week`, label by label."""
+
+    def setUp(self):
+        from matchcentre.competition import placing_week
+        self.placing_week = placing_week
+
+    def test_a_number_past_the_length_and_a_placing_name_are(self):
+        for label in ("6", "7", "12", "06", "Playoff", "Playoffs", "Play-off",
+                      "Play Offs", "3rd/4th Playoff", "Playoff 3v4", "Placings",
+                      "Placing Match", "Positional Playoffs", "Grand Final",
+                      "3rd v 4th Final", "Final", "Finals"):
+            with self.subTest(label=label):
+                self.assertTrue(self.placing_week(label, length=5,
+                                                      finals="placings"))
+
+    def test_a_regular_number_and_any_other_name_are_not(self):
+        for label in ("5", "1", "0", "Catch-up", "Final Round", "Replacing round 9",
+                      "Replacement", "Round", ""):
+            with self.subTest(label=label):
+                self.assertFalse(self.placing_week(label, length=5,
+                                                       finals="placings"))
+
+    def test_nothing_is_without_a_format_and_no_number_without_a_length(self):
+        self.assertFalse(self.placing_week("6", length=5, finals=""))
+        self.assertFalse(self.placing_week("Playoff", length=5, finals=""))
+        self.assertFalse(self.placing_week("6", length=None, finals="placings"))
+        self.assertTrue(self.placing_week("Playoff", length=None,
+                                              finals="placings"))
+
+
+class TestEachPlacingMatchPlacesItsWinner(PlacingsSeasonCase):
+    """4.537: 1st v 2nd, 3rd v 4th, 5th v 6th by the final ladder, each to its winner.
+
+    Measured before (the probe): labelled ``Final``, the week was out of the ladder
+    and placed nobody, and nothing on the page or in the report paired anybody.
+    """
+
+    def test_the_pairs_are_the_final_ladder_from_the_top(self):
+        placed = self.season["placings"]
+        self.assertTrue(placed["set"])
+        self.assertEqual((placed["waiting"], placed["after"]), ("", "5"))
+        self.assertEqual([(m["higher"], m["lower"]) for m in placed["matches"]],
+                         [SIX_SLUGS[0:2], SIX_SLUGS[2:4], SIX_SLUGS[4:6]])
+
+    def test_each_winner_takes_the_higher_place(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "riverside-rockets"),
+            ((3, 4), "won", "lakeside-spinners", "westfield-hawks"),
+            ((5, 6), "won", "eastwood-bears", "northside-nets")])
+
+    def test_each_names_the_card_that_placed_it_and_its_round(self):
+        keys = {m["key"]: m for m in self.season["matches"]}
+        for at, (home, away) in enumerate(self.PAIRS):
+            with self.subTest(at=at):
+                card = keys[self.placing(at)["key"]]
+                self.assertEqual((card["round"], card["home"], card["away"]),
+                                 ("6", SIX_SLUGS[home], SIX_SLUGS[away]))
+                self.assertEqual(self.placing(at)["rounds"], ["6"])
+
+    def test_nobody_is_left_over_and_no_card_is_astray(self):
+        self.assertIsNone(self.season["placings"]["unpaired"])
+        self.assertEqual(self.season["placings"]["strays"], [])
+        self.assertEqual([i.rule for i in self.report.issues
+                          if i.rule.startswith("placing")], [])
+
+    def test_the_document_carries_these_keys_and_no_others(self):
+        placed = self.season["placings"]
+        self.assertEqual(set(placed), {"format", "set", "waiting", "after",
+                                       "matches", "unpaired", "strays"})
+        self.assertEqual(placed["format"], "placings")
+        self.assertEqual(set(self.placing(0)), {"places", "higher", "lower",
+                                                "outcome", "first", "second",
+                                                "key", "rounds"})
+
+    def test_every_field_has_a_class_for_a_page_that_withholds_names(self):
+        from matchcentre import anonymise
+        # A dynamic dict's keys are its own class (anonymise.KEYS), not a field.
+        missing = sorted({pattern for pattern, _, _, is_key
+                          in anonymise._leaves(self.season)
+                          if not is_key and pattern not in anonymise.FIELDS})
+        self.assertEqual(missing, [])
+
+    def test_the_teams_are_labels_and_the_waiting_words_free_text(self):
+        from matchcentre import anonymise
+        for pattern in ("placings.matches[].higher", "placings.matches[].lower",
+                        "placings.matches[].first", "placings.matches[].second",
+                        "placings.unpaired.slug"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(anonymise.classify(pattern), anonymise.LABEL)
+        self.assertEqual(anonymise.classify("placings.waiting"), anonymise.TEXT)
+
+
+class TestAnUpsetPlacesTheTeamPlacedLowerHigher(PlacingsSeasonCase):
+    """4.537: the 1st v 2nd match won by the team 2nd on the ladder puts it 1st."""
+
+    RESULTS = {0: "away"}
+
+    def test_the_winner_is_first_whatever_the_ladder_said(self):
+        self.assertEqual(self.placed()[0],
+                         ((1, 2), "won", "riverside-rockets", "hilltop-aces"))
+
+    def test_the_ladder_is_not_moved(self):
+        self.assertEqual(self.ladder()["hilltop-aces"], (1, 5, 30.0))
+
+
+class TestADrawLeavesTheHigherPlaceWithTheTeamPlacedHigher(PlacingsSeasonCase):
+    """4.537: level on games and sets, the team placed higher keeps the higher place.
+
+    Rejected: a draw decided on anything but the ladder, which no card can say;
+    the association's tiebreak, where it has another, is not on the card either.
+    """
+
+    RESULTS = {1: "draw"}
+
+    def test_drawn_and_placed_by_the_ladder(self):
+        self.assertEqual(self.placed()[1],
+                         ((3, 4), "drawn", "lakeside-spinners", "westfield-hawks"))
+        self.assertIsNotNone(self.placing(1)["key"])
+
+
+class TestALevelCardWhereTheGradeCannotDrawPlacesNobody(PlacingsSeasonCase):
+    """4.537: under ``draws = false`` a level card is a tiebreak nobody wrote down."""
+
+    RULES = "draws = false"
+    RESULTS = {1: "draw"}
+
+    def test_no_result_and_nobody_placed(self):
+        self.assertEqual(self.placed()[1], ((3, 4), "no-result", None, None))
+
+
+class TestAMatchCalledOffLeavesItWithTheTeamPlacedHigher(PlacingsSeasonCase):
+    """4.537: a Match Cancelled card places the team placed higher, as a washout does."""
+
+    RESULTS = {2: "cancelled"}
+
+    def test_called_off_and_placed_by_the_ladder(self):
+        self.assertEqual(self.placed()[2],
+                         ((5, 6), "cancelled", "eastwood-bears", "northside-nets"))
+        card = {m["key"]: m for m in self.season["matches"]}[self.placing(2)["key"]]
+        self.assertEqual(card["status"], "cancelled")
+
+
+class TestAForfeitPlacesTheSideThatCame(PlacingsSeasonCase):
+    """4.537: Hilltop Aces forfeit 1st v 2nd, and Riverside Rockets take 1st."""
+
+    RESULTS = {0: "forfeit"}
+
+    def test_won_by_the_side_that_came(self):
+        self.assertEqual(self.placed()[0],
+                         ((1, 2), "won", "riverside-rockets", "hilltop-aces"))
+
+
+class TestAPlacingMatchWashedOutLeavesItWithTheTeamPlacedHigher(PlacingsSeasonCase):
+    """4.537: a washout the club declared for the pair places it by the ladder."""
+
+    PAIRS = ((0, 1), (2, 3))
+    EXTRA = '[competitions.tue-c.washouts]\n6 = [["Eastwood Bears", "Northside Nets"]]\n'
+
+    def test_washed_out_and_placed_by_the_ladder(self):
+        self.assertEqual(self.placed()[2],
+                         ((5, 6), "washed-out", "eastwood-bears", "northside-nets"))
+
+    def test_the_two_played_are_placed_by_their_cards(self):
+        self.assertEqual([m[1] for m in self.placed()[:2]], ["won", "won"])
+
+
+class TestAPlacingWeekWashedOutWholePlacesEveryPairByTheLadder(PlacingsSeasonCase):
+    """4.537: ``6 = true`` with no card: every pair washed out, every place the ladder's."""
+
+    PAIRS = ()
+    EXTRA = "[competitions.tue-c.washouts]\n6 = true\n"
+
+    def test_every_pair_is_washed_out(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "washed-out", "hilltop-aces", "riverside-rockets"),
+            ((3, 4), "washed-out", "lakeside-spinners", "westfield-hawks"),
+            ((5, 6), "washed-out", "eastwood-bears", "northside-nets")])
+
+    def test_the_week_is_a_finals_round_and_the_season_still_five(self):
+        self.assertTrue(self.round_("6")["is_finals"])
+        self.assertEqual(self.season["meta"]["rounds_played"], 5)
+        self.assertEqual([i.rule for i in self.report.errors], [])
+
+
+class TestACardWithNoResultPlacesNobody(PlacingsSeasonCase):
+    """4.537: a blank card and one played short of a result each place nobody.
+
+    The card is the record, and it records no result: results only ever come from
+    the cards. Rejected: the ladder's order for a card that says nothing, which a
+    match the lower team won would be put wrong by.
+    """
+
+    RESULTS = {0: "blank", 1: "short"}
+
+    def test_no_result_and_nobody_placed(self):
+        self.assertEqual(self.placed()[:2], [((1, 2), "no-result", None, None),
+                                             ((3, 4), "no-result", None, None)])
+
+    def test_each_names_its_card_and_its_round(self):
+        keys = {m["key"]: m for m in self.season["matches"]}
+        self.assertEqual([keys[self.placing(at)["key"]]["status"] for at in (0, 1)],
+                         ["unplayed", "played"])
+        self.assertEqual([self.placing(at)["rounds"] for at in (0, 1)],
+                         [["6"], ["6"]])
+
+
+class TestAPairWithNoCardIsAMatchToPlay(PlacingsSeasonCase):
+    """4.537: the week's other two cards not in yet: those two are still to play."""
+
+    PAIRS = ((0, 1),)
+
+    def test_to_play_and_nobody_placed(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "riverside-rockets"),
+            ((3, 4), "to-play", None, None), ((5, 6), "to-play", None, None)])
+        self.assertEqual(self.placing(1)["rounds"], [])
+
+
+class TestAFiveTeamGradeLeavesItsLastTeamItsPlace(PlacingsSeasonCase):
+    """4.537: of five teams, 1st v 2nd and 3rd v 4th, and 5th plays nobody.
+
+    Three of the ten grades whose season asked for this have five teams, and the
+    association's 1st v 2nd, 3rd v 4th, 5th v 6th leaves the fifth with no match:
+    it keeps its place. Rejected: pairing it with the 4th, a format nobody asked
+    for, which would leave the 3rd unpaired instead.
+    """
+
+    TEAMS = 5
+    PAIRS = ((0, 1), (2, 3))
+
+    def test_two_placing_matches_and_the_fifth_unpaired(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "riverside-rockets"),
+            ((3, 4), "won", "lakeside-spinners", "westfield-hawks")])
+        self.assertEqual(self.season["placings"]["unpaired"],
+                         {"place": 5, "slug": "eastwood-bears"})
+
+    def test_its_week_off_is_nothing_to_warn_about(self):
+        self.assertEqual([i.rule for i in self.report.issues
+                          if i.rule.startswith("placing")], [])
+        self.assertEqual([i.rule for i in self.report.errors], [])
+
+
+class TestACardTheLadderPairsNobodyByIsWarnedAboutAndPlacesNobody(PlacingsSeasonCase):
+    """4.537: Lakeside Spinners v Eastwood Bears is no pair of the final ladder.
+
+    A card the association paired otherwise, by a ladder that differs from this
+    one, or a card filed in the wrong week: either way it places nobody, and the
+    warning names the pairs its teams are in, so the club can see which. Rejected:
+    placing them by the card anyway, which puts two teams in two places a third
+    team's match decides.
+    """
+
+    PAIRS = ((0, 1), (2, 4))
+
+    def test_it_places_nobody_and_its_pairs_are_still_to_play(self):
+        self.assertEqual([m[1] for m in self.placed()], ["won", "to-play", "to-play"])
+        stray = self.season["placings"]["strays"]
+        self.assertEqual(len(stray), 1)
+        card = {m["key"]: m for m in self.season["matches"]}[stray[0]]
+        self.assertEqual((card["home"], card["away"]),
+                         ("lakeside-spinners", "eastwood-bears"))
+
+    def test_the_warning_names_the_pairs_its_teams_are_in(self):
+        self.assertEqual(self.said("placing-pair"), [
+            "round 6: Lakeside Spinners v Eastwood Bears is no placing match of "
+            "the ladder after round 5, which pairs Lakeside Spinners with Westfield "
+            "Hawks and Eastwood Bears with Northside Nets, so it places nobody."])
+
+    def test_a_week_with_a_card_the_ladder_pairs_is_no_length_typed_short(self):
+        self.assertEqual(self.findings("placing-week"), [])
+
+
+class TestACardWithTheTeamLeftUnpairedNamesItSo(PlacingsSeasonCase):
+    """4.537: of five, a card with the fifth is no placing match, and says why."""
+
+    TEAMS = 5
+    PAIRS = ((0, 1), (3, 4))
+
+    def test_the_warning_says_the_fifth_plays_nobody(self):
+        self.assertEqual(self.said("placing-pair"), [
+            "round 6: Westfield Hawks v Eastwood Bears is no placing match of the "
+            "ladder after round 5, which pairs Westfield Hawks with Lakeside "
+            "Spinners and Eastwood Bears with nobody, 5th, so it places nobody."])
+
+
+class TestAPairWithCardsInTwoFinalsRoundsPlacesNobody(PlacingsSeasonCase):
+    """4.537: Hilltop Aces v Riverside Rockets in round 6 and in a Final.
+
+    Two results for one pair is no rule this program can choose between: a card
+    filed twice, or a week replayed, is the club's to settle. Rejected: the later
+    round, which a card filed in the wrong folder decides.
+    """
+
+    PAIRS = (("6", 0, 1), ("Final", 0, 1), (2, 3), (4, 5))
+
+    def test_repeat_and_nobody_placed(self):
+        self.assertEqual(self.placed()[0], ((1, 2), "repeat", None, None))
+        self.assertEqual(self.placing(0)["rounds"], ["6", "Final"])
+
+    def test_it_is_warned_about_with_both_rounds(self):
+        self.assertEqual(self.said("placing-repeat"), [
+            "Hilltop Aces v Riverside Rockets, 1st v 2nd, has a card in rounds 6 "
+            "and Final, so it places nobody until the card that is not the placing "
+            "match is taken out of the folder."])
+
+
+class TestBeforeTheSeasonIsOverNobodyIsPaired(PlacingsSeasonCase):
+    """4.537: round 5's third card not in, so the week of cards places nobody yet.
+
+    Rejected: pairing on the ladder as it stands, which a card still to come can
+    break: Westfield Hawks and Eastwood Bears are a match short of the rest.
+    """
+
+    CARDED = {"5": 2}
+
+    def test_nobody_is_paired_and_the_document_says_why(self):
+        placed = self.season["placings"]
+        self.assertFalse(placed["set"])
+        self.assertEqual(placed["waiting"], "round 5 accounts for none of Eastwood "
+                                            "Bears and Westfield Hawks")
+        self.assertEqual((placed["matches"], placed["unpaired"]), ([], None))
+        self.assertEqual(len(placed["strays"]), 3)
+
+    def test_the_week_s_cards_are_told_they_place_nobody_yet(self):
+        self.assertEqual(self.said("placing-early"), [
+            "the round 6 cards place nobody yet, because the regular season is "
+            "not over on the cards: round 5 accounts for none of Eastwood Bears "
+            "and Westfield Hawks."])
+
+    def test_the_ladder_is_not_final(self):
+        self.assertFalse(self.season["meta"]["ladder_final"])
+        self.assertEqual(len(self.findings("F10")), 1)
+
+
+class TestWithARoundStillToComeNobodyIsPaired(PlacingsSeasonCase):
+    """4.537: round 5 not in at all: four of five rounds played."""
+
+    CARDED = {"5": 0}
+
+    def test_waiting_on_the_count(self):
+        self.assertEqual(self.season["placings"]["waiting"], "4 of 5 rounds played")
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+
+class TestALastRoundOfBlankCardsIsNotKnownToHaveBeenPlayed(PlacingsSeasonCase):
+    """4.536: round 5's three cards blank, as cards exported before the night are."""
+
+    BLANK = {"5": 3}
+    PAIRS = ()
+
+    def test_not_over_and_says_why(self):
+        self.assertEqual(self.season["placings"]["waiting"],
+                         "round 5's cards are blank, so it is not known to have "
+                         "been played")
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+
+class TestABlankCardEarlierInTheSeasonIsNoRoundStillToCome(PlacingsSeasonCase):
+    """4.536: a blank card in round 3 is as final in round 5 as it will ever be.
+
+    Rejected: holding a blank card against the season, which leaves a grade with
+    one blank card from early in the season in progress for good.
+    """
+
+    BLANK = {"3": 1}
+
+    def test_the_season_is_over_and_the_pairs_set(self):
+        self.assertTrue(self.season["meta"]["ladder_final"])
+        self.assertTrue(self.season["placings"]["set"])
+
+
+class TestTheFormatWithNoLengthIsWarnedAboutAndPairsNobody(PlacingsSeasonCase):
+    """4.537: no ``rounds_total``: nothing can say when the regular season is over."""
+
+    TOTAL = False
+    LABEL = "Final"
+
+    def test_placings_config_says_what_to_set(self):
+        self.assertEqual(self.said("placings-config"), [
+            "finals = \"placings\" is declared, but the season's length is not "
+            "declared, so nothing can say when the regular season is over, and "
+            "nobody is paired. Set rounds_total under [competitions.tue-c]."])
+        self.assertEqual(self.findings("placing-early"), [])
+
+    def test_nobody_is_paired(self):
+        self.assertFalse(self.season["placings"]["set"])
+        self.assertEqual(self.season["placings"]["waiting"],
+                         "the season's length is not declared")
+
+
+class TestTheFormatWithNoLengthOrTeamListIsWarnedAboutBoth(PlacingsSeasonCase):
+    """4.537: no length and no team list: both, in one finding."""
+
+    TOTAL = False
+    LISTED = False
+    LABEL = "Final"
+
+    def test_both_and_both_steps(self):
+        self.assertEqual(self.said("placings-config"), [
+            "finals = \"placings\" is declared, but the season's length is not "
+            "declared and the team list is read from the cards, so nothing can "
+            "say when the regular season is over, and nobody is paired. Set "
+            "rounds_total and declare teams under [competitions.tue-c]."])
+
+
+class TestWithNoFormatAFinalPlacesNobodyAsItNeverDid(PlacingsSeasonCase):
+    """4.537: no format, a Final: out of the ladder, F11 as it was, no placings."""
+
+    FINALS = ""
+    LABEL = "Final"
+
+    def test_no_placings_and_f11_as_before(self):
+        self.assertIsNone(self.season["placings"])
+        said, = self.said("F11")
+        self.assertTrue(said.startswith("round Final is a finals round, so its 3 "
+                                        "results are left out of the ladder: no "
+                                        "points"), said)
+        self.assertEqual(self.findings("placing-pair"), [])
+
+
+class TestASeasonOverOnUnequalCountsIsAFinalLadder(PlacingsSeasonCase):
+    """4.536: every round in, a fixture washed out, so the counts are never equal.
+
+    Measured before, on this season and the base tree, and on the owner's season
+    (row 4.536): ``ladder in progress``, F10's warning, and the page's pill, on a
+    season with every round in. Under ``unplayed = "zero"`` a washout is in no count, so
+    the counts are the season's and will never be equal; the ladder is final. F10
+    says nothing of it, its order stands, and its top row leads. Rejected: equal
+    counts, F10's test, which a grade with a bye or a washout under ``zero`` never
+    reaches.
+    """
+
+    FINALS = ""
+    LABEL = "Final"
+    CARDED = {"4": 2}
+    EXTRA = ('[competitions.tue-c.washouts]\n'
+             '4 = [["Lakeside Spinners", "Northside Nets"]]\n')
+
+    def test_the_counts_are_unequal_and_the_ladder_final(self):
+        meta = self.season["meta"]
+        self.assertEqual(meta["ladder_state"], "in-progress")
+        self.assertTrue(meta["ladder_final"])
+        self.assertTrue(meta["order_stands"])
+
+    def test_f10_says_nothing(self):
+        self.assertEqual(self.findings("F10"), [])
+
+
+class TestASeasonWithACardStillToComeIsNoFinalLadder(PlacingsSeasonCase):
+    """4.536: round 4's third card not in and no washout said: not over."""
+
+    FINALS = ""
+    LABEL = "Final"
+    CARDED = {"4": 2}
+
+    def test_in_progress_with_f10(self):
+        self.assertFalse(self.season["meta"]["ladder_final"])
+        self.assertEqual(len(self.findings("F10")), 1)
+
+
+class TestAFinalLadderOrderedOnATotalIsLedByItsTopRow(PlacingsSeasonCase):
+    """4.536: under ``simple`` on unequal counts, a finished season has a leader.
+
+    A ladder ordered on a total is a snapshot while counts are unequal and the
+    season goes on (F10). Over, the counts are the season's own, and the total the
+    association ranks on is final. Rejected: no leader for good, which is what a
+    finished season ordered on a total had.
+    """
+
+    FINALS = ""
+    LABEL = "Final"
+    RULES = 'scoring = "simple"'
+    CARDED = {"4": 2}
+    EXTRA = ('[competitions.tue-c.washouts]\n'
+             '4 = [["Lakeside Spinners", "Northside Nets"]]\n')
+
+    def test_final_led_and_standing(self):
+        meta = self.season["meta"]
+        self.assertTrue(meta["ladder_final"])
+        self.assertEqual(meta["leader"]["slug"], "hilltop-aces")
+        self.assertTrue(meta["order_stands"])
+        self.assertEqual(self.findings("F10"), [])
+
+
+class TestTheSameSeasonWithNoLengthIsNoFinalLadder(PlacingsSeasonCase):
+    """4.536: no ``rounds_total``: any round could be the last, so none is."""
+
+    FINALS = ""
+    TOTAL = False
+    LABEL = "Final"
+    CARDED = {"4": 2}
+    EXTRA = ('[competitions.tue-c.washouts]\n'
+             '4 = [["Lakeside Spinners", "Northside Nets"]]\n')
+
+    def test_in_progress(self):
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+
+class TestTheSameSeasonWithTheTeamListReadFromTheCardsIsNoFinalLadder(
+        PlacingsSeasonCase):
+    """4.536: no team list: a round a card short looks like a round complete."""
+
+    FINALS = ""
+    LISTED = False
+    LABEL = "Final"
+
+    def test_not_final(self):
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+
+class TestTheConfigWrittenBackKeepsTheLengthAndTheFormat(PlacingsSeasonCase):
+    """4.537: ``--discover --force`` over the placings season writes both back live.
+
+    The rewrite counts the rounds played as the run after it will, by their labels;
+    under the format round 6 is the placing week to that run too, so the length is
+    not one the cards have played past, and goes back live. Rejected: counting by the
+    label alone, which wrote ``rounds_total = 5`` behind a # as a length played past,
+    and left the next run a season of no length that pairs nobody.
+    """
+
+    def test_rounds_total_and_finals_are_written_live(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches={"tue-c": self.matches})
+        section = text.split("[competitions.tue-c]\n", 1)[1].split("\n[", 1)[0]
+        self.assertRegex(section, r"(?m)^rounds_total = 5$")
+        rules = text.split("[rules]\n", 1)[1].split("\n[", 1)[0]
+        self.assertRegex(rules, r'(?m)^finals = "placings"$')
+        loaded = config_mod.load(self.write(text))
+        self.assertEqual(loaded.finals_for(loaded.competition("tue-c")), "placings")
+
+    def write(self, text: str) -> Path:
+        path = self.root / "config.rewritten.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+
+class TestTheRewriteKeepsTheLengthADrawGaveUnderPlacings(PlacingsSeasonCase):
+    """4.537: a draw of rounds 1 to 5 and no ``rounds_total``: the length goes back live.
+
+    ``--force`` drops the draw, and writes the length it gave as ``rounds_total``
+    unless the cards have played past it, counted as the run after it will count
+    the rounds. Under placings that run reads round 6 as the placing week, by its
+    number past the length, so the cards have not played past it. Counted by the
+    label alone, round 6 was a sixth regular round, the length went behind a # as
+    one played past, and the next run had no length and paired nobody.
+    """
+
+    TOTAL = False
+    EXTRA = "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                    for n in "12345")
+
+    def test_the_length_is_written_live(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches={"tue-c": self.matches})
+        section = text.split("[competitions.tue-c]\n", 1)[1].split("\n[", 1)[0]
+        self.assertRegex(section, r"(?m)^rounds_total = 5$")
+        self.assertTrue(self.season["placings"]["set"])
+
+    def test_the_placing_week_is_no_round_the_draw_is_told_to_add(self):
+        # 4.537's review (its probe09): told to add round 6 under the draw, a club
+        # doing so made the draw six rounds long and the placing week a round of it.
+        self.assertEqual([note for note in self.found.notes
+                          if "which the declared draw does not list" in note], [])
+
+
+class TestTheOverviewCardSaysWhoPlacedFirst(PlacingsSeasonCase):
+    """4.537: the competition's card on the front page names the team placed 1st."""
+
+    RESULTS = {0: "away"}
+
+    def test_placed_first_in_place_of_the_lead(self):
+        from matchcentre import site
+        card = site._card_html(site._entry(self.competition, self.season, "tue-c",
+                                           config=self.config))
+        self.assertEqual(re.findall(r'<span class="pick-lead">(.*?)</span>', card),
+                         ["<strong>Riverside Rockets</strong> placed 1st"])
+
+
+class TestTheOverviewCardOfAFinalLadderSaysItTopsIt(PlacingsSeasonCase):
+    """4.536: no format, the season over: the top row tops the final ladder."""
+
+    FINALS = ""
+    LABEL = "Final"
+
+    def test_top_the_final_ladder(self):
+        from matchcentre import site
+        card = site._card_html(site._entry(self.competition, self.season, "tue-c",
+                                           config=self.config))
+        self.assertEqual(re.findall(r'<span class="pick-lead">(.*?)</span>', card),
+                         ["<strong>Hilltop Aces</strong> top the final ladder on 6.00"])
+
+
+class TestTheOverviewCardBeforeThePlacingsLeadsAsItDid(PlacingsSeasonCase):
+    """4.537: placings not decided at the top yet: the ladder's top row, as before."""
+
+    PAIRS = ((2, 3),)
+
+    def test_top_the_final_ladder_until_1st_is_placed(self):
+        from matchcentre import site
+        card = site._card_html(site._entry(self.competition, self.season, "tue-c",
+                                           config=self.config))
+        self.assertEqual(re.findall(r'<span class="pick-lead">(.*?)</span>', card),
+                         ["<strong>Hilltop Aces</strong> top the final ladder on 6.00"])
+
+
+class PlacingsReportCase(unittest.TestCase):
+    """The placings season through ``build.py --check``, as a club runs it."""
+
+    PAIRS = ((0, 1), (2, 3))
+    RESULTS = {1: "draw"}
+    EXTRA = ""
+    CARDED: dict = {}
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        data = write_placings_season(root, pairs=cls.PAIRS, results=cls.RESULTS,
+                                     carded=cls.CARDED,
+                                     config=placings_config(extra=cls.EXTRA))
+        done = subprocess.run(
+            (sys.executable, str(ROOT / "build.py"), "--check", "--data", str(data),
+             "--config", str(root / "config.toml"),
+             "--generated", "2026-06-01T00:00:00"),
+            cwd=root, capture_output=True, text=True, timeout=600)
+        cls.code, cls.out = done.returncode, done.stdout + done.stderr
+        cls.flat = " ".join(cls.out.split())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+
+class TestTheReportSaysThePlacingsAndTheFinalLadder(PlacingsReportCase):
+    """4.536 and 4.537: the ladder line says final, and the placings follow the table.
+
+    Final where the season is over, in the words F10 uses for the counts; the
+    placings under the table they pair, top down, each with what placed it.
+    """
+
+    EXTRA = ('[competitions.tue-c.washouts]\n'
+             '4 = [["Lakeside Spinners", "Northside Nets"]]\n')
+    CARDED = {"4": 2}
+
+    def test_the_ladder_is_final_on_unequal_counts(self):
+        self.assertIn("ladder final: every regular round is in, and teams have "
+                      "played unequal numbers of matches", self.flat)
+        self.assertEqual(self.code, 0, self.out)
+
+    def test_the_placings_follow_the_table(self):
+        self.assertIn(
+            "placings 1st v 2nd: Hilltop Aces v Riverside Rockets, won by Hilltop "
+            "Aces; 3rd v 4th: Lakeside Spinners v Westfield Hawks, drawn, so "
+            "Lakeside Spinners takes 3rd, placed higher; 5th v 6th: Eastwood Bears "
+            "v Northside Nets, to play", self.flat)
+        self.assertLess(self.out.index("    6  Northside Nets"),
+                        self.out.index("  placings"))
+
+
+class TestTheReportSaysWhatThePairsWaitOn(PlacingsReportCase):
+    """4.537: round 5 a card short: the pairs are set once the season is over."""
+
+    CARDED = {"5": 2}
+
+    def test_the_ladder_is_in_progress(self):
+        self.assertIn("ladder in progress", self.flat)
+
+    def test_the_placings_say_what_they_wait_on(self):
+        self.assertIn("placings paired once the regular season is over: round 5 "
+                      "accounts for none of Eastwood Bears and Westfield Hawks",
+                      self.flat)
+
+
+class TestADeclaredDrawsPlacingWeekIsItsFinalsToo(PlacingsSeasonCase):
+    """4.537: round 6 typed in a draw with no ``finals`` is the placing week too.
+
+    Marked on the draw's rounds as on the cards', before the draw's outgrown check:
+    a block for round 6 alone, with ``rounds_total`` typed, is a draw whose length
+    the club gave, and the week is not a round played past it.
+    """
+
+    EXTRA = '[[competitions.tue-c.rounds]]\nnumber = "6"\ndate = "2026-05-12"\n'
+
+    def test_it_is_a_finals_round_and_nothing_stops_the_run(self):
+        self.assertTrue(self.round_("6")["is_finals"])
+        self.assertEqual([i.rule for i in self.report.errors], [])
+        self.assertTrue(self.season["placings"]["set"])
+
+
+class TestADeclaredFixtureWithNoCardKeepsTheSeasonOpen(PlacingsSeasonCase):
+    """4.536: round 4 typed in full, its third card not in: the season is not over.
+
+    A declared fixture names its teams, so the round accounts for them, and only
+    the fixture's own card closes it (``stats.round_cards``).
+    """
+
+    FINALS = ""
+    LABEL = "Final"
+    CARDED = {"4": 2}
+    EXTRA = ('[[competitions.tue-c.rounds]]\nnumber = "4"\ndate = "2026-04-28"\n'
+             'fixtures = [["Hilltop Aces", "Eastwood Bears"], '
+             '["Riverside Rockets", "Westfield Hawks"], '
+             '["Lakeside Spinners", "Northside Nets"]]\n')
+
+    def test_not_final_and_says_which_card(self):
+        self.assertFalse(self.season["meta"]["ladder_final"])
+        self.assertEqual(stats.season_unfinished(self.matches, self.competition),
+                         "round 4 has no card of Lakeside Spinners v Northside Nets")
+
+
+class TestOneBlankCardInTheLastRoundIsNoRoundStillToCome(PlacingsSeasonCase):
+    """4.536: one of round 5's three cards blank: the other two say it was played."""
+
+    BLANK = {"5": 1}
+
+    def test_final(self):
+        self.assertTrue(self.season["meta"]["ladder_final"])
+
+
+class TestALastRoundOfBlankCardsDeclaredWashedOutIsOver(PlacingsSeasonCase):
+    """4.536: round 5's cards blank and the round declared washed out: it came."""
+
+    BLANK = {"5": 3}
+    PAIRS = ()
+    EXTRA = "[competitions.tue-c.washouts]\n5 = true\n"
+
+    def test_final(self):
+        self.assertTrue(self.season["meta"]["ladder_final"])
+        self.assertTrue(self.season["placings"]["set"])
+
+
+class TestASeasonEveryNightOfWhichWasRainedOffHasNoFinalLadder(PlacingsSeasonCase):
+    """4.536: five rounds washed out whole and a placing week: nothing to finish."""
+
+    CARDED = dict.fromkeys(("1", "2", "3", "4", "5"), 0)
+    EXTRA = ("[competitions.tue-c.washouts]\n"
+             + "".join(f"{n} = true\n" for n in "12345"))
+
+    def test_not_final_and_nobody_paired(self):
+        self.assertFalse(self.season["meta"]["ladder_final"])
+        self.assertEqual(self.season["placings"]["waiting"],
+                         "no regular-season match has been counted")
+
+
+class TestTwoCardsThatDisagreeAboutAPlacingMatchPlaceNobody(PlacingsSeasonCase):
+    """4.537: 1st v 2nd on two cards with two results: F9's conflict places nobody.
+
+    Choosing between them is deciding which result is true, which no rule here
+    can do (``stats.duplicates``): the fixture is missing from the figures, loudly.
+    """
+
+    PAIRS = ((0, 1), (0, 1), (2, 3), (4, 5))
+    RESULTS = {1: "away"}
+
+    def test_no_result_and_nobody_placed(self):
+        self.assertEqual(self.placed()[0], ((1, 2), "no-result", None, None))
+
+
+class TestAFinalLadderLevelAtTheTopAcrossCountsIsLedByItsTopRow(PlacingsSeasonCase):
+    """4.536: Riverside Rockets and Hilltop Aces level on 6.00, on four and three.
+
+    Hilltop Aces' first two nights, against Riverside Rockets and Lakeside
+    Spinners, are washed out, so both are unbeaten on the average and Riverside
+    Rockets lead on points, the next key, for a match more counted. In progress
+    that withholds the leader (4.523); the season over, the order is the one it
+    ends on, and its top row leads. Rejected: withholding the leader of a finished
+    season for good.
+    """
+
+    FINALS = ""
+    LABEL = "Final"
+    SKIP = (("1", 0, 1), ("2", 0, 2))
+    EXTRA = ('[competitions.tue-c.washouts]\n'
+             '1 = [["Hilltop Aces", "Riverside Rockets"]]\n'
+             '2 = [["Hilltop Aces", "Lakeside Spinners"]]\n')
+
+    def test_the_top_row_leads_and_nothing_is_withheld(self):
+        rows = {t["slug"]: t for t in self.season["teams"]}
+        # The season this is about: the two level on the average, on 4 and 3.
+        self.assertEqual([(rows[s]["position"], rows[s]["counted"],
+                           rows[s]["points_average"])
+                          for s in ("riverside-rockets", "hilltop-aces")],
+                         [(1, 4, 6.0), (2, 3, 6.0)])
+        meta = self.season["meta"]
+        self.assertTrue(meta["ladder_final"])
+        self.assertEqual(meta["leader"]["slug"], "riverside-rockets")
+        self.assertIsNone(meta["leader_withheld"])
+        self.assertTrue(meta["order_stands"])
+
+
+class TestWithNoFormatACatchUpIsToldNoPlacingLine(PlacingsSeasonCase):
+    """4.537: with no format, a ``Catch-up`` is told what it always was told."""
+
+    FINALS = ""
+    LABEL = "Catch-up"
+
+    def test_f11_offers_no_finals_line(self):
+        said = [s for s in self.said("F11") if "neither a number" in s]
+        self.assertEqual(said, [
+            "round label 'Catch-up' is neither a number nor a finals label this "
+            "program recognises; it is being scored as a regular round."])
+
+
+class TestARoundsTotalARoundShortStopsTheRunUnderPlacings(PlacingsSeasonCase):
+    """4.537, its review: ``rounds_total = 4`` over five rounds is no placing week.
+
+    Under placings round 5 is the first week past the length, so it is read as the
+    placing week, and the ladder is set from four rounds. Its three cards are the
+    round-robin's, and the ladder pairs none of them: as with no format, the run
+    stops, here as ``placing-week``, an error. Measured on the tree the review read
+    (its probe05): rounds 5 and 6 both read as finals, the ladder final on four
+    rounds, every card a stray, and exit 0.
+    """
+
+    LENGTH = 4
+    PAIRS = ()
+
+    def test_the_run_stops_and_says_both_answers(self):
+        self.assertEqual(self.said("placing-week"), [
+            'round 5 is numbered past rounds_total = 4, so it is read as the week '
+            'of placing matches (finals = "placings"), but none of its 3 cards is '
+            "a placing match of the ladder after round 4. If round 5 is a regular "
+            "round, rounds_total is too short; if it is the placing week, the cards "
+            "pair teams the ladder does not."])
+        self.assertEqual([i.severity for i in self.findings("placing-week")],
+                         [validate.ERROR])
+
+
+class TestTwoRoundsPastTheLengthAreOneWeekAndASeasonTooLong(PlacingsSeasonCase):
+    """4.537, its review: rounds 5 and 6 past a length of four: one week, then F3.
+
+    Placings are a week, so only the first number past the length is the placing
+    week, and round 6 is a regular round of a season longer than declared.
+    """
+
+    LENGTH = 4
+
+    def test_round_5_is_the_week_and_round_6_regular(self):
+        self.assertTrue(self.round_("5")["is_finals"])
+        self.assertFalse(self.round_("6")["is_finals"])
+        said, = self.said("F3")
+        self.assertIn("rounds_total is declared as 4 but 5 regular rounds have been "
+                      "played (1, 2, 3, 4 and 6).", said)
+
+
+class TestALengthOfNoughtUnderPlacingsStillStopsOnF3(PlacingsSeasonCase):
+    """4.537, its review: ``rounds_total = 0``: round 1 is the week, the rest F3's."""
+
+    LENGTH = 0
+
+    def test_f3_stops_the_run(self):
+        said, = self.said("F3")
+        self.assertIn("rounds_total is declared as 0 but 5 regular rounds have been "
+                      "played", said)
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+
+class TestWhichRoundsAreThePlacingWeek(unittest.TestCase):
+    """4.537, its review: :func:`~matchcentre.competition.placing_weeks`, of rounds."""
+
+    def setUp(self):
+        from matchcentre.competition import placing_weeks
+        self.weeks = lambda labels, length=5: placing_weeks(
+            labels, length=length, finals="placings")
+
+    def test_the_first_week_past_the_length_however_it_is_printed(self):
+        self.assertEqual(self.weeks(["4", "5", "6", "7"]), {"6"})
+        self.assertEqual(self.weeks(["5", "06", "6", "8"]), {"06", "6"})
+        self.assertEqual(self.weeks(["1", "12"]), {"12"})
+
+    def test_every_name_of_a_placing_match_beside_it(self):
+        self.assertEqual(self.weeks(["5", "6", "Playoff", "Catch-up"]),
+                         {"6", "Playoff"})
+
+    def test_names_alone_with_no_length_and_nothing_with_no_format(self):
+        self.assertEqual(self.weeks(["6", "Placings"], length=None), {"Placings"})
+        from matchcentre.competition import placing_weeks
+        self.assertEqual(placing_weeks(["6", "Playoff"], length=5, finals="none"),
+                         frozenset())
+
+
+class TestADrawsPlayoffBlockIsNoRoundOfTheSeason(PlacingsSeasonCase):
+    """4.537, its review: a draw of rounds 1 to 5 and a Playoff, and no rounds_total.
+
+    The draw gives the season its length, finals left out, and under placings a
+    Playoff is the placing week whether or not it is typed a final. Counted in, the
+    season read ``5 of 6 rounds played`` for good and nobody was ever paired (the
+    review's probe01).
+    """
+
+    TOTAL = False
+    LABEL = "Playoff"
+    EXTRA = "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                    for n in ("1", "2", "3", "4", "5", "Playoff"))
+
+    def test_five_of_five_and_the_pairs_set(self):
+        meta = self.season["meta"]
+        self.assertEqual((meta["rounds_played"], meta["rounds_total"]), (5, 5))
+        self.assertTrue(self.season["placings"]["set"])
+
+    def test_the_rewrite_writes_the_five(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches={"tue-c": self.matches})
+        section = text.split("[competitions.tue-c]\n", 1)[1].split("\n[", 1)[0]
+        self.assertRegex(section, r"(?m)^rounds_total = 5$")
+
+
+class TestTheRewriteKeepsAPlacingWeekTypedFinalInTheDraw(PlacingsSeasonCase):
+    """4.537, its review: rounds 1 to 5 and round 6 typed a final, no rounds_total.
+
+    ``--force`` drops the draw, and round 6's ``finals = true`` with it, so the length
+    it writes is the one the run after reads round 6 as past: five, round 6 then
+    the first week past it. Written six, by the labels, the run after scored the
+    placing week into the ladder with exit 0 (the review's probe02).
+    """
+
+    TOTAL = False
+    EXTRA = ("".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                     for n in "12345")
+             + '[[competitions.tue-c.rounds]]\nnumber = "6"\nfinals = true\n')
+
+    def test_the_length_written_leaves_round_6_out(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches={"tue-c": self.matches})
+        section = text.split("[competitions.tue-c]\n", 1)[1].split("\n[", 1)[0]
+        self.assertRegex(section, r"(?m)^rounds_total = 5$")
+
+    def test_the_run_after_reads_round_6_as_the_final_it_was_typed(self):
+        section = self.config.competition("tue-c")
+        self.assertEqual(section.length_by_labels_for("placings"), 5)
+        self.assertEqual(section.finals_after_force("placings"), {"6"})
+        # With no format, the labels alone, as before.
+        self.assertEqual(section.length_by_labels_for(""), 6)
+        self.assertEqual(section.finals_after_force(""), frozenset())
+
+
+class TestTheRewriteOfAPlacingWeekWithAWashoutKeepsTheLength(PlacingsSeasonCase):
+    """4.537, its review: a draw of rounds 1 to 5, and 5th v 6th washed out.
+
+    The rewrite counts the rounds as the run after it will, its cards' and its
+    washouts', and a washout's round under placings is the placing week by the same
+    rule as a card's. Built by the label alone, round 6 was a sixth regular round,
+    the length went behind a # as one the cards had played past, and the next run
+    had none and paired nobody (the review's probe03).
+    """
+
+    TOTAL = False
+    PAIRS = ((0, 1), (2, 3))
+    EXTRA = ("".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                     for n in "12345")
+             + '[competitions.tue-c.washouts]\n'
+               '6 = [["Eastwood Bears", "Northside Nets"]]\n')
+
+    def test_the_length_is_written_live(self):
+        text = config_mod.render(self.config, competitions=[self.competition],
+                                 matches={"tue-c": self.matches})
+        section = text.split("[competitions.tue-c]\n", 1)[1].split("\n[", 1)[0]
+        self.assertRegex(section, r"(?m)^rounds_total = 5$")
+
+
+class TestADeclaredRoundWithNoCardKeepsTheSeasonOpen(PlacingsSeasonCase):
+    """4.536, its review: round 4 of the draw has no card, and a Catch-up's three do.
+
+    Five rounds with cards make the count, and round 4 is still to come: a round
+    the draw lists with no card and no washout is not over, whatever other round
+    is counted beside it. Measured on the tree the review read (its probe07): the
+    ladder final, F10 silent, and three ``card-missing`` warnings in the same run.
+    """
+
+    FINALS = ""
+    LABEL = "Catch-up"
+    CARDED = {"4": 0}
+    EXTRA = "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                    for n in "12345")
+
+    def test_not_over_and_says_which_round(self):
+        self.assertEqual(stats.season_unfinished(self.matches, self.competition),
+                         "round 4 is in the declared draw with no card")
+        self.assertFalse(self.season["meta"]["ladder_final"])
+
+
+class TestTwoCardsOfAPlacingMatchEachWayRoundThatDisagreePlaceNobody(
+        PlacingsSeasonCase):
+    """4.537, its review: Hilltop Aces v Riverside Rockets, and the other way round.
+
+    Each card says its home side won, so the two disagree, and nobody is placed by
+    them. They are two fixtures to ``stats.scoreable``, so the first by its home side
+    decided (the review's probe04).
+    """
+
+    PAIRS = ((0, 1), (1, 0), (2, 3), (4, 5))
+
+    def test_conflict_and_nobody_placed(self):
+        self.assertEqual(self.placed()[0], ((1, 2), "conflict", None, None))
+
+
+class TestTwoCardsOfAPlacingMatchEachWayRoundThatAgreePlaceItsWinner(
+        PlacingsSeasonCase):
+    """4.537, its review: the same match each way round, Hilltop Aces winning both."""
+
+    PAIRS = ((0, 1), (1, 0), (2, 3), (4, 5))
+    RESULTS = {1: "away"}
+
+    def test_won_by_the_team_both_name(self):
+        self.assertEqual(self.placed()[0],
+                         ((1, 2), "won", "hilltop-aces", "riverside-rockets"))
+
+
+class TestDiscoverySaysThePlacingWeekIsThePlacings(PlacingsSeasonCase):
+    """4.537, its review: discovery's finals note names the week by the format.
+
+    It said ``read as finals because the round label on the cards names a final``
+    of round 6, whose label names none, and offered ``finals = false``, which makes
+    a round past the season one F3 refuses (the review's probe03 and probe09).
+    """
+
+    def test_the_week_of_placing_matches_and_no_offer(self):
+        notes = [" ".join(note.split()) for note in self.found.notes
+                 if "earns no ladder points" in note or "earn no ladder" in note]
+        self.assertEqual(notes, [
+            'tue-c: round 6 is the week of placing matches (finals = "placings"), '
+            "and earns no ladder points."])
+
+
+class TestTheDrawOutgrownByTheWeekPastItOffersTheFormat(PlacingsSeasonCase):
+    """4.537, its review: F3's other branch, a length the draw gave, offers it too."""
+
+    FINALS = ""
+    TOTAL = False
+    EXTRA = "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                    for n in "12345")
+
+    def test_f3_offers_the_format(self):
+        said, = self.said("F3")
+        self.assertTrue(said.endswith(
+            'If round 6 is a week of placing matches after the season, 1st v 2nd, '
+            '3rd v 4th and on down the ladder, set finals = "placings" under '
+            "[rules] or [competitions.tue-c]."), said)
+
+
+class TestAPlacingWeekTypedFinalIsNotDoubtedForItsPairs(PlacingsSeasonCase):
+    """4.537, its review: round 6 typed ``finals = true``, its cards paired otherwise.
+
+    The club said round 6 is a final, so it is no length typed short: its cards
+    are told they place nobody, and the run is not stopped (``placing-week`` asks
+    only of a week read as the placings by its number).
+    """
+
+    PAIRS = ((1, 2), (3, 4))
+    EXTRA = '[[competitions.tue-c.rounds]]\nnumber = "6"\nfinals = true\n'
+
+    def test_warned_and_not_stopped(self):
+        self.assertEqual(len(self.findings("placing-pair")), 2)
+        self.assertEqual(self.findings("placing-week"), [])
+
+
+class TestAWeekTheWholeGradeRestsIsNoRoundStillToCome(PlacingsSeasonCase):
+    """4.536, its review: round 3 a week off for every team, and five rounds played.
+
+    A round the byes table alone names is no round of the declared draw, and no
+    card of it is coming: rounds 1, 2, 4, 5 and 6 are the season's five, round 6
+    the fixtures round 3 would have had, and the season is over.
+    """
+
+    FINALS = ""
+    CARDED = {"3": 0}
+    PAIRS = (("6", 0, 3), ("6", 1, 5), ("6", 2, 4))
+    EXTRA = ("[competitions.tue-c.byes]\n"
+             + "".join(f'"{name.title()}" = 3\n' for name in SIX_NAMES))
+
+    def test_final(self):
+        self.assertEqual(self.season["meta"]["rounds_played"], 5)
+        self.assertTrue(self.season["meta"]["ladder_final"])
+
+
+class TestARoundTypedAFinalMidDrawLeavesTheRoundsAfterItRegular(PlacingsSeasonCase):
+    """4.537, its review: a draw of five with round 3 typed a final, no rounds_total.
+
+    The draw gives a length of four, its regular rounds, and round 5 is one of
+    them: a length the draw gave is its own rounds, and none of them is past it.
+    Read by its number past four, round 5 was the placing week, a declared round
+    of the season out of the ladder.
+    """
+
+    TOTAL = False
+    PAIRS = ()
+    EXTRA = "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n'
+                    + ("finals = true\n" if n == "3" else "") + "\n"
+                    for n in "12345")
+
+    def test_round_5_is_regular_and_round_3_the_final_typed(self):
+        self.assertFalse(self.round_("5")["is_finals"])
+        self.assertTrue(self.round_("3")["is_finals"])
+        self.assertEqual(self.season["meta"]["rounds_total"], 4)
+
+
+class TestAPlacingWeekNamedSoIsNotDoubtedForItsPairs(PlacingsSeasonCase):
+    """4.537, its review: a Playoff paired otherwise is told so, and not stopped.
+
+    ``placing-week`` asks only of a week read as the placings by its number, which
+    a length typed a round short makes; a label that names the placing week says
+    what it is by itself.
+    """
+
+    LABEL = "Playoff"
+    PAIRS = ((1, 2), (3, 4))
+
+    def test_warned_and_not_stopped(self):
+        self.assertEqual(len(self.findings("placing-pair")), 2)
+        self.assertEqual(self.findings("placing-week"), [])
+
+
+class TestAPlacingWeekDeclaredAheadIsNoRoundTheSeasonWaitsOn(PlacingsSeasonCase):
+    """4.537, its review: round 6 typed into the draw before it is played.
+
+    The placing week is a finals round, and a round of the declared draw with no
+    card holds the season open only where it is a regular one: the pairs are set
+    for the week still to play.
+    """
+
+    PAIRS = ()
+    EXTRA = '[[competitions.tue-c.rounds]]\nnumber = "6"\ndate = "2026-05-12"\n'
+
+    def test_final_and_every_pair_to_play(self):
+        self.assertTrue(self.season["meta"]["ladder_final"])
+        self.assertEqual([m[1] for m in self.placed()], ["to-play"] * 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -118,6 +118,7 @@ _CLASSES = {
         validation.duplicates[].sources[]
         validation.{errors,warnings}[].{message,subject,detail}
         validation.rejected[].reason
+        placings.waiting
     """,
     REFUSED_PATH: "validation.rejected[].path",
     REFUSED: "validation.rejected[].detail",
@@ -129,6 +130,7 @@ _CLASSES = {
         players[].registered_elsewhere
         meta.{label,club,day,division,competition,season,season_key,season_label}
         meta.leader.slug
+        placings.matches[].{higher,lower,first,second} placings.unpaired.slug
         meta.rules.slots[].label matches[].sets[].label rounds[].byes[]
         validation.duplicates[].{home,away}
     """,
@@ -138,6 +140,10 @@ _CLASSES = {
         meta.{ladder_complete,matches_total,rounds_played,rounds_total}
         meta.{ladder_detail,ladder_state,leader,matches_played} meta.leader.value
         meta.ordered_on_average meta.order_stands meta.leader_withheld
+        meta.ladder_final
+        placings placings.{format,set,after,unpaired,strays[]}
+        placings.matches[].{places[],outcome,key,rounds[]}
+        placings.unpaired.place
         meta.{seasons_mode,teams_declared,teams_total,version,players}
         meta.players_detail meta.rounds_present[]
         meta.folders_unlisted

@@ -84,6 +84,21 @@ UNPLAYED_AVERAGE = "average"
 UNPLAYED_ZERO = "zero"
 UNPLAYED_MODES = (UNPLAYED_AVERAGE, UNPLAYED_ZERO)
 
+# What a season's finals are, through `[rules] finals` (4.537). No card says it,
+# and no preset carries an opinion on it, so it is the club's to say or nobody's.
+#
+#   none      a finals round is left out of the ladder and places nobody, which
+#             is every season's rule until a club says otherwise.
+#   placings  one week after the regular rounds of 1st v 2nd, 3rd v 4th and on
+#             down the final ladder. Each winner takes the higher of its two
+#             places; a draw, a washout or a match called off leaves it with the
+#             team placed higher; in a grade of an odd number of teams the last
+#             plays nobody and keeps its place. The first round numbered past
+#             the season's length is that week, as a round labelled a final is.
+FINALS_NONE = "none"
+FINALS_PLACINGS = "placings"
+FINALS_FORMATS = (FINALS_NONE, FINALS_PLACINGS)
+
 
 @dataclass(frozen=True, slots=True)
 class Ruleset:
@@ -359,6 +374,25 @@ def forfeit_detail(award: str) -> str:
     (4.420), so it is said here once, with the comment over FORFEIT_AWARDS.
     """
     return _FORFEIT_DETAIL[award]
+
+
+# What each of FINALS_FORMATS does, in the words config.toml's option table uses.
+_FINALS_DETAIL = {
+    "none": "a finals round is left out of the ladder and places nobody",
+    "placings": "one week after the regular rounds of 1st v 2nd, 3rd v 4th and "
+                "so on down the final ladder: each winner takes the higher "
+                "place, and a draw, a washout or a match called off leaves it "
+                "with the team placed higher",
+}
+
+
+def finals_detail(mode: str) -> str:
+    """What *mode* makes of the finals, for the file a club edits (4.537).
+
+    Beside :func:`forfeit_detail`, and for its reason: the option table is the one
+    place the file says what each format does.
+    """
+    return _FINALS_DETAIL[mode]
 
 
 def draws_detail(allows_draw: bool) -> str:

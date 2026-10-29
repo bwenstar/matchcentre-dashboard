@@ -13278,5 +13278,115 @@ class TestTheLadderNoteSaysATeamWithNoMatchCountedIsPlacedLast(WebAssetCase):
                                r"match[^']*'\s*:\s*' Teams with no match")
 
 
+
+class TestAFinishedSeasonsLadderIsCalledFinal(WebAssetCase):
+    """4.536: the pill, the note and the hero say final where Python says it is.
+
+    Measured before on a season with every round in and a washout under ``zero``
+    (/tmp/mcw/finals, ``TestASeasonOverOnUnequalCountsIsAFinalLadder``'s season):
+    the pill read ``ladder in progress`` in the warning colour and the note ``In
+    progress — teams have played unequal numbers of matches``. The page reads
+    ``meta.ladder_final`` and works nothing out: the season is over by Python's
+    rule (``stats.season_unfinished``). Rejected: the page asking whether
+    ``rounds_played`` has reached ``rounds_total``, which is half that rule.
+    """
+
+    def test_the_pill_says_final_ladder_under_ladder_final(self):
+        self.assertEqual(self.guard_for("renderHealth", "'final ladder'"),
+                         "m.ladder_final")
+
+    def test_in_progress_is_the_pill_only_where_it_is_not_final(self):
+        code = jslint.without_comments(self.body("renderHealth"))
+        final = code.index("if (m.ladder_final)")
+        progress = code.index("'ladder in progress'")
+        self.assertLess(final, progress)
+        self.assertRegex(code[final:progress], r"\}\s*else if \(!m\.ladder_complete\)")
+
+    def test_the_final_pill_is_not_a_warning(self):
+        code = jslint.without_comments(self.body("renderHealth"))
+        final = code.index("if (m.ladder_final)")
+        self.assertRegex(code[final:code.index("'final ladder'")],
+                         r"el\('span', \{ class: 'pill' \}")
+
+    def test_the_note_says_final_under_ladder_final(self):
+        self.assertEqual(self.guard_for("ladderNote", "'Final — every regular round '",
+                                        emits="return"), "m.ladder_final")
+
+    def test_the_note_names_unequal_counts_only_where_they_are(self):
+        code = jslint.without_comments(self.body("ladderNote"))
+        final = code[code.index("if (m.ladder_final)"):]
+        final = final[:final.index("if (m.ladder_complete)")]
+        self.assertIn("(m.ladder_complete || !m.ladder_detail ? '' : ', and ' + "
+                      "m.ladder_detail)", final)
+
+    def test_the_hero_heads_a_final_ladder_so(self):
+        code = jslint.without_comments(self.body("renderOverview"))
+        self.assertRegex(code, r"m\.ladder_final \? 'Top of the final ladder'\s*"
+                               r": 'Ladder leader'\) \+ ' — points average'")
+
+
+class TestThePlacingsAreDrawnAsPythonDecidedThem(WebAssetCase):
+    """4.537: ``S.placings`` on the front page, the Matches page and the team page.
+
+    The page decides nothing: who is paired, what placed each pair and why a pair
+    waits are the document's, in ``placings`` (``stats.placings``), and the page
+    says them. Its words for each outcome are the report's in the page's voice.
+    """
+
+    def test_the_front_page_has_a_placings_section_under_the_format_alone(self):
+        self.assertEqual(self.guard_for("renderOverview", "sectionTitle('Placings')"),
+                         "S.placings")
+
+    def test_every_outcome_python_gives_has_words_on_the_page(self):
+        from matchcentre import stats
+        words = re.search(r"var PLACING_WORDS = \{(.*?)\};", self.assets()["app.js"],
+                          re.S)
+        self.assertIsNotNone(words, "app.js has no PLACING_WORDS")
+        self.assertEqual(sorted(re.findall(r"'([a-z-]+)':", words.group(1))),
+                         sorted(stats.PLACING_OUTCOMES))
+
+    def test_before_the_pairs_are_set_it_says_what_they_wait_on(self):
+        self.assertEqual(self.guard_for("placingsCard", "' Not yet: '"), "!p.set")
+        code = jslint.without_comments(self.body("placingsCard"))
+        self.assertIn("p.waiting ? ' Not yet: ' + p.waiting + '.' : ''", code)
+
+    def test_a_row_opens_the_night_that_placed_it_by_its_printed_id(self):
+        code = jslint.without_comments(self.body("placingsCard"))
+        self.assertIn("var card = x.key ? IDX.matchByKey[x.key] : null;", code)
+        self.assertIn("href: card && card.id ? '#/match/' + encodeURIComponent(card.id)"
+                      " : null", code)
+
+    def test_the_team_left_unpaired_is_a_row_of_its_own(self):
+        self.assertEqual(self.guard_for("placingsCard", "'No match: keeps '",
+                                        emits="push"), "p.unpaired")
+
+    def test_the_matches_page_heads_the_week_as_placing_matches(self):
+        code = jslint.without_comments(self.body("renderMatches"))
+        self.assertIn("(S.placings ? 'Placing matches — ' : 'Finals — ')", code)
+
+    def test_an_empty_placing_week_says_the_pairs_once_they_are_set(self):
+        code = jslint.without_comments(self.body("renderMatches"))
+        self.assertIn("S.placings && S.placings.set ? 'The final ladder pairs ' +",
+                      code)
+
+    def test_the_team_page_says_its_placing(self):
+        code = jslint.without_comments(self.body("renderTeam"))
+        self.assertIn("var placing = teamPlacing(t.slug);", code)
+        self.assertEqual(self.guard_for("renderTeam", "{ class: 'sub', text: placing }"),
+                         "placing")
+
+    def test_a_team_s_placing_waits_for_the_pairs(self):
+        code = jslint.without_comments(self.body("teamPlacing"))
+        self.assertLess(code.index("if (!p || !p.set) return null;"),
+                        code.index("p.unpaired"))
+
+    def test_the_place_in_words_is_python_s_rule(self):
+        # scope.ordinal: the teens take th, and 1, 2 and 3 their own.
+        code = jslint.without_comments(self.body("ordinal"))
+        self.assertIn("var teen = place % 100 >= 11 && place % 100 <= 13;", code)
+        self.assertIn("var suffix = { 1: 'st', 2: 'nd', 3: 'rd' }[place % 10];", code)
+        self.assertIn("return place + (teen || !suffix ? 'th' : suffix);", code)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -57,11 +57,11 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
 from .competition import (DRAW_DECLARED, Competition, Player, Round,
-                          round_sort_key)
+                          round_sort_key, rounds_played_words)
 from .format import MatchFormat
 from .model import NO_OPPONENT, Match, MatchStatus, Outcome
-from .scope import in_words
-from .scoring import LADDER_KEYS, Ruleset
+from .scope import echoed, in_words
+from .scoring import FINALS_PLACINGS, LADDER_KEYS, Ruleset
 from .slugs import unslug
 
 __all__ = ["PRECISION", "match_sort_key", "chronological", "rounds_present",
@@ -1546,10 +1546,12 @@ def _table_levels(table: Mapping[str, TeamStats]) -> list[list[str]]:
 
 
 def order_stands(table: Mapping[str, TeamStats], state: str,
-                 rules: Ruleset) -> bool:
+                 rules: Ruleset, *, final: bool = False) -> bool:
     """Whether the order of *table*, in *state*, stands on the counts it has.
 
-    A complete ladder's does: every team has counted the same number. One not
+    A *final* ladder's does, whatever its counts: the regular season is over, and
+    no card to come can move it (:func:`ladder_final`, 4.536). So does a complete
+    ladder's: every team has counted the same number. One not
     started has no order to stand. One in progress stands only where *rules*
     order it on the average (:func:`ordered_on_the_average`) and no two teams
     are level on that average on unequal counts
@@ -1559,6 +1561,8 @@ def order_stands(table: Mapping[str, TeamStats], state: str,
     document's ``meta.order_stands``, so the ladder's note says the order
     stands only where it does.
     """
+    if final:
+        return True
     if state != "in-progress":
         return state == "complete"
     return ordered_on_the_average(rules) and not _table_levels(table)
@@ -1572,7 +1576,7 @@ LEVEL_AT_THE_TOP = ("the teams on top are level on the average with "
 
 
 def level_at_the_top(table: Mapping[str, TeamStats], state: str,
-                     rules: Ruleset) -> bool:
+                     rules: Ruleset, *, final: bool = False) -> bool:
     """Whether *table*'s top row is level on the average across counts.
 
     Asked of a ladder in progress that *rules* order on the average
@@ -1583,11 +1587,12 @@ def level_at_the_top(table: Mapping[str, TeamStats], state: str,
     has counted more on top for those matches alone. So this is the one
     reason such a ladder names nobody, and the pages say it, where the counts
     alone are not why: a division beside it on unequal counts is led (4.523).
-    False of every other ladder, whose leader the state and the rules decide.
-    Asked here once, for :func:`ladder_leader` and the document's
-    ``meta.leader_withheld``.
+    False of every other ladder, whose leader the state and the rules decide, a
+    *final* one's included: once the season is over the next key's order is the
+    one it ends on, whatever the counts (4.536). Asked here once, for
+    :func:`ladder_leader` and the document's ``meta.leader_withheld``.
     """
-    if state != "in-progress" or not ordered_on_the_average(rules):
+    if final or state != "in-progress" or not ordered_on_the_average(rules):
         return False
     top = _top_row(table)
     return top is not None and any(top.slug in run
@@ -1674,14 +1679,261 @@ def ladder_complete(matches: Sequence[Match], competition: Competition) -> bool:
     return ladder_state(matches, competition) == "complete"
 
 
+# --- the season over, and the placings it sets (4.536, 4.537) -------------
+
+
+def unaccounted(rnd: Round, teams: Iterable[str],
+                matches: Iterable[Match]) -> list[str]:
+    """The teams on no card, fixture, rest or washout of *rnd*, in slug order.
+
+    The cards count as the fixtures do: a declared round's card of a fixture it does
+    not list is that card's own finding, and its two teams are not missing. So does
+    a fixture the club declared washed out, and a round washed out whole leaves
+    nobody off (4.535). Discovery's round notes and :func:`season_unfinished` both
+    ask it, so a round the notes call short is a round the season is not over
+    without.
+    """
+    if rnd.washed_out:
+        return []                   # rained off whole: nobody is missing (4.535)
+    present = {slug for pair in rnd.fixtures for slug in pair}
+    present.update(rnd.byes)
+    present.update(slug for pair in rnd.washouts for slug in pair)
+    present.update(slug for m in matches if m.round == rnd.number
+                   for slug in (m.home, m.away))
+    return sorted(slug for slug in teams if slug not in present)
+
+
+def season_unfinished(matches: Sequence[Match], competition: Competition) -> str:
+    """Why the regular season is not over on the cards, or ``""`` when it is (4.536).
+
+    Over is every regular round come, by the count the progress meter reads
+    (:meth:`~matchcentre.competition.Competition.rounds_played`, a washout
+    included), as many as the season's declared length, and nothing of any of them
+    still to come: every round a declared draw lists has a card or a washout, every
+    fixture it lists its card or its washout (:func:`round_cards`), and every team
+    is on a card, a rest or a washout (:func:`unaccounted`). A card counts whatever
+    it says, Match Cancelled or blank: it is the fixture's record, and no other is
+    coming. Except that a last round
+    whose every card is blank, with no washout, is not known to have been played,
+    since a round's cards exported before its night are blank. And something
+    counted: a season every night of which was rained off has no ladder to finish.
+
+    Asked only with a length the club gave and a team list it closed: with the list
+    read off the cards a round a card short looks like a round complete, and with no
+    length any round could be the last. Rejected: equal counts, F10's test, which a
+    grade with a bye or a washout under ``unplayed = "zero"`` never reaches; and
+    holding a blank card against the season, when a blank card from round 4 is as
+    final in round 10 as it will ever be.
+    """
+    total = competition.rounds_total
+    if total is None:
+        return "the season's length is not declared"
+    if not competition.teams_declared:
+        return "the team list is read from the cards"
+    played = competition.rounds_played(matches)
+    if len(played) < total:
+        return rounds_played_words(len(played), total)
+    if len(played) > total:
+        return f"more rounds have been played than the season's {total} (F3)"
+    # A round of the declared draw with no card and no washout is still to come,
+    # whatever other round makes up the count: a catch-up beside a round 4 nobody
+    # played is five rounds played and round 4 to find.
+    for number, rnd in competition.rounds.items():
+        if (rnd.source == DRAW_DECLARED and number not in played
+                and not competition.is_finals_round(number)):
+            return f"round {echoed(number)} is in the declared draw with no card"
+    for number in played:
+        rnd = competition.rounds.get(number) or Round(number=number)
+        missing = round_cards(rnd, matches).missing
+        if missing:
+            fixtures = [f"{competition.team_name(home)} v "
+                        f"{competition.team_name(away)}" for home, away in missing]
+            return f"round {echoed(number)} has no card of {in_words(fixtures)}"
+        absent = unaccounted(rnd, competition.teams, matches)
+        if absent:
+            return (f"round {echoed(number)} accounts for none of "
+                    f"{in_words(competition.team_name(slug) for slug in absent)}")
+    if ladder_state(matches, competition) == "empty":
+        return "no regular-season match has been counted"
+    last = played[-1]
+    cards = [m for m in matches if m.round == last and not m.is_bye]
+    if (cards and all(m.status is MatchStatus.UNPLAYED for m in cards)
+            and not competition.rounds[last].has_washout):
+        return (f"round {echoed(last)}'s cards are blank, so it is not known to "
+                f"have been played")
+    return ""
+
+
+def ladder_final(matches: Sequence[Match], competition: Competition) -> bool:
+    """Whether the ladder is final: the regular season is over (4.536).
+
+    Whatever the counts: a grade with a bye or a washout under ``unplayed =
+    "zero"`` never has them equal, and once every round is in its order is the
+    one the season ends on. Asked once, for the document's ``meta.ladder_final``,
+    F10 and the leader.
+    """
+    return not season_unfinished(matches, competition)
+
+
+# What decided a placing match (4.537): a result; a draw, a washout or a match
+# called off, which leave the higher place with the team placed higher; no result
+# on any card of it, a card in each of two finals rounds, or two cards of one
+# round that disagree, which place nobody; and no card yet.
+PLACING_OUTCOMES = ("won", "drawn", "washed-out", "cancelled", "no-result",
+                    "repeat", "conflict", "to-play")
+
+
+@dataclass(frozen=True, slots=True)
+class PlacingMatch:
+    """One placing match: the two places it decides, its teams, and what decided it.
+
+    ``higher`` is the team placed higher on the final ladder and ``lower`` the
+    other. ``outcome`` is one of :data:`PLACING_OUTCOMES`; ``first`` takes the
+    higher of ``places`` and ``second`` the lower, both ``None`` while nothing has
+    placed them. ``card`` is the place in the matches handed in of the card it was
+    decided by, the one called off or with no result included, ``None`` for a
+    washout, a repeat or no card; ``rounds`` are the finals rounds its cards are in.
+    """
+
+    places: tuple[int, int]
+    higher: str
+    lower: str
+    outcome: str
+    first: str | None = None
+    second: str | None = None
+    card: int | None = None
+    rounds: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Placings:
+    """What a season's finals format places, as far as its cards go (4.537).
+
+    ``waiting`` is why nobody is paired yet, :func:`season_unfinished`'s words, and
+    ``""`` once the regular season is over. ``after`` is the last regular round.
+    ``matches`` are the placing matches from the top down, ``unpaired`` the place
+    and team an odd number of teams leaves without one, and ``strays`` the places
+    in the matches handed in of the finals cards no placing match is played by.
+    """
+
+    waiting: str
+    after: str
+    matches: tuple[PlacingMatch, ...] = ()
+    unpaired: tuple[int, str] | None = None
+    strays: tuple[int, ...] = ()
+
+
+def placings(matches: Sequence[Match], competition: Competition,
+             table: Mapping[str, TeamStats] | None = None) -> Placings | None:
+    """The placings under ``finals = "placings"``, or ``None`` with no format (4.537).
+
+    Once the regular season is over (:func:`season_unfinished`) the final ladder
+    pairs its teams from the top, 1st v 2nd, 3rd v 4th and on down, and the last
+    team of an odd number plays nobody and keeps its place. Each pair is placed by
+    its card in any finals round, one card per fixture (:func:`scoreable`):
+
+    - a result places the winner first, a forfeit's included;
+    - a draw leaves the higher place with the team placed higher, as does a
+      washout the club declared for the pair or its round, and a card that says
+      the match was called off;
+    - a card with no result, blank, played short or level where the grade cannot
+      draw, places nobody, and neither do cards in two finals rounds, nor two of
+      one round, one each way round, that disagree;
+    - no card yet is a match to play.
+
+    *table* is :func:`team_stats`'s, which a caller holding it passes rather than
+    have it built twice. Rejected: pairing on the ladder before the season is over,
+    which names a pair a late card can break; and a draw decided on anything but
+    the ladder, which no card can say.
+    """
+    if competition.finals != FINALS_PLACINGS:
+        return None
+    regular = competition.rounds_played(matches)
+    after = regular[-1] if regular else ""
+    finals_cards = [i for i, m in enumerate(matches)
+                    if competition.is_finals_round(m.round) and not m.is_bye]
+    waiting = season_unfinished(matches, competition)
+    if waiting:
+        return Placings(waiting=waiting, after=after, strays=tuple(finals_cards))
+    rows = team_stats(matches, competition) if table is None else table
+    order = sorted((slug for slug, row in rows.items() if row.position is not None),
+                   key=lambda slug: rows[slug].position)
+    kept = {id(m) for m in scoreable([matches[i] for i in finals_cards])}
+    finals_rounds = [number for number in competition.round_order
+                     if competition.is_finals_round(number)]
+    placed: list[PlacingMatch] = []
+    paired: set[frozenset[str]] = set()
+    for at in range(0, len(order) - 1, 2):
+        higher, lower = order[at], order[at + 1]
+        pair = frozenset((higher, lower))
+        paired.add(pair)
+        mine = [i for i in finals_cards
+                if frozenset((matches[i].home, matches[i].away)) == pair]
+        placed.append(_placing_match(
+            (at + 1, at + 2), higher, lower, matches, mine, kept,
+            washed=any(competition.rounds[number].washed(higher, lower)
+                       for number in finals_rounds)))
+    unpaired = (len(order), order[-1]) if len(order) % 2 else None
+    strays = tuple(i for i in finals_cards
+                   if frozenset((matches[i].home, matches[i].away)) not in paired)
+    return Placings(waiting="", after=after, matches=tuple(placed),
+                    unpaired=unpaired, strays=strays)
+
+
+def _placed_by(match: Match) -> tuple:
+    """What *match* says of its pair, either way round: the winner, a draw or none."""
+    if match.winner is not None:
+        return ("won", match.home if match.winner == "home" else match.away)
+    return ("drawn",) if match.is_draw else ("none",)
+
+
+def _placing_match(places: tuple[int, int], higher: str, lower: str,
+                   matches: Sequence[Match], mine: list[int], kept: set[int], *,
+                   washed: bool) -> PlacingMatch:
+    """One pair's placing match, by its cards *mine*, of which *kept* count."""
+    rounds = tuple(dict.fromkeys(matches[i].round for i in mine))
+
+    def placing(outcome: str, first: str | None = None,
+                card: int | None = None) -> PlacingMatch:
+        second = None if first is None else lower if first == higher else higher
+        return PlacingMatch(places=places, higher=higher, lower=lower,
+                            outcome=outcome, first=first, second=second, card=card,
+                            rounds=rounds)
+
+    counting = [i for i in mine
+                if id(matches[i]) in kept and matches[i].counts_as_played]
+    if len({matches[i].round for i in counting}) > 1:
+        return placing("repeat")
+    # Two cards of the round, one each way round, are two fixtures to scoreable:
+    # one result between them, or none (4.537).
+    if len({_placed_by(matches[i]) for i in counting}) > 1:
+        return placing("conflict")
+    if counting:
+        match = matches[counting[0]]
+        if match.winner is not None:
+            return placing("won", match.home if match.winner == "home"
+                           else match.away, counting[0])
+        if match.is_draw and not match.is_unscoreable_draw:
+            return placing("drawn", higher, counting[0])
+        return placing("no-result", card=counting[0])
+    if washed:
+        return placing("washed-out", higher)
+    called_off = [i for i in mine if matches[i].status is MatchStatus.CANCELLED]
+    if called_off:
+        return placing("cancelled", higher, called_off[0])
+    return placing("no-result", card=mine[0]) if mine else placing("to-play")
+
+
 def ladder_leader(table: Mapping[str, TeamStats], state: str,
-                  rules: Ruleset) -> TeamStats | None:
+                  rules: Ruleset, *, final: bool = False) -> TeamStats | None:
     """The team that leads *table*, :func:`team_stats`'s, under *rules*.
 
     A ladder that has not started has no leader: nothing counted is no order
-    (4.428). A complete one has its top row. One in progress has its top row
-    when *rules* order it on the average (:func:`ordered_on_the_average`): that
-    order is fair across unequal counts, so a team a bye or a washout behind
+    (4.428). A complete one has its top row, and so does a *final* one,
+    whatever its counts: the season is over (:func:`ladder_final`, 4.536). One
+    in progress has its top row when *rules* order it on the average
+    (:func:`ordered_on_the_average`): that order is fair across unequal counts,
+    so a team a bye or a washout behind
     leads or trails on its own matches, and a club with a bye every round is
     told who leads all season (4.523). Not while the top row is level on the
     average with a team on another count (:func:`level_at_the_top`): the next
@@ -1696,7 +1948,7 @@ def ladder_leader(table: Mapping[str, TeamStats], state: str,
     if state == "empty":
         return None
     top = _top_row(table)
-    if state == "complete" or top is None:
+    if final or state == "complete" or top is None:
         return top
     if (not ordered_on_the_average(rules)
             or level_at_the_top(table, state, rules)):

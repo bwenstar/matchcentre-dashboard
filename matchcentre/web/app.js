@@ -2554,7 +2554,8 @@ function renderOverview(main) {
   var top = m.leader ? teamOf(m.leader.slug) : null;
   var hero = el('div', { class: 'card hero' });
   hero.appendChild(el('div', { class: 'hero-figure' }, [
-    el('div', { class: 'label', text: 'Ladder leader — points average' }),
+    el('div', { class: 'label', text: (m.ladder_final ? 'Top of the final ladder'
+      : 'Ladder leader') + ' — points average' }),
     el('div', { class: 'value', text: top ? num(m.leader.value, 2) : '—' }),
     el('div', { class: 'foot', text: top
       ? top.name + ' · ' + num(top.points, 1) + ' points from ' +
@@ -2593,6 +2594,11 @@ function renderOverview(main) {
   main.appendChild(sectionTitle('Ladder'));
   main.appendChild(ladderNote());
   main.appendChild(el('div', { class: 'card' }, [ladderTable()]));
+  // Under finals = "placings", the matches the final ladder pairs (4.537).
+  if (S.placings) {
+    main.appendChild(sectionTitle('Placings'));
+    main.appendChild(placingsCard());
+  }
 
   var charts = el('div', { class: 'grid charts', style: { 'margin-top': '12px' } });
   charts.appendChild(pointsAverageChart(null));
@@ -2782,16 +2788,24 @@ function ladderNote() {
   var order = (rules().ladder_by || []).map(function (k) { return k.replace(/_/g, ' '); });
   var basis = order.length ? 'Ordered by ' + order.join(', then ') + '.' : '';
   basis += ladderHeadToHeadNote();
-  if (m.ladder_complete) {
-    return el('p', { class: 'ladder-note', text: basis });
-  }
-  // Every team on nothing: no unequal numbers, and nobody placed (4.428).
+  // Every team on nothing: no unequal numbers, and nobody placed (4.428). Asked
+  // first, as no ladder is final or complete with nothing counted.
   if (m.ladder_state === 'empty') {
     return el('p', { class: 'ladder-note ladder-note--incomplete' }, [
       el('span', { class: 'ico', 'aria-hidden': 'true', text: '!' }),
       el('span', { text: ' No regular-season match has been counted yet, so there ' +
         'is no ladder: the teams are listed by name.' })
     ]);
+  }
+  // Every regular round in: the order the season ends on, whatever the counts,
+  // which the note names where they are unequal (4.536).
+  if (m.ladder_final) {
+    return el('p', { class: 'ladder-note', text: 'Final — every regular round ' +
+      'is in' + (m.ladder_complete || !m.ladder_detail ? '' : ', and ' + m.ladder_detail) +
+      '.' + unplacedNote() + ' ' + basis });
+  }
+  if (m.ladder_complete) {
+    return el('p', { class: 'ladder-note', text: basis });
   }
   // Unequal counts on an order they cannot mislead (4.523).
   if (m.order_stands) {
@@ -3229,7 +3243,10 @@ function renderTeam(main, slug) {
   }
   facts.appendChild(document.createTextNode(' · home court ' +
     (t.home_court === null || t.home_court === undefined ? '—' : t.home_court)));
-  main.appendChild(el('div', { class: 'view-head' }, [h1, facts]));
+  var head = el('div', { class: 'view-head' }, [h1, facts]);
+  var placing = teamPlacing(t.slug);
+  if (placing) head.appendChild(el('p', { class: 'sub', text: placing }));
+  main.appendChild(head);
 
   var pos = t.position === null || t.position === undefined ? '—' : String(t.position);
   main.appendChild(el('div', { class: 'grid tiles' }, [
@@ -3983,9 +4000,11 @@ function renderMatches(main) {
     var ifNone = absent ? plural(absent, 'card') + ' missing' : (washed ? 'washed out' : 'not played');
     var state = r.played ? (nonePlayed ? ifNone : 'played') : (absent ? 'no cards yet' : (washed ? 'washed out' : 'not played yet'));
     var head2 = el('div', { class: 'round-head' }, [
-      // A finals round never contributes ladder points (F11), and it is the
-      // round's own non-numeric label that says it is one.
-      el('h3', { text: r.is_finals ? 'Finals — ' + roundTitle(r.number) : roundTitle(r.number) }),
+      // A finals round never contributes ladder points (F11): its label says it is
+      // one, or the club's draw, or under finals = "placings" a number past the
+      // season (4.537), which heads it as the placing matches it is.
+      el('h3', { text: r.is_finals ? (S.placings ? 'Placing matches — ' : 'Finals — ') +
+        roundTitle(r.number) : roundTitle(r.number) }),
       // The draw's own parenthetical against a date — "(mid-semester break)" —
       // which is the reader's answer to "why is this round in the holidays?".
       el('span', { class: 'date',
@@ -4002,7 +4021,9 @@ function renderMatches(main) {
       // "No fixtures listed" over it read as a draw left out (4.535).
       box.appendChild(el('p', { class: 'empty-note',
         text: r.is_finals
-          ? 'Pairings are set by ladder position once the regular rounds are in.'
+          ? (S.placings && S.placings.set ? 'The final ladder pairs ' +
+            placingPairs(S.placings) + '.'
+            : 'Pairings are set by ladder position once the regular rounds are in.')
           : (r.washed_out ? 'The whole round was washed out.' : 'No fixtures listed for this round.') }));
     }
     if (r.is_finals) box.appendChild(finalsNote());
@@ -4099,7 +4120,115 @@ function rubberRow(m, st) {
  * two pages of this dashboard came to word the same rule differently. */
 function finalsNote() {
   return el('p', { class: 'foot muted', style: { 'font-size': '12px' },
-    text: 'Finals do not contribute ladder points.' });
+    text: S.placings ? 'Placing matches do not contribute ladder points: each ' +
+      'decides two places, on the front page.' : 'Finals do not contribute ladder points.' });
+}
+
+/* 1st, 2nd, 3rd, 4th, 11th, 21st: Python's scope.ordinal, for the places a
+ * placing match decides (4.537). */
+function ordinal(place) {
+  var teen = place % 100 >= 11 && place % 100 <= 13;
+  var suffix = { 1: 'st', 2: 'nd', 3: 'rd' }[place % 10];
+  return place + (teen || !suffix ? 'th' : suffix);
+}
+
+/* The pairs as a clause, "Hilltop Aces with Riverside Rockets, 1st v 2nd, and
+ * ...", for a placing week with no card yet to show them by. */
+function placingPairs(p) {
+  return inWords((p.matches || []).map(function (x) {
+    return teamShort(x.higher) + ' v ' + teamShort(x.lower) + ' for ' +
+      ordinal(x.places[0]) + ' and ' + ordinal(x.places[1]);
+  }));
+}
+
+/* What placed a placing match, in the words the report gives (4.537). Python
+ * decided each one: a result to its winner; a draw, a washout or a match called
+ * off to the team placed higher on the ladder; no result, or a card in two
+ * finals rounds, to nobody. */
+var PLACING_WORDS = {
+  'won': 'won',
+  'drawn': 'drawn, placed higher on the ladder',
+  'washed-out': 'washed out, placed higher on the ladder',
+  'cancelled': 'called off, placed higher on the ladder',
+  'no-result': 'no result on its card, so nobody is placed',
+  'repeat': 'a card in each of two finals rounds, so nobody is placed',
+  'conflict': 'two cards that disagree, so nobody is placed',
+  'to-play': 'to play'
+};
+
+function placedWords(x) {
+  var how = PLACING_WORDS[x.outcome] || x.outcome;
+  if (!x.first) return how.charAt(0).toUpperCase() + how.slice(1);
+  return teamShort(x.first) + ' ' + ordinal(x.places[0]) + ', ' +
+    teamShort(x.second) + ' ' + ordinal(x.places[1]) + ' (' + how + ')';
+}
+
+/* The placings under finals = "placings" (4.537), as Python decided them: each
+ * pair the final ladder makes, top down, with what placed it, and the team an
+ * odd number leaves without a match at the place it keeps. Before the pairs are
+ * set, when they will be, and what they wait on in Python's words. */
+function placingsCard() {
+  var p = S.placings;
+  var box = el('div', { class: 'card' });
+  if (!p.set) {
+    box.appendChild(el('p', { class: 'empty-note', text: 'Pairings are set by ' +
+      'ladder position once the regular rounds are in: 1st v 2nd, 3rd v 4th and ' +
+      'on down the ladder.' + (p.waiting ? ' Not yet: ' + p.waiting + '.' : '') }));
+    return box;
+  }
+  // A row opens the night that placed it, by the id its card prints, as a match
+  // card's own link does; a card with no printed id is addressed by nothing.
+  var rows = (p.matches || []).map(function (x) {
+    var card = x.key ? IDX.matchByKey[x.key] : null;
+    return { cells: [ordinal(x.places[0]) + ' v ' + ordinal(x.places[1]),
+      teamShort(x.higher) + ' v ' + teamShort(x.lower), placedWords(x)],
+      href: card && card.id ? '#/match/' + encodeURIComponent(card.id) : null };
+  });
+  if (p.unpaired) {
+    rows.push([ordinal(p.unpaired.place), teamShort(p.unpaired.slug),
+      'No match: keeps ' + ordinal(p.unpaired.place)]);
+  }
+  box.appendChild(el('div', { class: 'table-wrap' }, [
+    table(['Places', 'Match', 'Placed'], rows,
+      { caption: 'Placing matches, by the ladder after ' +
+        roundTitle(p.after).toLowerCase(), csv: 'Placings' })]));
+  box.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px' },
+    text: 'The winner of each takes the higher of its two places. A draw, a ' +
+      'washout or a match called off leaves it with the team placed higher on ' +
+      'the ladder.' }));
+  return box;
+}
+
+/* The team's placing match, for its page (4.537): the place it took and how, the
+ * match still to play, why nobody is placed yet, or the place an odd number left
+ * it without a match. Nothing until the pairs are set. */
+function teamPlacing(slug) {
+  var p = S.placings;
+  if (!p || !p.set) return null;
+  if (p.unpaired && p.unpaired.slug === slug) {
+    return 'Placed ' + ordinal(p.unpaired.place) + ', with no placing match: the ' +
+      'last of an odd number of teams keeps its place.';
+  }
+  var x = (p.matches || []).filter(function (m) {
+    return m.higher === slug || m.lower === slug;
+  })[0];
+  if (!x) return null;
+  var other = teamShort(x.higher === slug ? x.lower : x.higher);
+  var match = 'the ' + ordinal(x.places[0]) + ' v ' + ordinal(x.places[1]) +
+    ' placing match';
+  if (x.outcome === 'to-play') return 'Plays ' + other + ' in ' + match + '.';
+  if (!x.first) {
+    return 'Not placed yet: ' + match + ' against ' + other + ' has ' +
+      PLACING_WORDS[x.outcome] + '.';
+  }
+  var place = 'Placed ' + ordinal(x.first === slug ? x.places[0] : x.places[1]);
+  if (x.outcome === 'won') {
+    return place + ': ' + (x.first === slug ? 'won ' + match + ' against '
+      : 'lost ' + match + ' to ') + other + '.';
+  }
+  var settled = { 'drawn': 'drawn', 'washed-out': 'washed out', 'cancelled': 'called off' };
+  return place + ': ' + match + ' against ' + other + ' was ' + settled[x.outcome] +
+    ', and the higher place goes to the team placed higher on the ladder.';
 }
 
 /* =========================================================== view: match == */
@@ -4627,7 +4756,14 @@ function renderHealth() {
       el('span', { text: mismatched + ' ' + plural(mismatched, 'match', 'matches') + ' with parse notes' })
     ]));
   }
-  if (!m.ladder_complete) {
+  // Final once every regular round is in, whatever the counts, in the neutral
+  // pill a settled fact gets (4.536); in progress otherwise, as a warning.
+  if (m.ladder_final) {
+    row.appendChild(el('span', { class: 'pill' }, [
+      el('span', { class: 'dot', 'aria-hidden': 'true' }),
+      el('span', { text: 'final ladder' })
+    ]));
+  } else if (!m.ladder_complete) {
     row.appendChild(el('span', { class: 'pill warning' }, [
       el('span', { class: 'dot', 'aria-hidden': 'true' }),
       el('span', { text: 'ladder in progress' })

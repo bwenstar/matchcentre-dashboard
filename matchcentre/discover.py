@@ -51,7 +51,8 @@ from .card import (Card, Rejection, date_forms, majority_letterhead, round_key,
 from .competition import (DRAW_DECLARED, DRAW_FROM_CARDS, Club, Competition,
                           CompetitionError, Player, Provenance, Round, Team,
                           competition_id, dedupe_fixtures, infer_byes,
-                          is_finals_label, merge_provenance, round_number,
+                          is_finals_label, merge_provenance,
+                          names_placing, placing_weeks, round_number,
                           round_sort_key, rounds_played_words, season_order_key,
                           year_of, years_played)
 from .config import (CompetitionConfig, Config, mode_among_labels,
@@ -63,7 +64,7 @@ from .sheet import by_weeks, rounds_listed
 from .slugs import (apply_alias, did_you_mean, display_name, label_key,
                     nearest, person_name, slugify, team_slug, unslug)
 from .stats import (duplicates, later_round_with_cards, player_names,
-                    round_cards, unlisted_words)
+                    round_cards, unaccounted, unlisted_words)
 from .stats import other_cards
 
 __all__ = ["Discovery", "DiscoveryError", "FiledElsewhere", "discover",
@@ -645,10 +646,13 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
     matches.sort(key=lambda m: (round_sort_key(m.round, draw), m.date, m.home,
                                 m.away, m.source))
 
+    # What the finals are (4.537), which the draw needs: a round numbered past the
+    # season under a format is a finals round before anything counts the rounds.
+    finals = config.finals_for(declared)
     (rounds, draw_source, rounds_total, total_source, round_notes,
      outgrown) = _build_draw(
         comp_id, matches, fmt=fmt, rules=rules, teams=teams,
-        teams_declared=teams_declared, declared=declared)
+        teams_declared=teams_declared, declared=declared, finals=finals)
 
     # Named by the rule every registered player is named by, so that a
     # [player_names] line reaches a fill-in as it reaches anybody else.
@@ -685,7 +689,7 @@ def _build_competition(comp_id: str, cards: list[Card], *, config: Config,
         format_declared=format_declared, provenance=provenance,
         source=f"{len(usable)} scorecard{'' if len(usable) == 1 else 's'} "
                f"under {root}",
-        fill_in_names=fill_in_names, strangers=strangers,
+        fill_in_names=fill_in_names, strangers=strangers, finals=finals,
     )
 
     notes.extend(round_notes)
@@ -1738,7 +1742,7 @@ def called_off(card: Card) -> bool:
 def _build_draw(comp_id: str, matches: list[Match], *,
                 fmt: fmt_mod.MatchFormat, rules: Ruleset,
                 teams: dict[str, Team], teams_declared: bool,
-                declared: CompetitionConfig | None
+                declared: CompetitionConfig | None, finals: str = ""
                 ) -> tuple[dict[str, Round], str, int | None, Provenance,
                            list[str], tuple[str, ...]]:
     """The rounds, where they came from, and how long the season is.
@@ -1760,6 +1764,13 @@ def _build_draw(comp_id: str, matches: list[Match], *,
     washouts = _stated_washouts(declared, teams)
 
     if declared and declared.rounds:
+        # Declaring the draw declares the season's length, finals left out so the
+        # dashboard's progress reads against the regular season, and under placings
+        # the placing week left out with them (4.537). The rule is the config's,
+        # shared with the writer that keeps the length when --force drops the draw.
+        # Counted off the declared rounds, not the rounds built below, which a
+        # round listed with no fixtures stopped counting once its cards gave it some.
+        total = declared.season_length_for(finals)
         rounds: dict[str, Round] = {}
         for rnd in declared.rounds:
             fixtures, listed_twice = dedupe_fixtures(
@@ -1804,6 +1815,11 @@ def _build_draw(comp_id: str, matches: list[Match], *,
                 is_finals=is_finals_label(number), source=DRAW_FROM_CARDS)
         _add_bye_only_rounds(rounds, stated)
         _add_washouts(rounds, washouts, stated, teams, teams_declared)
+        # A length the draw gave is its own rounds, so none of them is past it;
+        # with rounds_total typed, any round of it can be (4.537).
+        _mark_placing_week(rounds, finals=finals, length=total,
+                           numbered=None if declared.rounds_total is not None
+                           else set(rounds) - {r.number for r in declared.rounds})
         outgrown: tuple[str, ...] = ()
         # A washout of a round the draw does not list plays the season past the
         # draw's length as a card of one does, and is said as a washout (4.535).
@@ -1815,22 +1831,20 @@ def _build_draw(comp_id: str, matches: list[Match], *,
             # to say about a season played past it. The scaffold follows the
             # no-draw branch below: the competition's own rule, before there is one.
             scaffold = Competition(id=comp_id, day="", division="", fmt=fmt,
-                                   rules=rules, rounds=rounds,
-                                   rounds_total=declared.season_length)
+                                   rules=rules, rounds=rounds, rounds_total=total)
             if scaffold.rounds_past_length(matches):
                 outgrown = tuple(beyond)
+        # The placing week is no round of the draw the club typed, and is not told
+        # to be added to it, which would make the draw a round longer (4.537).
+        extra = [number for number in extra if not (
+            rounds[number].is_finals and rounds[number].finals_typed is None
+            and not is_finals_label(number))]
         if extra and not outgrown:
             notes.append(
                 f"{comp_id}: cards were found for {rounds_listed(extra)}, "
                 f"which the declared draw does not list. They are "
                 f"scored, and shown as coming from the cards. Add them under "
                 f"[[competitions.{comp_id}.rounds]] if the draw grew.")
-        # Declaring the draw declares the season's length, finals left out so the
-        # dashboard's progress reads against the regular season. The rule is the
-        # config's, shared with the writer that keeps the length when --force drops
-        # the draw. Counted here off the rounds built above, a round the draw listed
-        # with no fixtures stopped counting once its cards gave it some.
-        total = declared.season_length
         return (rounds, DRAW_DECLARED, total,
                 Provenance.DECLARED if total is not None else Provenance.DERIVED,
                 notes, outgrown)
@@ -1848,8 +1862,33 @@ def _build_draw(comp_id: str, matches: list[Match], *,
     _add_bye_only_rounds(rounds, stated)
     _add_washouts(rounds, washouts, stated, teams, teams_declared)
     total = declared.rounds_total if declared else None
+    _mark_placing_week(rounds, finals=finals, length=total)
     source = Provenance.DECLARED if total is not None else Provenance.DERIVED
     return (rounds, DRAW_FROM_CARDS, total, source, notes, ())
+
+
+def _mark_placing_week(rounds: dict[str, Round], *, finals: str,
+                       length: int | None,
+                       numbered: Collection[str] | None = None) -> None:
+    """Each round of the placing week a finals round, under a finals format.
+
+    By :func:`~matchcentre.competition.placing_weeks` of every round built: the
+    first week numbered past the season, and a round named a placing match. Marked
+    on the rounds as they are built, a card's, a
+    washout's or a rest's, and before anything counts them: the draw's outgrown
+    check, F3 and the season's progress count the regular rounds, and the placing
+    week is none of them (4.537). A round the club typed ``finals = false`` on stays
+    as typed, which F3 then refuses as the round past the length it is. *numbered*
+    are the rounds a number can make the placing week, every one where it is
+    ``None``: a draw that gave the season its length lists its own rounds, which
+    are the season, so a round typed a final mid-draw leaves none after it past it.
+    """
+    weeks = placing_weeks(rounds if numbered is None else numbered, length=length,
+                          finals=finals) | {number for number in rounds
+                                            if names_placing(number, finals)}
+    for number, rnd in list(rounds.items()):
+        if not rnd.is_finals and rnd.finals_typed is not False and number in weeks:
+            rounds[number] = replace(rnd, is_finals=True)
 
 
 def _stated_byes(declared: CompetitionConfig | None,
@@ -2057,7 +2096,7 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
     later = later_round_with_cards(order, {n for n, c in counts.items() if c} | washed)
     for number in order:
         rnd = rounds[number]
-        absent = _unaccounted(rnd, teams, matches)
+        absent = unaccounted(rnd, teams, matches)
         if rnd.source == DRAW_DECLARED:
             notes.extend(_declared_round_notes(comp_id, rnd, matches, teams,
                                                awaiting, strays))
@@ -2120,25 +2159,6 @@ def _shortfall_notes(comp_id: str, rounds: dict[str, Round],
             + wording.format(pronoun=by_weeks(listed, "it", "them"),
                              a_round=by_weeks(listed, "a round", "rounds")) + ".")
     return notes
-
-
-def _unaccounted(rnd: Round, teams: dict[str, Team],
-                 matches: list[Match]) -> list[str]:
-    """The teams on no card, fixture, rest or washout of *rnd*, in slug order.
-
-    The cards count as the fixtures do: a declared round's card of a fixture it does
-    not list is that card's own finding, and its two teams are not missing. So does
-    a fixture the club declared washed out, and a round washed out whole leaves
-    nobody off (4.535).
-    """
-    if rnd.washed_out:
-        return []                   # rained off whole: nobody is missing (4.535)
-    present = {slug for pair in rnd.fixtures for slug in pair}
-    present.update(rnd.byes)
-    present.update(slug for pair in rnd.washouts for slug in pair)
-    present.update(slug for m in matches if m.round == rnd.number
-                   for slug in (m.home, m.away))
-    return sorted(slug for slug in teams if slug not in present)
 
 
 def _absent_note(comp_id: str, number: str, absent: list[str],
@@ -3560,9 +3580,15 @@ def _assumption_notes(comp: Competition, config: Config,
                      if rnd.is_finals), key=comp.round_key)
     label = ("the round label names a final" if comp.draw_source == DRAW_DECLARED
              else "the round label on the cards names a final")
+    # The placing week said as what it is, by finals = "placings", and offered no
+    # finals = false: a round past the season typed regular is one F3 refuses.
+    placing = {n for n in finals if n not in typed and comp.placing_week(n)}
     for chosen, basis, advice in (
             ([n for n in finals if n in typed], "declared as finals", ""),
-            ([n for n in finals if n not in typed], f"read as finals because {label}",
+            ([n for n in finals if n in placing],
+             'the week of placing matches (finals = "placings")', ""),
+            ([n for n in finals if n not in typed and n not in placing],
+             f"read as finals because {label}",
              comp.finals_advice("finals = true or false", "to decide it yourself"))):
         if chosen:
             notes.append(

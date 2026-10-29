@@ -4114,6 +4114,183 @@ class TestWhatAForfeitIsWorthIsSetUnderRulesLikeTheOtherRules(unittest.TestCase)
                                  (award, points))
 
 
+class TestTheFinalsAreSetUnderRulesLikeTheOtherRules(unittest.TestCase):
+    """``[rules] finals``: what the season's finals are, read beside the other rules.
+
+    Measured on the tree before this (/tmp/mcw/finals/probe/config-before.txt):
+    ``finals = "placings"`` under [rules] and in a competition's section each
+    loaded with the warning "finals is not a setting this program understands and
+    was ignored", so no club could say its season ends in placing matches (4.537).
+
+    Now it is one of RULES_SETTINGS: ``"placings"`` or ``"none"``, read in any
+    case, under [rules] and in a section, which overrides it either way, and
+    written back. ``"none"`` plays as a club that says nothing does, and is kept as
+    typed, so a section can turn [rules]'s placings off and F3 knows the club has
+    answered the question it would ask. Anything else is refused, as an
+    ``unplayed`` the program does not know is: the club wrote the line to change
+    what its finals mean. Rejected: a boolean ``placings = true``, which a second
+    format would need a second key beside, and the two could then disagree.
+    """
+
+    COMP = "tuesday-division-c"
+
+    def setUp(self):
+        import tempfile
+        self._dir = tempfile.TemporaryDirectory()
+        self.dir = Path(self._dir.name)
+        self.addCleanup(self._dir.cleanup)
+
+    def write(self, text):
+        path = self.dir / "config.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def refused(self, text) -> str:
+        path = self.write(text)
+        with self.assertRaises(config_mod.ConfigError) as caught:
+            config_mod.load(path)
+        return str(caught.exception).replace(f"{path}: ", "", 1)
+
+    def test_it_is_a_rule_a_competition_may_override(self):
+        self.assertIn("finals", config_mod.RULES_SETTINGS)
+
+    def test_placings_is_read_and_none_is_no_format(self):
+        for typed, read, applied in (("placings", "placings", "placings"),
+                                     ("none", "none", "none"),
+                                     (" Placings", "placings", "placings")):
+            with self.subTest(typed=typed):
+                loaded = config_mod.load(self.write(f'[rules]\nfinals = "{typed}"\n'))
+                self.assertEqual(loaded.warnings, ())
+                self.assertEqual(loaded.finals, read)
+                self.assertEqual(loaded.finals_for(None), applied)
+
+    def test_left_out_there_is_no_format(self):
+        loaded = config_mod.load(self.write('[rules]\nscoring = "simple"\n'))
+        self.assertEqual((loaded.finals, loaded.finals_for(None)), ("", ""))
+
+    def test_a_competition_overrides_it_either_way(self):
+        for rules, own, applied in (("placings", "none", "none"),
+                                    ("none", "placings", "placings"),
+                                    ("", "placings", "placings"),
+                                    ("placings", "", "placings")):
+            with self.subTest(rules=rules, own=own):
+                text = f'[rules]\nfinals = "{rules}"\n' if rules else ""
+                text += f'[competitions."{self.COMP}"]\nday = "Tuesday"\n'
+                text += f'finals = "{own}"\n' if own else ""
+                loaded = config_mod.load(self.write(text))
+                self.assertEqual(loaded.warnings, ())
+                self.assertEqual(
+                    loaded.finals_for(loaded.competitions[self.COMP]), applied)
+
+    def test_a_format_it_does_not_know_is_refused_with_both_and_the_nearest(self):
+        for where, text in (
+                ("[rules]", '[rules]\nfinals = "placing"\n'),
+                (f"[competitions.{self.COMP}]",
+                 f'[competitions."{self.COMP}"]\nfinals = "placing"\n')):
+            with self.subTest(where=where):
+                self.assertEqual(self.refused(text),
+                                 f'{where} finals = "placing" is not "none" or '
+                                 '"placings". Did you mean placings?')
+        self.assertEqual(self.refused("[rules]\nfinals = true\n"),
+                         '[rules] finals = true is not "none" or "placings".')
+
+    def test_the_first_run_writes_it_behind_a_hash_under_the_forfeit_lines(self):
+        text = config_mod.render(config_mod.Config(path=self.dir / "config.toml"),
+                                 competitions=())
+        rules = text.split("[rules]\n", 1)[1]
+        points = rules.index("# forfeit_points = ")
+        finals = rules.index('# finals = "placings"')
+        self.assertLess(points, finals)
+        self.assertLess(finals, rules.index("# The shape of a match"))
+        self.assertNotRegex(text, r"(?m)^finals = ")
+        self.assertLessEqual(max(len(line) for line in text.splitlines()), 78)
+        loaded = config_mod.load(self.write(text))
+        self.assertEqual(loaded.warnings, ())
+        self.assertEqual(loaded.finals_for(None), "")
+
+    def test_the_first_run_says_what_each_format_does(self):
+        text = config_mod.render(config_mod.Config(path=self.dir / "config.toml"),
+                                 competitions=())
+        table = text.split("# What your finals are", 1)[1]
+        table = table.split('# finals = "placings"', 1)[0]
+        said = " ".join(line.lstrip("#").strip() for line in table.splitlines())
+        said = " ".join(said.split())
+        for mode in scoring.FINALS_FORMATS:
+            with self.subTest(mode=mode):
+                self.assertIn(f"{mode} {scoring.finals_detail(mode)}", said)
+
+    def test_a_club_that_set_it_gets_it_written_back_live(self):
+        for mode in scoring.FINALS_FORMATS:
+            with self.subTest(mode=mode):
+                text = config_mod.render(config_mod.Config(
+                    path=self.dir / "config.toml", exists=True, finals=mode),
+                    competitions=())
+                self.assertRegex(text, rf'(?m)^finals = "{mode}"$')
+                loaded = config_mod.load(self.write(text))
+                self.assertEqual(loaded.warnings, ())
+                self.assertEqual(loaded.finals, mode)
+
+class TestTheLengthsUnderPlacingsLeaveThePlacingWeekOut(unittest.TestCase):
+    """4.537, its review: a draw's length, and the one ``--force`` writes, under placings.
+
+    The draw gives the season its length, finals left out, and under placings the
+    placing week is left out with them: a Playoff whether or not it was typed a
+    final, and the draw's last round, numbered past the rest and typed ``finals =
+    true``, since the run after ``--force`` reads it as the first week past the five
+    rounds written. Measured on the tree the review read: a draw of five rounds and
+    a Playoff read ``5 of 6 rounds played`` for good, and ``--force`` over five
+    rounds and a sixth typed a final wrote six, so the run after scored the placing
+    week into the ladder. With no format the labels alone decide, as before.
+    """
+
+    def config(self, rounds, typed=(), finals="placings"):
+        import tempfile
+        text = (f'[rules]\nfinals = "{finals}"\n\n' if finals else "")
+        text += '[competitions.monday-division-b]\nday = "Monday"\n'
+        for number in rounds:
+            text += (f'[[competitions.monday-division-b.rounds]]\nnumber = "{number}"\n'
+                     + ("finals = true\n" if number in typed else ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(text, encoding="utf-8")
+            return config_mod.load(path)
+
+    def section(self, rounds, typed=()):
+        return self.config(rounds, typed).competition("monday-division-b")
+
+    def test_a_playoff_is_no_round_of_the_draws_length(self):
+        section = self.section(["1", "2", "3", "Playoff"])
+        self.assertEqual((section.season_length_for("placings"),
+                          section.season_length_for("")), (3, 4))
+        self.assertEqual((section.length_by_labels_for("placings"),
+                          section.length_by_labels_for("")), (3, 4))
+        self.assertEqual(section.finals_after_force("placings"), {"Playoff"})
+
+    def test_the_last_round_typed_a_final_is_the_placing_week_by_its_number(self):
+        section = self.section(["1", "2", "3", "4"], typed=("4",))
+        self.assertEqual(section.length_by_labels_for("placings"), 3)
+        self.assertEqual(section.finals_after_force("placings"), {"4"})
+        self.assertEqual(section.length_by_labels_for(""), 4)
+        self.assertEqual(section.finals_after_force(""), frozenset())
+
+    def test_a_round_typed_a_final_mid_draw_is_no_placing_week(self):
+        section = self.section(["1", "2", "3", "4"], typed=("2",))
+        self.assertEqual(section.length_by_labels_for("placings"), 4)
+        self.assertEqual(section.finals_after_force("placings"), frozenset())
+
+    def test_two_rounds_typed_finals_are_no_one_week(self):
+        section = self.section(["1", "2", "3", "4", "5"], typed=("4", "5"))
+        self.assertEqual(section.length_by_labels_for("placings"), 5)
+
+    def test_a_section_no_card_was_filed_under_is_written_with_it(self):
+        text = config_mod.render(self.config(["1", "2", "3", "4"], typed=("4",)),
+                                 competitions=())
+        self.assertIn("\nrounds_total = 3\n", text)
+        text = config_mod.render(self.config(["1", "2", "3", "4"], typed=("4",),
+                                             finals=""), competitions=())
+        self.assertIn("\nrounds_total = 4\n", text)
+
+
 class TestTheByesShorthand(unittest.TestCase):
     """``[competitions.<id>.byes]``: the byes a club has to type, and no more.
 
@@ -5809,12 +5986,13 @@ class TestConfigRendering(unittest.TestCase):
         off the tuple rather than a list here, on a section built from cards and on
         one carried over with none, since both are written by the one function.
         """
-        # 4.420 moved this: forfeit_award and forfeit_points are rules too.
+        # 4.420 moved this: forfeit_award and forfeit_points are rules too, and
+        # 4.537 finals.
         rules = dict(scoring="rubbers", sets="pro-8", unplayed="average",
                      draws=False, format="doubles-3",
                      slots=("doubles", "doubles", "doubles"),
                      min_sets_for_result=2, forfeit_award="fixed",
-                     forfeit_points=5.0)
+                     forfeit_points=5.0, finals="placings")
         self.assertEqual(set(rules), set(config_mod.RULES_SETTINGS),
                          "a rule this test does not set is a rule it does not check")
         on_cards = config_mod.CompetitionConfig(

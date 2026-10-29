@@ -69,7 +69,8 @@ SEASON_MODES = ("single", "multi")
 PLAYER_MODES = ("names", "initials", "numbered")
 
 RULES_SETTINGS = ("scoring", "sets", "unplayed", "draws", "format", "slots",
-                  "min_sets_for_result", "forfeit_award", "forfeit_points")
+                  "min_sets_for_result", "forfeit_award", "forfeit_points",
+                  "finals")
 """Every setting ``[rules]`` accepts, and every one a competition may override.
 
 Named once because four places have to agree about it: the two ``_reject_unknown``
@@ -194,6 +195,9 @@ class CompetitionConfig:
     min_sets_for_result: int | None = None
     forfeit_award: str = ""
     forfeit_points: float | None = None
+    # What the finals are, as the section typed it, '' where it typed nothing
+    # (4.537): "none" is typed, and turns a [rules] "placings" off.
+    finals: str = ""
     expected: ExpectedSheet | None = None
     # A sheet table with something typed in it that the loader could compare no line
     # of: no usable after_round, or every line refused. ``expected`` says nothing of
@@ -222,9 +226,22 @@ class CompetitionConfig:
         the rounds built from them, which a round listed with no fixtures leaves
         once its cards arrive -- nine rounds read as six by round three.
         """
+        return self.season_length_for("")
+
+    def season_length_for(self, finals: str) -> int | None:
+        """``season_length`` under the finals format the section is played to (4.537).
+
+        Under ``finals = "placings"`` a round of the draw that names a placing match,
+        ``Playoff`` or ``Placings``, is the placing week whether or not it was typed
+        a final, so it is no round of the season's length: counted in, a draw of
+        five rounds and a Playoff read ``5 of 6 rounds played`` for good, and the
+        pairs it waited on were never set. A round typed regular is as typed.
+        """
+        from .competition import names_placing
         if self.rounds_total is not None:
             return self.rounds_total
-        return sum(1 for r in self.rounds if not r.is_finals) or None
+        return sum(1 for r in self.rounds if not r.is_finals and not (
+            r.finals is None and names_placing(r.number, finals))) or None
 
     @property
     def length_by_labels(self) -> int | None:
@@ -237,8 +254,71 @@ class CompetitionConfig:
         was typed regular. The same rule over the same rounds, so a ``rounds_total``
         the club typed is theirs and comes back as typed.
         """
-        return replace(self, rounds=tuple(replace(r, finals=None)
-                                          for r in self.rounds)).season_length
+        return self.length_by_labels_for("")
+
+    def length_by_labels_for(self, finals: str) -> int | None:
+        """``length_by_labels`` under the section's finals format (4.537).
+
+        The run after ``--force`` reads a final by its label and, under placings, by
+        the placing week's rule (:meth:`finals_after_force`), so the length it is
+        written is the regular rounds that run will see.
+        """
+        return self._after_force(finals)[0]
+
+    def finals_after_force(self, finals: str) -> frozenset[str]:
+        """The rounds of the draw the run after ``--force`` reads as finals (4.537).
+
+        Each by its label, and under placings by the placing week's rule over the
+        draw's rounds and the length written: a round that names a placing match,
+        and the first numbered past the length. ``_what_force_drops`` names the
+        rounds this moves from what was typed.
+        """
+        return self._after_force(finals)[1]
+
+    def finals_now(self, finals: str) -> frozenset[str]:
+        """The rounds of the draw this run reads as finals, the typed flags first.
+
+        By the flag a round was typed with, else its label, and under placings the
+        placing week: a round named one, and with ``rounds_total`` typed the first
+        number past it. A length the draw gave is its own rounds, so none of them is
+        past it, as discovery marks them (4.537).
+        """
+        from .competition import names_placing, placing_weeks
+        numbered = () if self.rounds_total is None else (r.number for r in self.rounds)
+        weeks = placing_weeks(numbered, length=self.season_length_for(finals),
+                              finals=finals)
+        return frozenset(r.number for r in self.rounds
+                         if (r.is_finals if r.finals is not None else (
+                             r.is_finals or r.number in weeks
+                             or names_placing(r.number, finals))))
+
+    def _after_force(self, finals: str) -> tuple[int | None, frozenset[str]]:
+        """The length ``--force`` writes, and the finals the run after it reads.
+
+        By the labels: a round is a final if its label names one, or under placings
+        names a placing match. And under placings the draw's last round, numbered
+        past every other regular round it lists and typed ``finals = true``, is the
+        placing week by its number once the length leaves it out, as it is in this
+        run: counted in, ``--force`` wrote a length one round long, and the run after
+        scored the placing week into the ladder with exit 0.
+        """
+        from .competition import (is_finals_label, names_placing, placing_weeks,
+                                  round_number)
+        regular = [r for r in self.rounds if not is_finals_label(r.number)
+                   and not names_placing(r.number, finals)]
+        typed = [r for r in regular
+                 if r.finals is True and round_number(r.number) is not None]
+        if finals == scoring.FINALS_PLACINGS and len(typed) == 1 and all(
+                round_number(r.number) is not None
+                and round_number(r.number) < round_number(typed[0].number)
+                for r in regular if r is not typed[0]):
+            regular.remove(typed[0])
+        length = (self.rounds_total if self.rounds_total is not None
+                  else len(regular) or None)
+        weeks = placing_weeks((r.number for r in self.rounds), length=length,
+                              finals=finals)
+        return length, frozenset(r.number for r in self.rounds
+                                 if is_finals_label(r.number) or r.number in weeks)
 
     @property
     def can_claim_cards(self) -> bool:
@@ -305,6 +385,8 @@ class Config:
     # decides", as for unplayed and draws; points are read only under "fixed".
     forfeit_award: str = ""
     forfeit_points: float | None = None
+    # What the season's finals are (4.537): '' is "not declared", as unplayed's.
+    finals: str = ""
     season_labels: dict[str, str] = field(default_factory=dict)
     team_names: dict[str, str] = field(default_factory=dict)
     # Each [team_names] key as typed -> the slugs the loader filed it under, so
@@ -363,13 +445,22 @@ class Config:
             return comp.forfeit_points
         return self.forfeit_points
 
+    def finals_for(self, comp: CompetitionConfig | None = None) -> str:
+        """The finals format *comp* is played to as declared, ``""`` where unsaid.
+
+        The section's, else [rules]'s, as ``unplayed`` is: ``"placings"``, or
+        ``"none"``, which plays as a club that said nothing does and is kept, since
+        a club that typed it has answered what F3 would otherwise ask (4.537).
+        """
+        return self._declared_rule(comp, "finals")
+
     def set_rule_for(self, comp: CompetitionConfig | None = None) -> fmt_mod.SetRule:
         return fmt_mod.set_rule(self._declared_rule(comp, "sets")
                                 or fmt_mod.DEFAULT_SET_RULE)
 
     def _declared_rule(self, comp: CompetitionConfig | None, key: str) -> str:
-        """``scoring``, ``sets``, ``unplayed`` or ``forfeit_award`` as declared: the
-        section's, else [rules]'s, else ''."""
+        """``scoring``, ``sets``, ``unplayed``, ``forfeit_award`` or ``finals`` as
+        declared: the section's, else [rules]'s, else ''."""
         return getattr(comp, key) if comp and getattr(comp, key) else getattr(self, key)
 
     def rules_left_to_default(self, comp: CompetitionConfig | None = None
@@ -723,6 +814,7 @@ def _from_raw(raw: dict, path: Path) -> Config:
                                      "[rules] forfeit_award", path),
         forfeit_points=_forfeit_points(rules.get("forfeit_points"),
                                        "[rules] forfeit_points", path),
+        finals=_finals(rules.get("finals"), "[rules] finals", path),
         season_labels=_season_labels(raw.get("seasons"), mode, warnings),
         team_names=_name_map(raw.get("team_names"), "team_names", prefix, warnings,
                              team_keys),
@@ -1029,6 +1121,24 @@ def _forfeit_points(value: object, label: str, path: Path) -> float | None:
     return float(value)
 
 
+def _finals(value: object, label: str, path: Path) -> str:
+    """``[rules] finals``: ``"none"``, ``"placings"``, or unset (4.537).
+
+    Refused rather than warned about, for the reason ``_unplayed`` is: a typo that
+    fell back to no format would leave every placing match placing nobody, the
+    season the club wrote the line for.
+    """
+    if value is None or value == "":
+        return ""
+    mode = str(value).strip().casefold()
+    if mode not in scoring.FINALS_FORMATS:
+        raise ConfigError(
+            f"{path}: {label} = {toml_value(value)} is not "
+            f"{choices(scoring.FINALS_FORMATS)}."
+            f"{_did_you_mean(mode, scoring.FINALS_FORMATS)}")
+    return mode
+
+
 def _priced_forfeits(config: Config, path: Path) -> Config:
     """*config*, refused where a ``"fixed"`` award has no price, and warned where
     a ``forfeit_points`` is read by no ``"fixed"`` award.
@@ -1293,6 +1403,8 @@ def _competitions(value: object, path: Path, prefix: str,
             forfeit_points=_forfeit_points(
                 table.get("forfeit_points"),
                 f"[competitions.{comp_id}] forfeit_points", path),
+            finals=_finals(table.get("finals"),
+                           f"[competitions.{comp_id}] finals", path),
             expected=(sheet := _expected_table(table.get("expected"), comp_id,
                                                warnings, refused=(lost := []))),
             expected_unusable=(_sheet_in_use(table.get("expected"))
@@ -2545,6 +2657,16 @@ def render(config: Config, *, competitions: object = (),
         lines.append(f"forfeit_points = {toml_value(config.forfeit_points)}")
     else:
         lines.append('# forfeit_points = 5   # read only by forfeit_award = "fixed"')
+    # What the finals are (4.537), live where the club declared it and behind a #
+    # where it did not, as the forfeit award is.
+    lines.append("# What your finals are, after the regular rounds. Options:")
+    for mode in scoring.FINALS_FORMATS:
+        lines.extend(_option_lines(mode, scoring.finals_detail(mode), pad=9))
+    if config.finals:
+        lines.append(f"finals = {toml_value(config.finals)}")
+    else:
+        lines.append(f"# finals = {toml_value(scoring.FINALS_PLACINGS)}"
+                     f"   # left off: no format, and nobody is placed")
     lines.append("# The shape of a match is read from your scorecards, so you only")
     lines.append("# need these to pin it down or to override what was read. Named")
     lines.append("# shapes:")
@@ -2647,7 +2769,7 @@ def render(config: Config, *, competitions: object = (),
     carried = [section for comp_id, section in config.competitions.items()
                if comp_id not in built]
     for section in carried:
-        lines.extend(_declared_section(section))
+        lines.extend(_declared_section(section, config.finals_for(section)))
 
     if not comps and not carried:
         # The advice here used to be "Add your PDFs and run build.py again", which
@@ -2878,7 +3000,7 @@ def _seasons_section(config: Config, comps) -> list[str]:
 def _competition_section(config: Config, comp, matches=(), *,
                          own: list[str] | tuple = ()) -> list[str]:
     from . import export as export_mod
-    from .competition import (Provenance, Round, is_finals_label,
+    from .competition import (Provenance, Round, is_finals_label, placing_weeks,
                               rounds_played_words)
     from .sheet import beyond_words
 
@@ -2940,22 +3062,31 @@ def _competition_section(config: Config, comp, matches=(), *,
     # run after it counts them, which has no draw to read a typed ``finals`` in.
     # The washouts are kept, as the rewrite keeps their table, so a round rained
     # off is counted played here as it is on the page (4.535).
-    after = replace(comp, rounds={number: Round(number=number,
-                                                is_finals=is_finals_label(number),
-                                                washed_out=rnd.washed_out,
-                                                washouts=rnd.washouts)
-                                  for number, rnd in comp.rounds.items()
-                                  if rnd.washed_out or rnd.washouts})
+    # And under placings the placing week by that run's rule, of the rounds it will
+    # have, the cards' and the washouts', and the length written, so a placing week
+    # with a fixture washed out is no regular round to it (4.537).
+    finals = config.finals_for(declared)
+    kept = declared.length_by_labels_for(finals) if declared else None
+    numbers = {m.round for m in matches} | {
+        number for number, rnd in comp.rounds.items() if rnd.washed_out or rnd.washouts}
+    weeks = placing_weeks(numbers, length=kept, finals=finals)
+    after = replace(comp, rounds={
+        number: Round(number=number,
+                      is_finals=is_finals_label(number) or number in weeks,
+                      washed_out=comp.rounds[number].washed_out
+                      if number in comp.rounds else False,
+                      washouts=comp.rounds[number].washouts
+                      if number in comp.rounds else ())
+        for number in numbers})
     played = len(after.rounds_played(matches))
     # Live whenever the club gave the length, in rounds_total or through its draw:
     # the draw is not written back, and the length it gave would go with it. Not a
     # length the draw gave that its cards have played past, which F3 stopped this
     # run for: written live, it would stop every run after, with the draw gone.
-    length = declared.season_length if declared else None
-    # Counted as the run after it counts rounds, since a typed ``finals`` goes too.
-    # Nor a length that run finds played past, by rounds with cards the draw does
-    # not list: it would stop on it as this run stops on the one above.
-    kept = declared.length_by_labels if declared else None
+    length = declared.season_length_for(finals) if declared else None
+    # Counted as the run after it counts rounds, since a typed ``finals`` goes too:
+    # ``kept``, above. Nor a length that run finds played past, by rounds with cards
+    # the draw does not list: it would stop on it as this run stops on the one above.
     past = kept is not None and declared.rounds_total is None and bool(
         replace(after, rounds_total=kept).rounds_past_length(matches))
     if kept is not None and not comp.draw_outgrown_by and not past:
@@ -3444,7 +3575,7 @@ def _table_lines(comp_id: str, name: str, entries: dict, *comment: str) -> list[
     return lines
 
 
-def _declared_section(declared: CompetitionConfig) -> list[str]:
+def _declared_section(declared: CompetitionConfig, finals: str = "") -> list[str]:
     """A section no card was filed under this run, written back as the club had it.
 
     Everything it declared but the draw, which ``--discover`` drops from every
@@ -3465,8 +3596,8 @@ def _declared_section(declared: CompetitionConfig) -> list[str]:
         lines.extend(_season_key_lines(declared.season_key))
     if declared.season:
         lines.append(f"season = {toml_value(declared.season)}")
-    if declared.length_by_labels is not None:
-        lines.append(f"rounds_total = {declared.length_by_labels}")
+    if declared.length_by_labels_for(finals) is not None:
+        lines.append(f"rounds_total = {declared.length_by_labels_for(finals)}")
     if declared.teams:
         lines.extend(toml_lines(f"teams = {toml_value(declared.teams)}", width=WIDTH))
     lines.extend(_rule_lines(declared))

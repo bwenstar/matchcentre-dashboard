@@ -56,6 +56,7 @@ uses](#scoring-presets-and-picking-yours).
 - [Reviewing config.toml](#reviewing-configtoml)
 - [Scoring presets, and picking yours](#scoring-presets-and-picking-yours)
 - [Byes, washouts and rounds nobody played](#byes-washouts-and-rounds-nobody-played)
+- [Finals, and placing matches after the season](#finals-and-placing-matches-after-the-season)
 - [Checking against your association's sheet](#checking-against-your-associations-sheet)
 - [Several seasons](#several-seasons)
 - [Sending somebody the dashboard](#sending-somebody-the-dashboard)
@@ -1105,6 +1106,61 @@ you. That is deliberate, and it is why the column can be compared against a
 published ladder digit for digit.
 
 ---
+
+## Finals, and placing matches after the season
+
+A finals round never earns ladder points. A round is a final when its label names
+one, in any of the spellings `config.example.toml` lists under `finals` (QF, SF,
+PF, GF, F, Final and others), or when a `[[competitions.<id>.rounds]]` block says
+`finals = true`. Its matches are still on the Matches page, and still count in
+each player's record.
+
+Some competitions end with a week of placing matches instead: 1st v 2nd, 3rd v
+4th, 5th v 6th and on down the final ladder. Say so once, under `[rules]` for
+every competition, or in one competition's section for that one:
+
+```toml
+[rules]
+finals = "placings"
+```
+
+Then:
+
+- The week of placing matches is a finals round, out of the ladder, however Match
+  Centre labels it: the first round numbered past `rounds_total` (round 11 of a
+  ten-round season, or 12 if the week was put back), a label that names a final,
+  or one that names a placing match, `Playoff`, `Playoffs` or `Placings`. Any other
+  name is a regular round, as it is without the setting. If your placing week has
+  one, set `finals = true` on it in a `[[competitions.<id>.rounds]]` block.
+- Once the regular season is over, the final ladder pairs the teams from the top.
+  In a grade with an odd number of teams the last plays nobody and keeps its
+  place.
+- Each placing match puts its winner in the higher of its two places. A draw, a
+  washout you declare under `[competitions.<id>.washouts]`, or a card ticked `Match
+  Cancelled`, leaves the higher place with the team placed higher on the ladder. A
+  card with no result places nobody, because results only ever come from the
+  cards.
+- The front page has a **Placings** table, the Matches page heads the week
+  **Placing matches**, each team's page says where it was placed, and the report
+  prints a `placings` line under the ladder.
+
+The regular season is over when every regular round has come, as many as
+`rounds_total` says, with every team on a card, a rest or a washout in each. A
+last round of nothing but blank cards is not taken as played, since cards
+exported before a night are blank. So the setting needs `rounds_total` and a
+confirmed `teams` list; without them it is reported as `placings-config`, and
+nobody is paired. Three warnings say why a card places nobody: `placing-early`
+(the regular season is not over yet), `placing-pair` (the final ladder does not
+pair those two teams, and the warning says who it does pair them with) and
+`placing-repeat` (the pair has a card in two finals rounds). A week read as the
+placings by its number alone whose cards the ladder pairs none of stops the run
+as `placing-week`: either `rounds_total` is a round short, and that week is the
+season's last, or the association paired the teams otherwise.
+
+Without the setting, a round numbered past `rounds_total` stops the run with F3,
+as a season played longer than declared, and F3 names the line to add if that
+round is a week of placing matches. `finals = "none"` plays the same as no line,
+and turns a `[rules]` setting off for one competition.
 
 ## Checking against your association's sheet
 
@@ -2922,6 +2978,18 @@ on a total: one team sits out every round, so unless your rules credit that bye
 every round but the ones where the byes have come out even, and only those name a
 leader. Ordered on the average, the same division names its leader every round
 but one whose team on top is level on the average with a team on another count.
+
+Once the regular season is over, the ladder is final, whatever its counts. Over
+means every regular round has come, as many as `rounds_total` says, and every team
+of your confirmed `teams` list is on a card, a rest or a washout in each. Under
+`unplayed = "zero"` a grade with a bye or a washout never has equal counts, so
+this is how a finished season stops saying in progress. The report says `ladder
+final: every regular round is in`, the F10 warning stands down, the page's pill
+says `final ladder` and the note under the ladder says `Final`, and the team on
+top is named, on a ladder ordered on a total too. A last round of nothing but
+blank cards is not taken as played, since cards exported before a night are
+blank. With no `rounds_total`, or no confirmed `teams` list, nothing can say the
+season is over, and the ladder stays in progress.
 
 Before any regular-season match has been counted, say the first round was washed
 out or the only card is a final, the ladder has not started. The report says

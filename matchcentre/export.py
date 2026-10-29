@@ -126,9 +126,13 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
     # unless its top row is level on it with a team on another count
     # (4.523).
     state = stats.ladder_state(ordered, competition)
-    top = stats.ladder_leader(team_rows, state, competition.rules)
+    # Whether the regular season is over, which makes the order the season's
+    # whatever its counts, and leads it with its top row (4.536).
+    final = stats.ladder_final(ordered, competition)
+    top = stats.ladder_leader(team_rows, state, competition.rules, final=final)
     # And why it is nobody, where the counts alone are not why.
-    level_top = stats.level_at_the_top(team_rows, state, competition.rules)
+    level_top = stats.level_at_the_top(team_rows, state, competition.rules,
+                                       final=final)
     # And the words the state is said in, played or counted, by what F10 compared,
     # for the same three and F10 (4.458).
     detail = stats.ladder_detail(stats.ladder_counts(ordered, competition),
@@ -169,16 +173,20 @@ def build_season(matches: Sequence[Match], *, competition: Competition,
                       regular_fixtures=_regular_fixtures(ordered, fixtures, totals,
                                                          competition),
                       ladder_state=state, ladder_detail=detail,
+                      ladder_final=final,
                       leader=({"slug": top.slug, "value": top.points_average}
                               if top else None),
                       ordered_on_average=stats.ordered_on_the_average(
                           competition.rules),
                       order_stands=stats.order_stands(team_rows, state,
-                                                      competition.rules),
+                                                      competition.rules,
+                                                      final=final),
                       leader_withheld=(stats.LEVEL_AT_THE_TOP if level_top
                                        else None),
                       matches_played=_matches_played(ordered, totals)),
         "teams": [_plain(team_rows[slug]) for slug in sorted(team_rows)],
+        "placings": _placings(stats.placings(ordered, competition, team_rows),
+                              keys),
         "players": _players(player_rows, competition, club),
         "matches": [_match(m, competition, key=key, not_counted=reason,
                            not_credited=credit, not_totalled=total,
@@ -285,6 +293,7 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
           seasons_mode: str, length_refused: bool = False,
           regular_fixtures: dict, ladder_state: str, ladder_detail: str,
           leader: dict | None, ordered_on_average: bool,
+          ladder_final: bool = False,
           order_stands: bool, leader_withheld: str | None,
           matches_played: int) -> dict:
     played = stats.rounds_present(matches, competition.rounds)
@@ -360,6 +369,13 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         # credited, so that no page says played of counts that are not (4.458).
         "ladder_detail": ladder_detail,
         "ladder_complete": ladder_state == "complete",
+        # Whether the regular season is over on the cards (`stats.ladder_final`):
+        # every round in, as many as `rounds_total`, nothing of any of them still
+        # to come. Its order is then the one the season ends on, whatever the
+        # counts, which a grade with a bye or a washout under unplayed = "zero"
+        # never has equal, so `order_stands` is true and `leader` is its top row,
+        # and the pages call it final where they called it in progress (4.536).
+        "ladder_final": ladder_final,
         "leader": leader,
         # Why `leader` is null where the counts are not why, as a clause the
         # front page and the overview's hero both give: "the teams on top are
@@ -394,6 +410,38 @@ def _meta(matches: Sequence[Match], *, competition: Competition,
         # document is a TypeError from json.dumps at the moment of writing -- after
         # the whole run has already been done.
         "source_dir": str(source_dir),
+    }
+
+
+def _placings(placed: stats.Placings | None, keys: Sequence[str]) -> dict | None:
+    """``stats.placings`` as the document carries it, or null with no format (4.537).
+
+    ``set`` is whether the pairs are, which they are once the regular season is
+    over, and ``waiting`` why not, in the words F10 and the report say it in.
+    Each match names its two places, its teams by slug, ``higher`` the team placed
+    higher on the final ladder, and what decided it, one of
+    ``stats.PLACING_OUTCOMES``; ``first`` and ``second`` are who took the two
+    places, null while nobody has; ``key`` is the card that decided it, null for
+    none, and ``rounds`` the finals rounds its cards are in. ``unpaired`` is the
+    team an odd number leaves without a match, at the place it keeps. ``strays``
+    are the keys of the finals cards no placing match is played by.
+    """
+    if placed is None:
+        return None
+    return {
+        "format": "placings",
+        "set": not placed.waiting,
+        "waiting": placed.waiting,
+        "after": placed.after,
+        "matches": [{"places": list(match.places), "higher": match.higher,
+                     "lower": match.lower, "outcome": match.outcome,
+                     "first": match.first, "second": match.second,
+                     "key": None if match.card is None else keys[match.card],
+                     "rounds": list(match.rounds)}
+                    for match in placed.matches],
+        "unpaired": (None if placed.unpaired is None else
+                     {"place": placed.unpaired[0], "slug": placed.unpaired[1]}),
+        "strays": [keys[i] for i in placed.strays],
     }
 
 

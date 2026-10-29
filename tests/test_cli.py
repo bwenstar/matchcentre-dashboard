@@ -67,6 +67,7 @@ from matchcentre.competition import (Club, Competition, Provenance,  # noqa: E40
                                      merge_provenance)
 from matchcentre.model import SetStatus                             # noqa: E402
 from matchcentre import sheet as sheet_mod                          # noqa: E402
+from matchcentre import scope as scope_mod                          # noqa: E402
 from test_pipeline import (DATES, EXPECTED_LADDER, FIXTURES,        # noqa: E402
                            SHORT_OF_RESULT_DATES, TEAMS, Swap,
                            offered_corrections, offered_lines, rows_for,
@@ -11907,7 +11908,7 @@ class TestAPlaceOnTheLadderIsPrintedTheWayItIsSaid(unittest.TestCase):
     """
 
     def test_a_place_in_the_teens_takes_th_and_not_the_suffix_of_its_last_digit(self):
-        got = {place: changes_mod._ordinal(place) for place in (11, 12, 13)}
+        got = {place: scope_mod.ordinal(place) for place in (11, 12, 13)}
         self.assertEqual(got, {11: "11th", 12: "12th", 13: "13th"})
 
     def test_the_first_three_places_and_the_twenties_take_their_own_suffix(self):
@@ -11916,7 +11917,7 @@ class TestAPlaceOnTheLadderIsPrintedTheWayItIsSaid(unittest.TestCase):
         Both ends, because a fix for ``11st`` that reached one place too far would
         print ``21th`` and nothing above would fail.
         """
-        got = tuple(changes_mod._ordinal(place)
+        got = tuple(scope_mod.ordinal(place)
                     for place in (1, 2, 3, 4, 10, 21, 22, 23, 24))
         self.assertEqual(got, ("1st", "2nd", "3rd", "4th", "10th",
                                "21st", "22nd", "23rd", "24th"))
@@ -25878,7 +25879,10 @@ class TestTheDrawReadFromTheCardsIsOfferedForTheReportOnly(ShortOfResultCase):
         uncommented = "\n".join(line[2:] if line.startswith("# ") else line
                                 for line in self.written.splitlines())
         self.assertNotRegex(uncommented, r"(?m)^\[\[competitions\..*\.rounds\]\]\s*$")
-        self.assertNotRegex(uncommented, r"(?m)^(number|date|fixtures|bye|finals) = ")
+        # 4.537 moved this: [rules] has a finals of its own, the format, and a
+        # format is no draw, so the keys of a round are looked for past [rules].
+        past_rules = re.sub(r"(?ms)^\[rules\]\n.*?(?=^\[)", "", uncommented)
+        self.assertNotRegex(past_rules, r"(?m)^(number|date|fixtures|bye|finals) = ")
         # It still says the draw can be declared, and where a worked one is.
         self.assertIn("[[competitions.wednesday-division-3.rounds]]", self.written)
         self.assertIn("config.example.toml", self.written)
@@ -28979,6 +28983,137 @@ class TestTheSameNightOrderedOnPointsNamesNobody(CliCase):
             f"parkview-wanderers and riverside-rockets have fewer than the 3 "
             f"counted by the rest.",
             flat("\n".join(printed_finding(self, self.run_.out, "F10"))))
+
+
+
+# The six teams of test_pipeline's placings season, by slug (4.537).
+PLACED_SLUGS = ("hilltop-aces", "riverside-rockets", "lakeside-spinners",
+                "westfield-hawks", "eastwood-bears", "northside-nets")
+
+
+class TestThePlacingsAreSaidAsTheReportSaysThem(unittest.TestCase):
+    """4.537: ``build._placings_words`` of a document, every outcome and the rest."""
+
+    def words(self, matches=(), unpaired=None, waiting=""):
+        teams = [{"slug": slug, "name": slug.replace("-", " ").title()}
+                 for slug in PLACED_SLUGS]
+        return build_mod._placings_words({"teams": teams, "placings": {
+            "set": not waiting, "waiting": waiting, "after": "5",
+            "matches": list(matches), "unpaired": unpaired}})
+
+    def match(self, at, outcome, first=None, rounds=("6",)):
+        higher, lower = PLACED_SLUGS[2 * at], PLACED_SLUGS[2 * at + 1]
+        second = None if first is None else lower if first == higher else higher
+        return {"places": [2 * at + 1, 2 * at + 2], "higher": higher, "lower": lower,
+                "outcome": outcome, "first": first, "second": second,
+                "rounds": list(rounds)}
+
+    def test_each_outcome(self):
+        for outcome, first, said in (
+                ("won", "riverside-rockets", "won by Riverside Rockets"),
+                ("drawn", "hilltop-aces",
+                 "drawn, so Hilltop Aces takes 1st, placed higher"),
+                ("washed-out", "hilltop-aces",
+                 "washed out, so Hilltop Aces takes 1st, placed higher"),
+                ("cancelled", "hilltop-aces",
+                 "called off, so Hilltop Aces takes 1st, placed higher"),
+                ("no-result", None, "no result on its card, so nobody is placed"),
+                ("conflict", None, "two cards that disagree, so nobody is placed"),
+                ("to-play", None, "to play")):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(self.words([self.match(0, outcome, first)]),
+                                 f"1st v 2nd: Hilltop Aces v Riverside Rockets, {said}")
+
+    def test_a_repeat_names_its_rounds(self):
+        self.assertEqual(
+            self.words([self.match(0, "repeat", rounds=("6", "Final"))]),
+            "1st v 2nd: Hilltop Aces v Riverside Rockets, a card in each of rounds "
+            "6 and Final, so nobody is placed")
+
+    def test_the_team_left_unpaired_comes_last(self):
+        self.assertEqual(
+            self.words([self.match(0, "won", "hilltop-aces")],
+                       unpaired={"place": 3, "slug": "lakeside-spinners"}),
+            "1st v 2nd: Hilltop Aces v Riverside Rockets, won by Hilltop Aces; 3rd: "
+            "Lakeside Spinners, no match")
+
+    def test_before_the_pairs_are_set_it_says_what_they_wait_on(self):
+        self.assertEqual(self.words(waiting="4 of 5 rounds played"),
+                         "paired once the regular season is over: 4 of 5 rounds "
+                         "played")
+
+    def test_no_format_is_no_line(self):
+        self.assertEqual(build_mod._placings_words({"teams": [], "placings": None}), "")
+
+
+class TestForceSaysWhatMovesOfAPlacingWeekAsTheRunAfterReadsIt(unittest.TestCase):
+    """4.537, its review: rounds 1 to 5 and round 6 typed a final, no rounds_total.
+
+    Under placings the run after ``--force`` reads round 6 as the placing week, by its
+    number past the five rounds written, so nothing moves and the length is five.
+    It said round 6 ``is scored in the ladder as a regular round, not as the final
+    you declared`` of a round still a final after the rewrite (the review's
+    probe08). With no format the labels alone decide, and round 6 does move.
+    """
+
+    def said(self, finals: str) -> str:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                (f'[rules]\nfinals = "{finals}"\n\n' if finals else "")
+                + '[competitions.tue-c]\nday = "Tuesday"\ndivision = "C"\n\n'
+                + "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                          for n in "12345")
+                + '[[competitions.tue-c.rounds]]\nnumber = "6"\nfinals = true\n',
+                encoding="utf-8")
+            return " ".join(build_mod._what_force_drops(
+                config_mod.load(path)).split())
+
+    def test_under_placings_nothing_moves_and_five_is_written(self):
+        said = self.said("placings")
+        self.assertNotIn("round 6 of tue-c", said)
+        self.assertNotIn("rounds_total =", said)
+
+    def test_with_no_format_round_6_moves_and_six_is_written(self):
+        said = self.said("")
+        self.assertIn("round 6 of tue-c is scored in the ladder as a regular round, "
+                      "not as the final you declared", said)
+        self.assertIn("rounds_total = 6 is written for tue-c where your draw gave "
+                      "it 5 rounds", said)
+
+    def test_a_playoff_typed_nothing_moves_under_placings(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[rules]\nfinals = "placings"\n\n'
+                '[competitions.tue-c]\nday = "Tuesday"\ndivision = "C"\n\n'
+                + "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n\n'
+                          for n in ("1", "2", "3", "Playoff")), encoding="utf-8")
+            said = " ".join(build_mod._what_force_drops(
+                config_mod.load(path)).split())
+        self.assertNotIn("round Playoff of tue-c", said)
+
+    def test_a_round_that_moves_is_said_with_the_lengths_under_placings(self):
+        # Round 3 typed a final mid-draw is no placing week, and moves; the lengths
+        # either side leave the Playoff out, as the two runs both read it.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[rules]\nfinals = "placings"\n\n'
+                '[competitions.tue-c]\nday = "Tuesday"\ndivision = "C"\n\n'
+                + "".join(f'[[competitions.tue-c.rounds]]\nnumber = "{n}"\n'
+                          + ("finals = true\n" if n == "3" else "") + "\n"
+                          for n in ("1", "2", "3", "4", "5", "Playoff")),
+                encoding="utf-8")
+            said = " ".join(build_mod._what_force_drops(
+                config_mod.load(path)).split())
+        self.assertIn("round 3 of tue-c is scored in the ladder as a regular round, "
+                      "not as the final you declared", said)
+        self.assertIn("rounds_total = 5 is written for tue-c where your draw gave it "
+                      "4 rounds", said)
 
 
 if __name__ == "__main__":

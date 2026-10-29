@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 __all__ = ["Scope", "EVERY_SEASON", "in_words", "in_words_capped", "choices",
-           "echoed"]
+           "echoed", "ordinal"]
 
 
 def in_words(items: Iterable[object], conjunction: str = "and") -> str:
@@ -105,6 +105,18 @@ def echoed(value: object, *, quoted: bool = False) -> str:
         shown = repr(text[:_HEAD])
         return f"{shown[:-1]}...{shown[-1]} ({len(text)} characters)"
     return f"{text[:_HEAD]}... ({len(text)} characters)"
+
+
+def ordinal(place: int) -> str:
+    """``1st``, ``2nd``, ``3rd``, ``4th``, ``11th``, ``21st``.
+
+    A place in words, which the change list prints of a team that moved and the
+    placings of a placing match (4.537); the dashboard's ladder is a table whose
+    first column is a number, and a number in a column needs no suffix. A division
+    of twenty-four teams is the case the ``11th`` line is for.
+    """
+    suffix = {1: "st", 2: "nd", 3: "rd"}.get(place % 10, "th")
+    return f"{place}{'th' if place % 100 in (11, 12, 13) else suffix}"
 
 
 @dataclass(frozen=True, slots=True)

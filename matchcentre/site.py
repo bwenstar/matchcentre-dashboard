@@ -1833,6 +1833,10 @@ def _entry(comp: Competition | None, season: dict | None, comp_id: str, *,
         # average with a team on another count (4.523). Empty from an earlier
         # release, whose card says the state as it did.
         "leader_withheld": meta.get("leader_withheld") or "",
+        # Whether the regular season is over (4.536), and who the placings put
+        # first once they have (4.537): the card says those in place of a lead.
+        "ladder_final": meta.get("ladder_final", False),
+        "placed_first": _placed_first(season),
         "draw_source": meta.get("draw_source", ""),
         # The competition's own errors. Its refused cards are `rejected` below,
         # and flagged once as cards that could not be read.
@@ -1980,6 +1984,21 @@ def _href(comp_id: str, meta: dict, *, multi: bool) -> str:
     """
     key = meta.get("season_key", "") if multi else ""
     return f"{key}/{comp_id}/index.html" if key else f"{comp_id}/index.html"
+
+
+def _placed_first(season: dict | None) -> str:
+    """The team the placings put 1st, by the name the card prints, or ``""`` (4.537).
+
+    Only once the top placing match has placed somebody: before it, the ladder's
+    top row leads, and the card says so.
+    """
+    placed = (season or {}).get("placings") or {}
+    first = next((match["first"] for match in placed.get("matches", ())
+                  if match["places"][0] == 1), None)
+    if not first:
+        return ""
+    row = next((t for t in season["teams"] if t["slug"] == first), None)
+    return (row["short"] or row["name"]) if row else first
 
 
 def _leader(season: dict | None) -> dict | None:
@@ -2136,9 +2155,16 @@ def _card_html(entry: dict) -> str:
                      f'<span style="width:{entry["percent"]}%"></span></span>')
 
     leader = entry["leader"]
-    if leader:
+    if entry["placed_first"]:
+        # The placings decide 1st where the format is played (4.537).
         lines.append('        <span class="pick-lead"><strong>'
-                     f'{html.escape(str(leader["name"]))}</strong> lead on '
+                     f'{html.escape(entry["placed_first"])}</strong> placed 1st'
+                     '</span>')
+    elif leader:
+        # Over once every regular round is in, whatever the counts (4.536).
+        verb = "top the final ladder on" if entry["ladder_final"] else "lead on"
+        lines.append('        <span class="pick-lead"><strong>'
+                     f'{html.escape(str(leader["name"]))}</strong> {verb} '
                      f'{leader["value"]:.2f}</span>')
     elif entry["ladder_state"] == "empty":
         # Not "unequal numbers", which every team on nothing is not (4.428).

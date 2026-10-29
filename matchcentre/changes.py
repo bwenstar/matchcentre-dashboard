@@ -37,6 +37,7 @@ from typing import NamedTuple
 
 from .competition import Round, fixture_sort_key
 from .discover import inside
+from .scope import ordinal
 from .stats import ladder_state_of
 
 # The order the kinds are printed in, and the order they happened in as far as a
@@ -270,7 +271,7 @@ def _places(old: Mapping, new: Mapping) -> list[Change]:
         if was is None or was[0] == place:
             continue
         said.append(Change("ladder",
-                           f"{name} {_ordinal(was[0])} -> {_ordinal(place)}"))
+                           f"{name} {ordinal(was[0])} -> {ordinal(place)}"))
     return said
 
 
@@ -302,18 +303,6 @@ def _positions(document: Mapping) -> dict[str, tuple[int, str]]:
                                    str(row.get("name") or row.get("slug")))
             for row in rows
             if isinstance(row, Mapping) and _is_number(row.get("position"))}
-
-
-def _ordinal(place: int) -> str:
-    """``1st``, ``2nd``, ``3rd``, ``4th``, ``11th``, ``21st``.
-
-    Written here because nothing else in this project prints a place in words: the
-    dashboard's ladder is a table whose first column is a number, and a number in
-    a column needs no suffix. A division of twenty-four teams is the case the
-    ``11th`` line is for.
-    """
-    suffix = {1: "st", 2: "nd", 3: "rd"}.get(place % 10, "th")
-    return f"{place}{'th' if place % 100 in (11, 12, 13) else suffix}"
 
 
 # --- figures off disk -------------------------------------------------------

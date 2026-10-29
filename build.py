@@ -88,7 +88,7 @@ from matchcentre import stats as stats_mod                    # noqa: E402
 from matchcentre import status as status_mod                  # noqa: E402
 from matchcentre.competition import (Competition,             # noqa: E402
                                      CompetitionError, Provenance,
-                                     is_finals_label, rounds_played_words)
+                                     rounds_played_words)
 # The report's width, its fill and the parser every command refuses its
 # arguments with, in the package so that the tools share them without
 # loading the builder.
@@ -97,6 +97,7 @@ from matchcentre.config import ConfigError                    # noqa: E402
 from matchcentre.discover import DiscoveryError               # noqa: E402
 from matchcentre.format import FormatError                    # noqa: E402
 from matchcentre.scope import EVERY_SEASON, Scope, echoed, in_words  # noqa: E402
+from matchcentre.scope import ordinal                        # noqa: E402
 from matchcentre.scope import in_words_capped                # noqa: E402
 from matchcentre.scoring import ScoringError                  # noqa: E402
 from matchcentre.site import SiteError                        # noqa: E402
@@ -1806,6 +1807,48 @@ def _washed_out(season: dict) -> str:
     return "; ".join(parts)
 
 
+# What decided a placing match, as the report says it after the pair (4.537):
+# "{first}" and "{place}" are the team that took the higher place and the place.
+_PLACING_WORDS = {
+    "won": "won by {first}",
+    "drawn": "drawn, so {first} takes {place}, placed higher",
+    "washed-out": "washed out, so {first} takes {place}, placed higher",
+    "cancelled": "called off, so {first} takes {place}, placed higher",
+    "no-result": "no result on its card, so nobody is placed",
+    "repeat": "a card in each of {rounds}, so nobody is placed",
+    "conflict": "two cards that disagree, so nobody is placed",
+    "to-play": "to play",
+}
+
+
+def _placings_words(season: dict) -> str:
+    """The placing matches as the report says them, or ``""`` with no format (4.537).
+
+    ``1st v 2nd: Hilltop Aces v Riverside Rockets, won by Hilltop Aces; 5th:
+    Eastwood Bears, no match``, top down, read off the document as the page reads
+    it; and before the pairs are set, when they will be and what they wait on.
+    """
+    placed = season.get("placings")
+    if not placed:
+        return ""
+    if not placed["set"]:
+        return f"paired once the regular season is over: {placed['waiting']}"
+    names = {team["slug"]: team["name"] for team in season["teams"]}
+    parts = []
+    for match in placed["matches"]:
+        first = match["first"]
+        said = _PLACING_WORDS[match["outcome"]].format(
+            first=names.get(first, first), place=ordinal(match["places"][0]),
+            rounds=sheet_mod.rounds_listed(match["rounds"]))
+        parts.append(f"{ordinal(match['places'][0])} v "
+                     f"{ordinal(match['places'][1])}: "
+                     f"{names[match['higher']]} v {names[match['lower']]}, {said}")
+    if placed["unpaired"]:
+        alone = placed["unpaired"]
+        parts.append(f"{ordinal(alone['place'])}: {names[alone['slug']]}, no match")
+    return "; ".join(parts)
+
+
 def _competition_section(report: _Report, season: dict, *,
                          sheet: sheet_mod.Comparison | None = None,
                          anonymised: anonymise_mod.Anonymised | None = None
@@ -1847,8 +1890,12 @@ def _competition_section(report: _Report, season: dict, *,
         report.sentence("washed out", washed)
     report.field("draw", f"{meta['draw_source']} ({prov['draw']})")
     # The state's words are the document's, as F10's and the pages' are: played
-    # where every team's counted is its P, and counted where not (4.458).
-    if meta["ladder_state"] == "complete":
+    # where every team's counted is its P, and counted where not (4.458). Final
+    # first, whatever the counts: the regular season is over (4.536).
+    if meta.get("ladder_final"):
+        report.field("ladder", f"final: every regular round is in, and "
+                               f"{meta['ladder_detail']}")
+    elif meta["ladder_state"] == "complete":
         report.field("ladder", f"complete: {meta['ladder_detail']}")
     elif meta["ladder_state"] == "empty":
         # Every team on nothing is no unequal numbers, and nobody is placed (4.428).
@@ -1856,6 +1903,11 @@ def _competition_section(report: _Report, season: dict, *,
     else:
         report.field("ladder", f"in progress: {meta['ladder_detail']}")
     _ladder(report, season)
+    placed = _placings_words(season)
+    if placed:
+        # Under the table it pairs, so the places read against the ladder (4.537).
+        report.line()
+        report.sentence("placings", placed)
     _sheet_sentence(report, sheet, {t["slug"]: t["name"] for t in season["teams"]})
 
     # The competition's own errors, and the refused cards apart from them: every
@@ -2327,9 +2379,16 @@ def _what_force_drops(cfg: config_mod.Config) -> str:
     moved: dict[bool, list[str]] = {True: [], False: []}
     shifted = set()
     for comp_id, section in cfg.competitions.items():
+        # What the run after reads, by the labels and under placings the placing
+        # week's rule, against what this run reads, by the typed flags and the same
+        # rule over this run's length (4.537).
+        finals = cfg.finals_for(section)
+        after = section.finals_after_force(finals)
+        read = section.finals_now(finals)
         for rnd in section.rounds:
-            if rnd.is_finals != is_finals_label(rnd.number):
-                moved[rnd.is_finals].append(f"round {echoed(rnd.number)} of {comp_id}")
+            now = rnd.number in read
+            if now != (rnd.number in after):
+                moved[now].append(f"round {echoed(rnd.number)} of {comp_id}")
                 shifted.add(comp_id)
     turned = []
     for typed, said in (
@@ -2344,7 +2403,9 @@ def _what_force_drops(cfg: config_mod.Config) -> str:
                           f"{said[len(moved[typed]) > 1]} you declared")
     lengths = []
     for comp_id, section in cfg.competitions.items():
-        was, now = section.season_length, section.length_by_labels
+        finals = cfg.finals_for(section)
+        was = section.season_length_for(finals)
+        now = section.length_by_labels_for(finals)
         if comp_id in shifted and section.rounds_total is None:
             gave = ("no length" if was is None
                     else f"{was} round{'' if was == 1 else 's'}")

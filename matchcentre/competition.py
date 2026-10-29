@@ -25,7 +25,7 @@ from enum import Enum
 
 from .format import MatchFormat
 from .model import NO_OPPONENT, Match
-from .scoring import Ruleset
+from .scoring import FINALS_PLACINGS, Ruleset
 from .slugs import slugify
 
 __all__ = ["Provenance", "Player", "Team", "Round", "Competition", "Club",
@@ -246,6 +246,11 @@ class Competition:
     ``strangers`` is the display name of each team the cards name that a declared
     team list lacks, which is no team of the competition, and so for the config
     writer to offer in the list behind a #.
+
+    ``finals`` is the club's ``[rules] finals`` as declared, ``"placings"``,
+    ``"none"`` or ``""`` for nothing said (4.537): under placings a round numbered
+    past the season's length, or named a placing match, is a finals round, the week
+    the placing matches are played in (:meth:`placing_week`).
     """
 
     id: str
@@ -272,6 +277,7 @@ class Competition:
     source: str = ""
     fill_in_names: dict[str, str] = field(default_factory=dict)
     strangers: tuple[str, ...] = ()
+    finals: str = ""
 
     # --- naming ---------------------------------------------------------
 
@@ -326,13 +332,28 @@ class Competition:
 
         Numeric means regular, always: promoting round 10 to a final because a
         club calls it one would silently drop a real round out of the ladder.
+        Except past the season under a finals format the club declared
+        (:meth:`placing_week`), where a number is no regular round: the
+        season's length says so, and F3 would refuse it as one (4.537).
         """
         if not number:
             return False
         rnd = self.rounds.get(number)
         if rnd is not None:
             return rnd.is_finals
-        return is_finals_label(number)
+        return is_finals_label(number) or self.placing_week(number)
+
+    def placing_week(self, number: str) -> bool:
+        """Whether round *number* is the week of placing matches, by the labels alone.
+
+        Under ``[rules] finals = "placings"`` the week after the regular rounds is
+        the placing matches, and Match Centre may well number it on, ``11`` after a
+        ten-round season, or name it ``Playoff`` or ``Placings``. Such a round is a
+        finals round, as one labelled ``Final`` is (4.537): :func:`placing_weeks`
+        says which, of this competition's rounds and *number*.
+        """
+        return number in placing_weeks({*self.rounds, number},
+                                       length=self.rounds_total, finals=self.finals)
 
     def finals_advice(self, setting: str, purpose: str) -> str:
         """The sentence that sends a club to a round's ``finals``, for every sender.
@@ -842,6 +863,71 @@ def season_order_key(key: str) -> tuple[tuple[tuple[int, int, str], ...], str]:
 def is_finals_label(number: str) -> bool:
     """Public form of the finals test, for the parser and validator."""
     return _looks_final(number)
+
+
+# The words a label names a placing match by, under a finals format (4.537), at
+# either end of its letters as _finals_word leaves them, a plural as its
+# singular: "Playoff", "Playoffs", "Placings", and in a draw typed in,
+# "Playoff 3v4", "3rd/4th Playoff" or "Positional Playoffs". A card's round is
+# read to its first space, so a card prints only a one-word label whole.
+_PLACING_WORDS = ("playoff", "placing")
+
+
+def names_placing(number: str, finals: str) -> bool:
+    """Whether label *number* names a placing match under *finals* (4.537).
+
+    Under ``finals = "placings"`` only, and a name, not a number: one that names a
+    placing match at either end, or ends in a final, since ``3rd v 4th Final``
+    names a final under placings that names none alone. At an end of the label
+    and not anywhere in it, and a final at its end alone: ``Final Round`` can be a
+    season's last regular round, and ``Replacing round 9`` is a catch-up.
+    """
+    if finals != FINALS_PLACINGS or not number or round_number(number) is not None:
+        return False
+    word = _finals_word(number)
+    word = word[:-1] if word.endswith("s") else word
+    return word.endswith("final") or any(
+        word.startswith(placing) or word.endswith(placing)
+        for placing in _PLACING_WORDS)
+
+
+def placing_weeks(numbers: Iterable[str], *, length: int | None,
+                  finals: str) -> frozenset[str]:
+    """Which of the round labels *numbers* are the week of placing matches (4.537).
+
+    Under ``finals = "placings"`` only: every label that names a placing match
+    (:func:`names_placing`), and the first week numbered past the season's
+    *length*, however it is printed (``6``, ``06``). One week, because placings
+    are a week: a number past it is a round of a season longer than the club
+    said, which F3 refuses, as it would with no format, rather than another final
+    a typo in ``rounds_total`` drops out of the ladder. A number only with a length
+    the club gave, in ``rounds_total`` or by its draw: a length read off the cards
+    ends at the latest round, and would make every round after it a final.
+    Discovery marks the rounds it builds by this, and the competition asks it of
+    its rounds, so the two cannot differ.
+
+    Rejected: the week after the length alone, which leaves a placing week moved
+    on a week, ``12`` after a season of ten, scored as a twelfth round; every
+    number past it, which put rounds 5 and 6 of a season typed four rounds long
+    out of the ladder with exit 0; and every name after the numbers, which scores
+    a catch-up played after the last round out of the ladder it was played for
+    (4.37).
+    """
+    if finals != FINALS_PLACINGS:
+        return frozenset()
+    labels = {number for number in numbers if number}
+    weeks = sorted({week for number in labels
+                    if (week := round_number(number)) is not None
+                    and length is not None and week > length})
+    return frozenset(number for number in labels
+                     if names_placing(number, finals)
+                     or (weeks and round_number(number) == weeks[0]))
+
+
+def placing_week(number: str, *, length: int | None, finals: str) -> bool:
+    """Whether label *number*, on its own, is the placing week: :func:`placing_weeks`
+    of the one label, so a number past *length* is."""
+    return number in placing_weeks((number,), length=length, finals=finals)
 
 
 def rounds_played_words(count: int, total: int | None = None) -> str:
