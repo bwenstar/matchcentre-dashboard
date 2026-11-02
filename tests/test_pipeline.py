@@ -15,6 +15,7 @@ that the code agrees with itself.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import itertools
 import json
@@ -25362,7 +25363,7 @@ def write_placings_season(root: Path, *, config: str, teams: int = 6,
                           results: dict | None = None,
                           carded: dict | None = None,
                           blank: dict | None = None,
-                          skip: tuple = ()) -> Path:
+                          skip: tuple = (), bare: bool = False) -> Path:
     """The placings season into ``root/data``, and *config* as ``root/config.toml``.
 
     The first *teams* of SIX_NAMES: with five, the fixtures of the sixth are not
@@ -25373,8 +25374,10 @@ def write_placings_season(root: Path, *, config: str, teams: int = 6,
     first, each ``(home, away)`` under *label* or ``(label, home, away)``, played as
     ``results[index]`` says: ``home`` by default, ``away``, ``draw`` (20-20 on games
     and 2-2 on sets), ``cancelled`` (Match Cancelled), ``blank``, ``short`` (two
-    rubbers played and no result) or ``forfeit`` (the home side forfeits).
-    Fictional, from cardwriter.
+    rubbers played and no result) or ``forfeit`` (the home side forfeits). With
+    *bare*, the placing week's cards print their round as Match Centre prints a
+    final's, in the round's place with no ``Round`` before it (4.542). Fictional,
+    from cardwriter.
     """
     data = root / "data"
     carded = carded or {}
@@ -25382,7 +25385,7 @@ def write_placings_season(root: Path, *, config: str, teams: int = 6,
     results = results or {}
     index = 0
 
-    def write(number, date, home, away, how):
+    def write(number, date, home, away, how, printed=None):
         nonlocal index
         index += 1
         folder = data / f"R{number}"
@@ -25390,6 +25393,12 @@ def write_placings_season(root: Path, *, config: str, teams: int = 6,
         hn, an = SIX_NAMES[home], SIX_NAMES[away]
         hp, ap = SIX_TEAMS[hn], SIX_TEAMS[an]
         still = how in ("cancelled", "blank", "short")
+        line = (mock.patch.object(cw, "_identity_line", printed) if printed
+                else contextlib.nullcontext())
+        with line:
+            write_card(folder, index, number, date, hn, an, hp, ap, how, still)
+
+    def write_card(folder, index, number, date, hn, an, hp, ap, how, still):
         cw.write_card_file(folder / f"{index}.pdf", cw.CardSpec(
             date=date, round_label=number, division="C", court=f"{index:02d}",
             match_id=f"810{index:04d}", home_name=hn, away_name=an,
@@ -25409,9 +25418,14 @@ def write_placings_season(root: Path, *, config: str, teams: int = 6,
             if (number, home, away) not in skip:
                 write(number, WASHOUT_DATES[number], home, away,
                       "blank" if k < blank.get(number, 0) else "home")
+    def as_match_centre(spec):
+        return (f"Division {spec.division} / {spec.ball} / {spec.round_label} / "
+                f"#{spec.match_id}")
+
     for k, pair in enumerate(pairs):
         number, home, away = pair if len(pair) == 3 else (label, *pair)
-        write(number, PLACING_DATE, home, away, results.get(k, "home"))
+        write(number, PLACING_DATE, home, away, results.get(k, "home"),
+              printed=as_match_centre if bare else None)
     (root / "config.toml").write_text(config, encoding="utf-8")
     return data
 
@@ -25465,6 +25479,7 @@ class PlacingsSeasonCase(unittest.TestCase):
     BLANK: dict = {}
     SKIP: tuple = ()
     LENGTH = 5
+    BARE = False
 
     @classmethod
     def setUpClass(cls):
@@ -25473,6 +25488,7 @@ class PlacingsSeasonCase(unittest.TestCase):
         data = write_placings_season(
             root, teams=cls.TEAMS, label=cls.LABEL, pairs=cls.PAIRS,
             results=cls.RESULTS, carded=cls.CARDED, blank=cls.BLANK, skip=cls.SKIP,
+            bare=cls.BARE,
             config=placings_config(finals=cls.FINALS, where=cls.WHERE,
                                    total=cls.TOTAL, teams=cls.TEAMS,
                                    listed=cls.LISTED, rules=cls.RULES,
@@ -26844,6 +26860,34 @@ class TestAPlacingWeekDeclaredAheadIsNoRoundTheSeasonWaitsOn(PlacingsSeasonCase)
     def test_final_and_every_pair_to_play(self):
         self.assertTrue(self.season["meta"]["ladder_final"])
         self.assertEqual([m[1] for m in self.placed()], ["to-play"] * 3)
+
+
+class TestAPlacingWeekPrintedAsMatchCentrePrintsItIsRead(PlacingsSeasonCase):
+    """4.542: the placing week on cards printing ``GF[1]`` in the round's place.
+
+    Match Centre prints a finals card's identity line ``Division C / Yellow Ball /
+    GF[1] / #…``, the three placing matches ``GF[1]``, ``GF[2]`` and ``GF[3]``, with
+    no word before the round. Measured on the owner's finals: all 27 cards refused,
+    exit 1, every placing match to play. Each is now its own finals round, by its
+    label, and the placings are its cards'.
+    """
+
+    PAIRS = (("GF[1]", 0, 1), ("GF[2]", 2, 3), ("GF[3]", 4, 5))
+    BARE = True
+
+    def test_every_card_is_read_and_nothing_stops_the_run(self):
+        self.assertEqual(self.rejected, [])
+        self.assertEqual([i.rule for i in self.report.errors], [])
+        self.assertEqual([r["number"] for r in self.season["rounds"]
+                          if r["is_finals"]], ["GF[1]", "GF[2]", "GF[3]"])
+
+    def test_each_placing_match_is_placed_by_its_card(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "riverside-rockets"),
+            ((3, 4), "won", "lakeside-spinners", "westfield-hawks"),
+            ((5, 6), "won", "eastwood-bears", "northside-nets")])
+        self.assertEqual([m["rounds"] for m in self.season["placings"]["matches"]],
+                         [["GF[1]"], ["GF[2]"], ["GF[3]"]])
 
 
 if __name__ == "__main__":

@@ -1126,12 +1126,16 @@ finals = "placings"
 
 Then:
 
-- The week of placing matches is a finals round, out of the ladder, however Match
-  Centre labels it: the first round numbered past `rounds_total` (round 11 of a
-  ten-round season, or 12 if the week was put back), a label that names a final,
-  or one that names a placing match, `Playoff`, `Playoffs` or `Placings`. Any other
-  name is a regular round, as it is without the setting. If your placing week has
-  one, set `finals = true` on it in a `[[competitions.<id>.rounds]]` block.
+- The week of placing matches is a finals round, out of the ladder, however
+  Match Centre labels it: the first round numbered past `rounds_total` (round 11
+  of a ten-round season, or 12 if the week was put back), a label that names a
+  final, or one that names a placing match, `Playoff`, `Playoffs` or `Placings`.
+  Match Centre prints a final's card with its round in the round's place and no
+  word before it, `Division C / Yellow Ball / GF[1] / #4200003`, the placing
+  matches `GF[1]`, `GF[2]` and `GF[3]`, and each is read as a finals round of
+  its own. Any other name is a regular round, as it is without the setting. If
+  your placing week has one, set `finals = true` on it in a
+  `[[competitions.<id>.rounds]]` block.
 - Once the regular season is over, the final ladder pairs the teams from the top.
   In a grade with an odd number of teams the last plays nobody and keeps its
   place.

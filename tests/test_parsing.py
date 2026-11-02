@@ -1441,6 +1441,45 @@ class TestARefusedIdentityLineNamesTheWordingItReads(IdentityCase):
                                      f"closest line: {quoted}")
 
 
+class TestAFinalPrintedInTheRoundsPlaceIsRead(IdentityCase):
+    """4.542: Match Centre prints a finals round bare where a regular one prints ``Round``.
+
+    Measured on the owner's finals (27 cards, counts only, ``/tmp/mc55326``): each
+    printed its identity line as ``Division C / Yellow Ball / GF[1] / #…``, ``GF[2]``
+    or ``GF[3]``, with no word before the round, where every regular card prints
+    ``Round 10``. Every one was refused, ``no line above the set table names both a
+    division and a round``, so the build exited 1, every grade's page said 27 cards
+    could not be read, and every placing match was still to play. A whole part of a
+    line that prints the division, naming a final, is now the round, as printed:
+    ``GF[1]`` is a final by its label as ``SF1`` is (4.37). Rejected: dropping the
+    ``[1]``, which files three placing matches under a label no card prints; and
+    any bare part, which makes the ball's colour a round.
+    """
+
+    def test_a_final_in_the_rounds_place_is_the_round_as_printed(self):
+        for label in ("GF[1]", "GF[3]", "GF", "SF", "Final", "Grand-Final", "QF2"):
+            with self.subTest(label=label):
+                card = self.read_line(f"Division C / Yellow Ball / {label} / #1000100")
+                self.assertEqual((card.division, card.round), ("C", label))
+                self.assertEqual(card.match_id, "1000100")
+
+    def test_a_round_printed_with_its_word_is_read_first(self):
+        card = self.read_line("Division C / Final / Round 10 / #1000100")
+        self.assertEqual(card.round, "10")
+
+    def test_a_part_that_names_no_final_is_no_round(self):
+        for line in ("Division C / Yellow Ball / Week 11 / #1000100",
+                     "Division C / Yellow Ball / 11 / #1000100",
+                     "Division C / Yellow Ball / R11 / #1000100"):
+            with self.subTest(line=line):
+                self.assertIn("names both a division and a round",
+                              self.refusal(line).reason)
+
+    def test_the_reason_names_the_wording(self):
+        reason = self.refusal("Pool C / Yellow Ball / Round 1 / #1000100").reason
+        self.assertIn("and a final printed in the round's place on the division's "
+                      "line, as GF[1]", reason)
+
 class TestACardThatPrintsNoRoundIsRefusedBeforeAMatchIsMadeOfIt(IdentityCase):
     """The reader returns no card without a round, so discovery makes no match without one.
 

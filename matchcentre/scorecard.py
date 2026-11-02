@@ -50,7 +50,7 @@ from . import pdf
 from .card import (WEEKDAYS, Card, CardError, CrossCheck, ParsedSet, Rejection,
                    RosterEntry, Totals, date_forms, states_no_result,
                    thin_card_prints, verb_side)
-from .competition import decimal_figure
+from .competition import decimal_figure, is_finals_label
 from .format import (SET_RULES, FormatError, MatchFormat, SetRule, completed,
                      from_rows, plausible)
 from .model import (SIDES, SetStatus, forfeit_match_winner, forfeit_set_winner,
@@ -1309,10 +1309,29 @@ def division_in(text: str, *, short: bool = True) -> str:
 
 
 def round_in(text: str, *, short: bool = True) -> str:
-    """The round ``text`` prints, or ``""``; ``short`` as for the division."""
+    """The round ``text`` prints, or ``""``; ``short`` as for the division.
+
+    And, ``short``, a final printed bare in the round's place: Match Centre prints
+    a finals round with no word before it, ``Division C / Yellow Ball / GF[1] /
+    #4200003``, where a regular round prints ``Round 10``, and refused, every card
+    of a season's finals was a page no competition could be found for (4.542).
+    Kept as printed, ``GF[1]``, a final by its label
+    (``competition.is_finals_label``) as ``SF1`` is. Only a whole part of the line
+    between its slashes, and only a label that names a final, so a ball's colour or
+    the match id is never a round; and asked after the round's own word, so
+    ``Round 10`` on the same line is the round. A card needs its division as well,
+    on this line or, split, another (:func:`_read_header`), so a final a title
+    prints is no card's round by itself. Rejected: dropping the ``[1]``, which files
+    three placing matches under a label no card prints.
+    """
     found = (_ROUND_RE.search(text)
              or (short and _ROUND_ABBREVIATED_RE.search(text)))
-    return found.group("round").strip(".,;:") if found else ""
+    if found:
+        return found.group("round").strip(".,;:")
+    if short:
+        return next((part.strip() for part in text.split("/")
+                     if is_finals_label(part.strip())), "")
+    return ""
 
 
 def _identity_block(joined: Sequence[tuple[str, list[pdf.Word]]]
@@ -1349,7 +1368,8 @@ _IDENTITY_WORDING = (
     "without one, and "
     + in_words([f"C {_GRADE_AFTER_WORD}"]
                + [f"{word} 1" for word in _ROUND_ABBREVIATIONS], "and")
-    + " as well on a line that prints both")
+    + " as well on a line that prints both, and a final printed in the round's "
+    "place on the division's line, as GF[1]")
 
 
 def _read_header(page: pdf.Page, grid: _Grid, warnings: list[str]) -> _Header:
