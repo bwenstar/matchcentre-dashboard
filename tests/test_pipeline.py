@@ -25800,9 +25800,10 @@ class TestEachPlacingMatchPlacesItsWinner(PlacingsSeasonCase):
 
     def test_the_document_carries_these_keys_and_no_others(self):
         placed = self.season["placings"]
-        self.assertEqual(set(placed), {"format", "set", "waiting", "after",
+        # 4.543 moved this: `by`, the ladder here, its cards numbering nothing.
+        self.assertEqual(set(placed), {"format", "by", "set", "waiting", "after",
                                        "matches", "unpaired", "strays"})
-        self.assertEqual(placed["format"], "placings")
+        self.assertEqual((placed["format"], placed["by"]), ("placings", "ladder"))
         self.assertEqual(set(self.placing(0)), {"places", "higher", "lower",
                                                 "outcome", "first", "second",
                                                 "key", "rounds"})
@@ -26888,6 +26889,168 @@ class TestAPlacingWeekPrintedAsMatchCentrePrintsItIsRead(PlacingsSeasonCase):
             ((5, 6), "won", "eastwood-bears", "northside-nets")])
         self.assertEqual([m["rounds"] for m in self.season["placings"]["matches"]],
                          [["GF[1]"], ["GF[2]"], ["GF[3]"]])
+
+    def test_the_cards_pair_them_and_agree_with_the_ladder(self):
+        # 4.543: numbered, the cards pair the teams, here as the ladder would.
+        self.assertEqual(self.season["placings"]["by"], "cards")
+        self.assertEqual(self.findings("placing-order"), [])
+
+
+class TestWhichPlacingMatchALabelNumbers(unittest.TestCase):
+    """4.543: :func:`~matchcentre.competition.placing_index`, label by label."""
+
+    def test_a_finals_word_and_a_number_after_it(self):
+        from matchcentre.competition import placing_index
+        for label, number in (("GF[1]", 1), ("GF[3]", 3), ("GF1", 1), ("GF 2", 2),
+                              ("Final 2", 2), ("Playoff 2", 2), ("Placings[1]", 1)):
+            with self.subTest(label=label):
+                self.assertEqual(placing_index(label), number)
+
+    def test_no_number_a_number_alone_or_other_digits_number_nothing(self):
+        from matchcentre.competition import placing_index
+        for label in ("GF", "Final", "Grand Final", "11", "Playoff 3v4", "SF[0]",
+                      "Round 2", "R1", "[1]", "3rd/4th Playoff"):
+            with self.subTest(label=label):
+                self.assertIsNone(placing_index(label))
+
+
+class TestNumberedPlacingMatchesDecideThePlacesTheirNumberNames(PlacingsSeasonCase):
+    """4.543: GF[1] is 1st v 2nd, whoever plays in it: the cards are the record.
+
+    Measured on the owner's finals (4.542's tree): in Monday C2 and Tuesday A1
+    Match Centre's GF[1] and GF[2] paired the teams otherwise than this ladder,
+    each card was told it is no placing match (``placing-pair``), and the four
+    pairs the ladder made read ``To play`` beside two played finals each. The owner
+    (2026-10-29): whatever the scorecard results say is the source of truth. So a
+    card's number names its places, and ``placing-order`` says where the ladder
+    differs. Rejected: the ladder's pairs over the cards'; and the cards' pairs
+    over the ladder's only where the ladder agrees, which is no rule.
+    """
+
+    BARE = True
+    PAIRS = (("GF[1]", 0, 2), ("GF[2]", 1, 3), ("GF[3]", 4, 5))
+
+    def test_each_numbered_match_takes_the_places_its_number_names(self):
+        self.assertEqual(self.season["placings"]["by"], "cards")
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "lakeside-spinners"),
+            ((3, 4), "won", "riverside-rockets", "westfield-hawks"),
+            ((5, 6), "won", "eastwood-bears", "northside-nets")])
+        self.assertEqual(self.season["placings"]["strays"], [])
+        self.assertEqual(self.findings("placing-pair"), [])
+
+    def test_the_ladder_is_said_to_differ(self):
+        self.assertEqual(self.said("placing-order"), [
+            "the cards number their placing matches, and pair the teams otherwise "
+            "than the ladder after round 5: GF[1] is Hilltop Aces v Lakeside "
+            "Spinners, where the ladder has Hilltop Aces 1st and Riverside Rockets "
+            "2nd; GF[2] is Riverside Rockets v Westfield Hawks, where the ladder has "
+            "Lakeside Spinners 3rd and Westfield Hawks 4th. The cards place them."])
+
+
+class TestTheBlankCardsTheLadderCountsNothingOfAreNamed(PlacingsSeasonCase):
+    """4.543: the ladder differing, its regular season's blank cards are said too."""
+
+    BARE = True
+    BLANK = {"3": 1}
+    PAIRS = (("GF[1]", 0, 2), ("GF[2]", 1, 3), ("GF[3]", 4, 5))
+
+    def test_the_blank_card_is_named(self):
+        said, = self.said("placing-order")
+        self.assertTrue(said.endswith(
+            "This ladder counts nothing of round 3's Hilltop Aces v Westfield Hawks, "
+            "whose card is blank, and the association's may hold its result."), said)
+
+
+class TestANumberedMatchMissingLeavesItsPlacesToTheLadder(PlacingsSeasonCase):
+    """4.543: only GF[1] in: places 3 to 6 paired by the ladder from the teams left."""
+
+    BARE = True
+    PAIRS = (("GF[1]", 0, 2),)
+
+    def test_the_rest_paired_by_the_ladder_and_to_play(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "lakeside-spinners"),
+            ((3, 4), "to-play", None, None), ((5, 6), "to-play", None, None)])
+        self.assertEqual([(m["higher"], m["lower"])
+                          for m in self.season["placings"]["matches"][1:]],
+                         [("riverside-rockets", "westfield-hawks"),
+                          ("eastwood-bears", "northside-nets")])
+
+
+class TestAFiveTeamGradesNumberedMatchesLeaveTheTeamOnNoCardItsPlace(
+        PlacingsSeasonCase):
+    """4.543: of five, GF[1] and GF[2] numbered: the team on neither card is 5th."""
+
+    TEAMS = 5
+    BARE = True
+    PAIRS = (("GF[1]", 0, 2), ("GF[2]", 1, 3))
+
+    def test_the_fifth_unpaired(self):
+        self.assertEqual(self.placed(), [
+            ((1, 2), "won", "hilltop-aces", "lakeside-spinners"),
+            ((3, 4), "won", "riverside-rockets", "westfield-hawks")])
+        self.assertEqual(self.season["placings"]["unpaired"],
+                         {"place": 5, "slug": "eastwood-bears"})
+
+
+class TestTwoPairsUnderOneNumberPlaceByTheLadder(PlacingsSeasonCase):
+    """4.543: two cards of GF[1] with two pairs: its number places neither."""
+
+    BARE = True
+    PAIRS = (("GF[1]", 0, 1), ("GF[1]", 2, 3), ("GF[3]", 4, 5))
+
+    def test_warned_and_the_ladder_pairs_them(self):
+        self.assertEqual(self.said("placing-index"), [
+            "round GF[1] holds two placing matches, Hilltop Aces v Riverside "
+            "Rockets and Lakeside Spinners v Westfield Hawks, so its number places "
+            "neither, and the ladder pairs the places it would have."])
+        self.assertEqual([m[1] for m in self.placed()], ["won", "won", "won"])
+
+
+class TestANumberPastTheGradePlacesNobody(PlacingsSeasonCase):
+    """4.543: GF[4] in a grade of six names 7th and 8th: its number places nobody."""
+
+    BARE = True
+    PAIRS = (("GF[1]", 0, 1), ("GF[2]", 2, 3), ("GF[4]", 4, 5))
+
+    def test_warned_and_the_ladder_pairs_its_teams(self):
+        self.assertEqual(self.said("placing-index"), [
+            "round GF[4] numbers the placing match for 7th and 8th, past the "
+            "grade's 6 teams, so its number places nobody, and the ladder pairs "
+            "the places it would have."])
+        self.assertEqual(self.placed()[2],
+                         ((5, 6), "won", "eastwood-bears", "northside-nets"))
+
+
+class TestATeamOnTwoNumberedCardsIsPlacedByTheLowerNumber(PlacingsSeasonCase):
+    """4.543: Riverside Rockets on GF[1] and GF[2]: GF[2]'s number places nobody."""
+
+    BARE = True
+    PAIRS = (("GF[1]", 0, 1), ("GF[2]", 1, 2), ("GF[3]", 4, 5))
+
+    def test_warned_and_its_card_a_stray(self):
+        self.assertEqual(self.said("placing-index"), [
+            "round GF[2]'s Riverside Rockets v Lakeside Spinners has a team of a "
+            "lower-numbered placing match as well, so its number places nobody, "
+            "and the ladder pairs the places it would have."])
+        self.assertEqual(self.placed()[1], ((3, 4), "to-play", None, None))
+        self.assertEqual(len(self.findings("placing-pair")), 1)
+
+
+class TestATeamWithNoPlaceOnANumberedCardPlacesNobody(PlacingsSeasonCase):
+    """4.543: a numbered card naming a team the ladder has no place for."""
+
+    BARE = True
+    TEAMS = 5
+    LISTED = True
+    PAIRS = (("GF[1]", 0, 1), ("GF[2]", 2, 5))
+
+    def test_warned(self):
+        said = self.said("placing-index")
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("names a team with no place on the ladder, so its number "
+                      "places nobody", said[0])
 
 
 if __name__ == "__main__":

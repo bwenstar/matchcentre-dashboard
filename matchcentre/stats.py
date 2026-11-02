@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
 from .competition import (DRAW_DECLARED, Competition, Player, Round,
-                          round_sort_key, rounds_played_words)
+                          placing_index, round_sort_key, rounds_played_words)
 from .format import MatchFormat
 from .model import NO_OPPONENT, Match, MatchStatus, Outcome
 from .scope import echoed, in_words
@@ -1821,6 +1821,15 @@ class Placings:
     matches: tuple[PlacingMatch, ...] = ()
     unpaired: tuple[int, str] | None = None
     strays: tuple[int, ...] = ()
+    # "cards" where the placing week's cards number their matches and so pair the
+    # teams themselves (:func:`~matchcentre.competition.placing_index`), "ladder"
+    # where the final ladder pairs them (4.543); and the numbers its cards print
+    # that place nobody, each with why: two pairs under it, a team on two numbered
+    # cards, or places past the grade.
+    by: str = "ladder"
+    unplaced: tuple[tuple[int, str], ...] = ()
+    # The final ladder's order the pairs were made beside, top down.
+    order: tuple[str, ...] = ()
 
 
 def placings(matches: Sequence[Match], competition: Competition,
@@ -1861,23 +1870,78 @@ def placings(matches: Sequence[Match], competition: Competition,
     kept = {id(m) for m in scoreable([matches[i] for i in finals_cards])}
     finals_rounds = [number for number in competition.round_order
                      if competition.is_finals_round(number)]
+    numbered, unplaced = _numbered_pairs(order, matches, finals_cards)
+    # The pairs the cards number, at their places, and the rest of the places
+    # paired from the top by the teams those leave, in the final ladder's order.
+    taken = {slug for pair in numbered.values() for slug in pair}
+    rest = iter([slug for slug in order if slug not in taken])
+    pairs: list[tuple[int, str, str]] = []
+    for at in range(1, len(order) // 2 + 1):
+        if at in numbered:
+            pairs.append((at, *sorted(numbered[at], key=order.index)))
+        else:
+            pairs.append((at, next(rest), next(rest)))
+    left = list(rest)
     placed: list[PlacingMatch] = []
     paired: set[frozenset[str]] = set()
-    for at in range(0, len(order) - 1, 2):
-        higher, lower = order[at], order[at + 1]
+    for at, higher, lower in pairs:
         pair = frozenset((higher, lower))
         paired.add(pair)
         mine = [i for i in finals_cards
                 if frozenset((matches[i].home, matches[i].away)) == pair]
         placed.append(_placing_match(
-            (at + 1, at + 2), higher, lower, matches, mine, kept,
+            (2 * at - 1, 2 * at), higher, lower, matches, mine, kept,
             washed=any(competition.rounds[number].washed(higher, lower)
                        for number in finals_rounds)))
-    unpaired = (len(order), order[-1]) if len(order) % 2 else None
+    unpaired = (len(order), left[0]) if left else None
     strays = tuple(i for i in finals_cards
                    if frozenset((matches[i].home, matches[i].away)) not in paired)
     return Placings(waiting="", after=after, matches=tuple(placed),
-                    unpaired=unpaired, strays=strays)
+                    unpaired=unpaired, strays=strays,
+                    by="cards" if numbered else "ladder", unplaced=unplaced,
+                    order=tuple(order))
+
+
+def _numbered_pairs(order: Sequence[str], matches: Sequence[Match],
+                    finals_cards: Sequence[int]
+                    ) -> tuple[dict[int, frozenset[str]], tuple[tuple[int, str], ...]]:
+    """The pairs the placing week's cards number, by number, and the numbers refused.
+
+    A card whose round numbers its placing match, ``GF[2]``
+    (:func:`~matchcentre.competition.placing_index`), is that match, places 3 and 4
+    to its two teams whoever they are: the cards are the record, and the
+    association pairs by its own ladder (4.543). A number places nobody where it
+    holds two pairs, where a team of it has no place on the ladder, where its
+    places are past the grade, or where a team of it is on a lower number's card
+    as well; each is said with why. Rejected: the
+    ladder's pairs over the cards', which left two played finals of the owner's
+    to play.
+    """
+    teams = set(order)
+    by_number: dict[int, set[frozenset[str]]] = {}
+    for i in finals_cards:
+        number = placing_index(matches[i].round)
+        if number is not None:
+            by_number.setdefault(number, set()).add(
+                frozenset((matches[i].home, matches[i].away)))
+    numbered: dict[int, frozenset[str]] = {}
+    unplaced: list[tuple[int, str]] = []
+    taken: set[str] = set()
+    for number in sorted(by_number):
+        pairs = by_number[number]
+        pair = next(iter(pairs))
+        if len(pairs) > 1:
+            unplaced.append((number, "two"))
+        elif not pair <= teams:
+            unplaced.append((number, "stranger"))
+        elif 2 * number > len(order):
+            unplaced.append((number, "past"))
+        elif pair & taken:
+            unplaced.append((number, "twice"))
+        else:
+            numbered[number] = pair
+            taken |= pair
+    return numbered, tuple(unplaced)
 
 
 def _placed_by(match: Match) -> tuple:

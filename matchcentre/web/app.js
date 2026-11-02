@@ -4190,8 +4190,10 @@ function placingsCard() {
   }
   box.appendChild(el('div', { class: 'table-wrap' }, [
     table(['Places', 'Match', 'Placed'], rows,
-      { caption: 'Placing matches, by the ladder after ' +
-        roundTitle(p.after).toLowerCase(), csv: 'Placings' })]));
+      { caption: 'Placing matches, ' + (p.by === 'cards'
+        ? 'as their cards number them'
+        : 'by the ladder after ' + roundTitle(p.after).toLowerCase()),
+        csv: 'Placings' })]));
   box.appendChild(el('p', { class: 'foot muted', style: { 'font-size': '12px' },
     text: 'The winner of each takes the higher of its two places. A draw, a ' +
       'washout or a match called off leaves it with the team placed higher on ' +

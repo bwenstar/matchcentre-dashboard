@@ -141,7 +141,7 @@ _CLASSES = {
         meta.{ladder_detail,ladder_state,leader,matches_played} meta.leader.value
         meta.ordered_on_average meta.order_stands meta.leader_withheld
         meta.ladder_final
-        placings placings.{format,set,after,unpaired,strays[]}
+        placings placings.{format,by,set,after,unpaired,strays[]}
         placings.matches[].{places[],outcome,key,rounds[]}
         placings.unpaired.place
         meta.{seasons_mode,teams_declared,teams_total,version,players}

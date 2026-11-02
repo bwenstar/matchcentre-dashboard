@@ -1136,9 +1136,18 @@ Then:
   its own. Any other name is a regular round, as it is without the setting. If
   your placing week has one, set `finals = true` on it in a
   `[[competitions.<id>.rounds]]` block.
-- Once the regular season is over, the final ladder pairs the teams from the top.
-  In a grade with an odd number of teams the last plays nobody and keeps its
-  place.
+- Once the regular season is over, the final ladder pairs the teams from the
+  top. In a grade with an odd number of teams the last plays nobody and keeps
+  its place. Where the placing week's cards number their matches, as Match
+  Centre's `GF[1]`, `GF[2]` and `GF[3]` do, the cards pair the teams instead:
+  the number is the placing match, so `GF[1]` decides 1st and 2nd and `GF[2]`
+  3rd and 4th, whoever plays in it. The cards are the record, so where they pair
+  the teams otherwise than this ladder, their places stand, and a
+  `placing-order` warning names the matches and any blank card of the regular
+  season this ladder counts nothing of, the likeliest reason it differs from the
+  association's. A number that places nobody, two pairs under one number, a team
+  on two numbered cards or places past the grade, is `placing-index`, and the
+  ladder pairs those places.
 - Each placing match puts its winner in the higher of its two places. A draw, a
   washout you declare under `[competitions.<id>.washouts]`, or a card ticked `Match
   Cancelled`, leaves the higher place with the team placed higher on the ladder. A

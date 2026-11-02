@@ -424,12 +424,15 @@ def _placings(placed: stats.Placings | None, keys: Sequence[str]) -> dict | None
     places, null while nobody has; ``key`` is the card that decided it, null for
     none, and ``rounds`` the finals rounds its cards are in. ``unpaired`` is the
     team an odd number leaves without a match, at the place it keeps. ``strays``
-    are the keys of the finals cards no placing match is played by.
+    are the keys of the finals cards no placing match is played by. ``by`` is
+    ``"cards"`` where the placing week's cards number their matches and pair the
+    teams themselves, and ``"ladder"`` where the final ladder pairs them (4.543).
     """
     if placed is None:
         return None
     return {
         "format": "placings",
+        "by": placed.by,
         "set": not placed.waiting,
         "waiting": placed.waiting,
         "after": placed.after,

@@ -29045,6 +29045,16 @@ class TestThePlacingsAreSaidAsTheReportSaysThem(unittest.TestCase):
     def test_no_format_is_no_line(self):
         self.assertEqual(build_mod._placings_words({"teams": [], "placings": None}), "")
 
+    def test_the_cards_pairing_them_is_said_first(self):
+        # 4.543: where the placing week's cards number their matches.
+        teams = [{"slug": slug, "name": slug.replace("-", " ").title()}
+                 for slug in PLACED_SLUGS]
+        said = build_mod._placings_words({"teams": teams, "placings": {
+            "by": "cards", "set": True, "waiting": "", "after": "5",
+            "matches": [self.match(0, "won", "hilltop-aces")], "unpaired": None}})
+        self.assertTrue(said.startswith("as the cards number them: 1st v 2nd: "
+                                        "Hilltop Aces v Riverside Rockets"), said)
+
 
 class TestForceSaysWhatMovesOfAPlacingWeekAsTheRunAfterReadsIt(unittest.TestCase):
     """4.537, its review: rounds 1 to 5 and round 6 typed a final, no rounds_total.

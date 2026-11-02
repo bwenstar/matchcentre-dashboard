@@ -174,14 +174,14 @@ sets = "first-to-6"
 #   none      a finals round is left out of the ladder and places nobody. The
 #             default, and what leaving the line out means.
 #   placings  one week of placing matches after the regular rounds: 1st v 2nd,
-#             3rd v 4th and so on down the final ladder. Each winner takes the
-#             higher place; a draw, a washout or a match called off leaves it
-#             with the team placed higher; with an odd number of teams the last
-#             plays nobody and keeps its place. The week is a finals round
-#             however it is labelled: the first number past rounds_total, a
-#             finals label, or Playoff, Playoffs or Placings. It needs
-#             rounds_total and the teams list, to tell when the regular season
-#             is over.
+#             3rd v 4th and so on down the final ladder, or as the week's cards
+#             number them (GF[1], GF[2]). Each winner takes the higher place; a
+#             draw, a washout or a match called off leaves it with the team
+#             placed higher; with an odd number of teams the last plays nobody
+#             and keeps its place. The week is a finals round however it is
+#             labelled: the first number past rounds_total, a finals label, or
+#             Playoff, Playoffs or Placings. It needs rounds_total and the teams
+#             list, to tell when the regular season is over.
 # finals = "placings"
 
 # format — the shape of a match: how many sets, and which are doubles.

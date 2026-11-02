@@ -924,6 +924,36 @@ def placing_weeks(numbers: Iterable[str], *, length: int | None,
                      or (weeks and round_number(number) == weeks[0]))
 
 
+# A placing match's number on its round, as Match Centre prints a placing week's
+# three matches GF[1], GF[2] and GF[3]: a finals word, then the number alone,
+# bracketed or not (4.543).
+_PLACING_INDEX_RE = re.compile(r"(?P<word>[^\d\[\]]*?)\s*(?:\[(?P<bracketed>\d+)\]|"
+                               r"(?P<plain>\d+))")
+
+
+def placing_index(number: str) -> int | None:
+    """Which placing match a finals round's label numbers, or ``None`` (4.543).
+
+    ``GF[1]`` is the first, 1st v 2nd, ``GF[3]`` the third, 5th v 6th: a word that
+    names a final or a placing match with a number after it, bracketed or not,
+    ``GF[2]``, ``GF2``, ``Final 2``. Not a number alone, which is a week (``11``),
+    nor a label with other digits in it (``Playoff 3v4``), nor the number 0. The
+    places are the card's to say, whoever plays in it: the scorecards are the
+    record (the owner, 2026-10-29), and the association pairs the teams by its own
+    ladder, which a card counted for nothing here can make another.
+    """
+    found = _PLACING_INDEX_RE.fullmatch(number.strip())
+    if found is None:
+        return None
+    word = _finals_word(found.group("word"))
+    if word not in _FINALS_LABELS and not any(
+            word.startswith(placing) or word.endswith(placing)
+            for placing in _PLACING_WORDS):
+        return None
+    figure = decimal_figure(found.group("bracketed") or found.group("plain"))
+    return figure if figure else None
+
+
 def placing_week(number: str, *, length: int | None, finals: str) -> bool:
     """Whether label *number*, on its own, is the placing week: :func:`placing_weeks`
     of the one label, so a number past *length* is."""

@@ -13350,6 +13350,15 @@ class TestThePlacingsAreDrawnAsPythonDecidedThem(WebAssetCase):
         code = jslint.without_comments(self.body("placingsCard"))
         self.assertIn("p.waiting ? ' Not yet: ' + p.waiting + '.' : ''", code)
 
+    def test_the_caption_says_the_cards_pair_them_where_they_do(self):
+        # 4.543: the document's `placings.by`, "cards" where the cards number the
+        # placing matches, and the ladder's round otherwise.
+        code = jslint.without_comments(self.body("placingsCard"))
+        self.assertIn("caption: 'Placing matches, ' + (p.by === 'cards'\n"
+                      "        ? 'as their cards number them'\n"
+                      "        : 'by the ladder after ' + roundTitle(p.after)"
+                      ".toLowerCase())", code)
+
     def test_a_row_opens_the_night_that_placed_it_by_its_printed_id(self):
         code = jslint.without_comments(self.body("placingsCard"))
         self.assertIn("var card = x.key ? IDX.matchByKey[x.key] : null;", code)

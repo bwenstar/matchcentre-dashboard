@@ -37,7 +37,8 @@ from .card import (Card, ParsedSet, Rejection, letterhead_key, letterhead_spelli
                    majority_letterhead, states_no_result, thin_card_prints, verb_side)
 from .card import Totals
 from .competition import (DRAW_DECLARED, Club, Competition, Provenance,
-                          fixture_sort_key, is_finals_label, placing_weeks,
+                          fixture_sort_key, is_finals_label, placing_index,
+                          placing_weeks,
                           round_number, years_played)
 from .format import MatchFormat, SetRule, completed, plausible, set_winner
 from .config import DEFAULT_PATH, toml_key, toml_value
@@ -2826,6 +2827,7 @@ def _check_placings(ctx: _Context) -> list[Issue]:
                 detail="; ".join(_label(m) for m in cards)))
         return issues
     issues.extend(_placing_week_unpaired(ctx, placed))
+    issues.extend(_placings_by_the_cards(ctx, placed))
     pairs = {slug: match for match in placed.matches
              for slug in (match.higher, match.lower)}
     for match in cards:
@@ -2858,6 +2860,76 @@ def _check_placings(ctx: _Context) -> list[Issue]:
                     f"match is taken out of the folder.",
             subject=f"R{pair.rounds[0]}",
             detail=f"{pair.higher} v {pair.lower}"))
+    return issues
+
+
+def _placings_by_the_cards(ctx: _Context, placed) -> list[Issue]:
+    """What a placing week its cards number says of the ladder beside it (4.543).
+
+    The cards' numbered matches pair the teams (``stats.placings``), and where they
+    pair them otherwise than the final ladder would, the ladder differs from the
+    association's: ``placing-order``, a warning, naming each such match and the
+    ladder's two at its places, and the regular season's blank cards, which this
+    ladder counts nothing of and which are the likeliest reason. A number that
+    places nobody is ``placing-index``, a warning, with why.
+    """
+    comp = ctx.competition
+    issues: list[Issue] = []
+    if placed.by != "cards":
+        return issues
+    labels: dict[int, str] = {}
+    for match in ctx.matches:
+        number = placing_index(match.round) if comp.is_finals_round(match.round) else None
+        if number is not None:
+            labels.setdefault(number, match.round)
+    name = comp.team_name
+    order = placed.order
+    differ = []
+    for pair in placed.matches:
+        number = (pair.places[0] + 1) // 2
+        ladder = order[pair.places[0] - 1:pair.places[1]]
+        if number in labels and {pair.higher, pair.lower} != set(ladder):
+            differ.append(
+                f"{echoed(labels[number])} is {name(pair.higher)} v "
+                f"{name(pair.lower)}, where the ladder has {name(ladder[0])} "
+                f"{ordinal(pair.places[0])} and {name(ladder[1])} "
+                f"{ordinal(pair.places[1])}")
+    if differ:
+        blank = [f"round {echoed(m.round)}'s {name(m.home)} v {name(m.away)}"
+                 for m in ctx.matches
+                 if m.status is MatchStatus.UNPLAYED
+                 and not comp.is_finals_round(m.round)]
+        issues.append(Issue(
+            rule="placing-order", severity=WARNING,
+            message=f"the cards number their placing matches, and pair the teams "
+                    f"otherwise than the ladder after round {echoed(placed.after)}: "
+                    f"{'; '.join(differ)}. The cards place them."
+                    + (f" This ladder counts nothing of {in_words(blank)}, whose "
+                       f"{'card is' if len(blank) == 1 else 'cards are'} blank, "
+                       f"and the association's may hold "
+                       f"{'its result' if len(blank) == 1 else 'their results'}."
+                       if blank else ""),
+            detail="; ".join(differ)))
+    for number, why in placed.unplaced:
+        label = echoed(labels.get(number, str(number)))
+        cards = [m for m in ctx.matches if comp.is_finals_round(m.round)
+                 and placing_index(m.round) == number]
+        games = in_words(f"{name(m.home)} v {name(m.away)}" for m in cards)
+        said = {
+            "two": f"round {label} holds two placing matches, {games}, so its "
+                   f"number places neither",
+            "stranger": f"round {label}'s {games} names a team with no place on "
+                        f"the ladder, so its number places nobody",
+            "past": f"round {label} numbers the placing match for "
+                    f"{ordinal(2 * number - 1)} and {ordinal(2 * number)}, past "
+                    f"the grade's {len(order)} teams, so its number places nobody",
+            "twice": f"round {label}'s {games} has a team of a lower-numbered "
+                     f"placing match as well, so its number places nobody",
+        }[why]
+        issues.append(Issue(
+            rule="placing-index", severity=WARNING,
+            message=said + ", and the ladder pairs the places it would have.",
+            subject=f"R{labels.get(number, number)}", detail=why))
     return issues
 
 

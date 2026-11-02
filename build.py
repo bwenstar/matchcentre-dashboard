@@ -1835,6 +1835,8 @@ def _placings_words(season: dict) -> str:
         return f"paired once the regular season is over: {placed['waiting']}"
     names = {team["slug"]: team["name"] for team in season["teams"]}
     parts = []
+    # Where the cards number their matches, they pair the teams (4.543).
+    lead = "as the cards number them: " if placed.get("by") == "cards" else ""
     for match in placed["matches"]:
         first = match["first"]
         said = _PLACING_WORDS[match["outcome"]].format(
@@ -1846,7 +1848,7 @@ def _placings_words(season: dict) -> str:
     if placed["unpaired"]:
         alone = placed["unpaired"]
         parts.append(f"{ordinal(alone['place'])}: {names[alone['slug']]}, no match")
-    return "; ".join(parts)
+    return lead + "; ".join(parts)
 
 
 def _competition_section(report: _Report, season: dict, *,
