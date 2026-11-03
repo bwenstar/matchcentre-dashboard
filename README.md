@@ -187,9 +187,13 @@ competition's page for them, so any figure there can be checked against the
 competition it came from. Win rate is worked out again from the added-up sets,
 never averaged. Ratings, streaks, partners, opponents and share of the team's
 games are not added up: each belongs to one competition, and each row's link goes
-to them. The list is in name order and is not a ranking: Division 1 and Division
-4 are not the same tennis, so a total across them says how much somebody played,
-not how well.
+to them.
+
+The list opens in name order, A to Z. Select a column heading to sort it by that
+column, a figure highest first and the names A to Z, and select the same heading
+again to turn the order round. Players level on a figure stay in name order.
+However it is sorted, it is not a ranking: Division 1 and Division 4 are not the
+same tennis, so a total across them says how much somebody played, not how well.
 
 A player is matched across competitions by the name their pages use, after
 `[aliases]` and `[namesakes]`. That is one step further than a competition's own
@@ -4047,7 +4051,7 @@ Which version a folder is, without running a build and without opening a file:
 
 ```bash
 python3 build.py --version
-# matchcentre-dashboard 0.3.0  (python 3.12.3 on linux)
+# matchcentre-dashboard 0.4.0  (python 3.12.3 on linux)
 ```
 
 Every command answers it, with the same line, and that line is also the first

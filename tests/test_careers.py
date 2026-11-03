@@ -306,7 +306,7 @@ class TestTheModuleIsSetUpAgainWithAFolderOfItsOwnAndNothingCachedInTheLast(
             "-m", "unittest", "test_careers.TestTheReportSaysHowManyCareersSpanSeasons",
             "test_foundation.TestSlugs",
             "test_careers.TestTheCareersFiguresAreTheSeasonFilesAddedUp",
-            "test_careers.TestTheCareersPageIsAPageWithoutJavaScript")
+            "test_careers.TestTheCareersPageWorksWithoutJavaScript")
         self.assertEqual(done.returncode, 0, done.stderr[-3000:])
         self.assertRegex(done.stderr, r"\nRan [1-9]\d* tests in [^\n]*\n\nOK\n")
 
@@ -1134,7 +1134,7 @@ class TestACareersTableIsHeadedWithTheLettersItsCaptionSpellsOut(unittest.TestCa
         page = split_index(self.docs)
         self.assertEqual(heads(page, "index"), [("Player", None)])
         self.assertEqual(page.caption_parts["index"],
-                         [("caption-text", careers._INDEX_CAPTION)])
+                         [("caption-text", careers._INDEX_CAPTION + ", by name")])
 
     def test_every_heading_title_and_key_comes_from_the_one_list(self):
         renamed = {**careers.COLUMNS, "sets_won": ("Xw", "Sets won, renamed"),
@@ -1301,8 +1301,10 @@ class TestTheCareersPageIsOnlyEverWrittenInMultiSeasonMode(SiteCase):
                             for said in found.config_warnings))
 
 
-class TestTheCareersPageIsAPageWithoutJavaScript(SiteCase):
-    """Static HTML: the figures are in the markup, and the only script reads a theme.
+class TestTheCareersPageWorksWithoutJavaScript(SiteCase):
+    """Static HTML: the figures are in the markup, and the scripts only read a theme
+    and sort the list of players (4.545), so with scripts off it is the same page in
+    name order.
 
     The mark is on the second line, for the reason the one-file mark is: the head
     is all anyone reads back, and the stamp the left-behind report prints is read
@@ -1327,9 +1329,9 @@ class TestTheCareersPageIsAPageWithoutJavaScript(SiteCase):
         self.assertIn('<meta name="generated" content="', head)
         self.assertEqual(site._careers_stamp(self.out / site.CAREERS_PAGE), STAMP)
 
-    def test_there_is_no_script_but_the_inline_theme_reader(self):
+    def test_there_is_no_script_but_the_inline_theme_reader_and_the_sort(self):
         self.assertNotIn("<script src", self.page)
-        self.assertEqual(self.page.count("<script"), 1)
+        self.assertEqual(self.page.count("<script"), 2)
         self.assertIn('data-field="sets_won"', self.page)
 
     def test_the_sentinels_are_the_listed_ones_and_none_survives(self):
@@ -2614,7 +2616,7 @@ class TestAPlayerPagesLinkLandsOnTheirCareerOnceThePageIsSplit(SiteCase):
     def test_the_index_follows_that_anchor_on_to_the_career(self):
         from jslint import balance, unterminated, uses_template_literals
         scripts = re.findall(r"<script>(.*?)</script>", self.index, re.S)
-        self.assertEqual(len(scripts), 2)
+        self.assertEqual(len(scripts), 3)       # the theme, this, the sort (4.545)
         forward = scripts[1]
         for needed in ("location.hash.slice(1)", "document.getElementById(id)",
                        f".indexOf('{careers.ANCHOR_PREFIX}') === 0",
@@ -2627,10 +2629,10 @@ class TestAPlayerPagesLinkLandsOnTheirCareerOnceThePageIsSplit(SiteCase):
         self.assertLess(self.index.index("</table></div>"),
                         self.index.index(forward))
 
-    def test_an_initials_page_has_no_script_but_the_theme_reader(self):
+    def test_an_initials_page_has_no_script_but_the_theme_reader_and_the_sort(self):
         for name in site.CAREERS_SPLIT:
             text = (self.out / name).read_text(encoding="utf-8")
-            self.assertEqual(text.count("<script"), 1, name)
+            self.assertEqual(text.count("<script"), 2, name)
             self.assertNotIn("location.replace", text, name)
 
 
@@ -4645,7 +4647,7 @@ class TestASplitPlayersPageIsWordedForTheSeasonOnEveryPage(unittest.TestCase):
         page = self.page("careers-a.html")
         self.assertIn("<h1>Players this season: A</h1>", page)
         self.assertIn("Everyone named in this season&#x27;s competitions whose "
-                      "name starts with A, by name", page)
+                      "name starts with A</span>", page)
 
     def test_an_initial_nobody_has_says_so_in_the_seasons_words(self):
         self.assertIn('<p class="empty">No name in this season&#x27;s competitions '
@@ -4692,6 +4694,158 @@ class TestAPlayersPageOfOneCompetitionOrNoneSaysSoInItsOwnWords(unittest.TestCas
                       run.out.splitlines())
         self.assertIn(("empty", "No competition has a result in it yet."),
                       read_page(cwd / "site").paragraphs)
+
+
+# --- the list of players, sorted by any column (4.545) ---------------------------
+
+
+class TestTheListOfPlayersIsMarkedToBeSortedAndSaysNoOrder(unittest.TestCase):
+    """4.545: the list of players with figures is marked for the page's script.
+
+    The owner asked (2026-11-03) for the page of every player to sort by each
+    column, as a dashboard's Players table does. Measured before on the demo's
+    careers.html (/tmp/mcw/sort/before): plain-text headings, one script, the
+    theme reader, and a caption ending ``by name``. Now the list carries
+    ``data-sortable`` and its caption says no order, which sorted by a figure it
+    is not in. Rejected: sorting every table on the page, where a career's rows
+    run season by season, oldest first, an order of their own; and the split
+    index's list, one column of names, which keeps ``by name``.
+    """
+
+    def setUp(self):
+        self.docs = [document(key, player("bo-nakamura", "Bo Nakamura",
+                                          played(3, 4, 2, games_won=40)),
+                              player("ada-zu", "Ada Zu", played(1, 1, 0)))
+                     for key in ("2025-winter", "2026-winter")]
+
+    def body(self) -> str:
+        return careers.body_html(careers.build(self.docs), href=lambda row, slug: "#")
+
+    def test_the_list_with_figures_is_the_one_table_marked(self):
+        body = self.body()
+        self.assertEqual(body.count("<table data-sortable>"), 1)
+        self.assertLess(body.index("<table data-sortable>"),
+                        body.index('<section class="career"'))
+
+    def test_an_initials_list_is_marked_and_a_split_indexs_is_not(self):
+        built = careers.build(self.docs)
+        initial = careers.initial_html("b", built, href=lambda row, slug: "#",
+                                       page=site.careers_page_name,
+                                       index=site.CAREERS_PAGE)
+        self.assertEqual(initial.count("<table data-sortable>"), 1)
+        split = careers.index_html(built, page=site.careers_page_name,
+                                   index=site.CAREERS_PAGE)
+        self.assertNotIn("data-sortable", split)
+
+    def test_the_caption_says_no_order_where_the_list_sorts(self):
+        self.assertEqual(render(self.docs).caption_parts["index"][0],
+                         ("caption-text", "Everyone named in the seasons built so far"))
+        self.assertEqual(careers._WORDS[False].listed,
+                         "Everyone named in this season's competitions")
+
+    def test_the_split_indexs_list_of_names_says_it_is_by_name(self):
+        self.assertEqual(split_index(self.docs).caption_parts["index"],
+                         [("caption-text",
+                           "Everyone named in the seasons built so far, by name")])
+
+    def test_the_lead_says_however_it_is_sorted_it_is_no_ranking(self):
+        for intro in (careers._INTRO, careers._SINGLE_INTRO):
+            with self.subTest(single=intro is careers._SINGLE_INTRO):
+                self.assertTrue(intro[-1].endswith(
+                    "the same tennis, so however the list is sorted, it is a record "
+                    "of how much somebody played, not a ranking."), intro[-1])
+
+
+class TestThePlayersPageSortsItsListByAnyColumn(unittest.TestCase):
+    """4.545: the careers page's own script sorts the list by the heading selected.
+
+    As app.js's ``renderPlayers`` sorts a dashboard's players: a button in each
+    heading; a figure sorted highest first and the name A to Z; the same heading
+    again turning the order round; a tie kept in name order, and a dash, a win
+    rate of no decided set, below every figure; ``aria-sort`` and an arrow on the
+    heading sorted by. Measured in headless Chrome on the demo season
+    (/tmp/mcw/sort/scratch/clicks.py, /tmp/mcw/sort/after): M once put the
+    players of 3 first in name order, Callum, Clementine, Dmitri; M again those of
+    2; Win % 100.0% first, its two tied in name order; Player again Z to A. Read
+    as text here, as the suite runs no JavaScript. Rejected: sorting in Python, a
+    page per order, which writes the page eight times; and keys in data
+    attributes, which grow every row the split's size limit counts.
+    """
+
+    def template(self) -> str:
+        return (site.WEB / site.CAREERS_PAGE).read_text(encoding="utf-8")
+
+    def code(self) -> str:
+        scripts = re.findall(r"<script>(.*?)</script>", self.template(), re.S)
+        self.assertEqual(len(scripts), 2, "the theme reader and the sort")
+        return scripts[1]
+
+    def test_it_runs_after_the_page_and_is_well_formed(self):
+        from jslint import balance, unterminated, uses_template_literals
+        code = self.code()
+        self.assertLess(self.template().index("</main>"), self.template().index(code))
+        self.assertIsNone(unterminated(code))
+        self.assertIsNone(balance(code))
+        self.assertFalse(uses_template_literals(code))
+
+    def test_it_sorts_only_the_list_marked_for_it(self):
+        code = self.code()
+        self.assertIn("var table = document.querySelector('table[data-sortable]');",
+                      code)
+        self.assertIn("if (!table || !table.tHead || !table.tBodies.length) return;",
+                      code)
+
+    def test_each_heading_becomes_a_button_styled_as_the_dashboards(self):
+        code = self.code()
+        for needed in ("document.createElement('button')", "button.type = 'button';",
+                       "label.textContent = th.textContent;",
+                       "arrow.className = 'arrow';",
+                       "th.className = th.className ? th.className + ' sortable' "
+                       ": 'sortable';",
+                       "for (var h = 0; h < heads.length; h++) sortable(heads[h], h);"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, code)
+
+    def test_a_figure_sorts_highest_first_the_name_a_to_z_and_again_turns_round(self):
+        code = self.code()
+        self.assertIn("var state = { col: 0, dir: 1 };", code)
+        self.assertIn("if (state.col === col) state.dir = -state.dir;", code)
+        self.assertIn("else state = { col: col, dir: col === 0 ? 1 : -1 };", code)
+
+    def test_a_tie_keeps_the_name_order_and_a_dash_sorts_below_every_figure(self):
+        code = self.code()
+        self.assertIn("if (col === 0) return item.at;", code)
+        self.assertIn("var figure = parseFloat(item.row.cells[col].textContent);", code)
+        self.assertIn("return isNaN(figure) ? -1 : figure;", code)
+        self.assertIn("return cmp === 0 ? a.at - b.at : cmp * dir;", code)
+        self.assertIn("for (var i = 0; i < items.length; i++) "
+                      "body.appendChild(items[i].row);", code)
+
+    def test_the_heading_sorted_by_says_so_and_the_rest_say_none(self):
+        code = self.code()
+        self.assertIn("heads[c].setAttribute('aria-sort', on ? (dir === 1 ? "
+                      "'ascending' : 'descending')", code)
+        self.assertIn(": 'none');", code)
+        self.assertIn("on ? (dir === 1 ? '\\u25B2' : '\\u25BC') : '';", code)
+
+    def test_it_says_how_once_it_can(self):
+        code = self.code()
+        self.assertIn("var lead = document.querySelector('.view-head');", code)
+        self.assertIn("'Select a column heading to sort the list by it, and ' +\n"
+                      "      'again to turn the order round.'", code)
+        self.assertTrue(code.rstrip().endswith("draw();\n}());"), code[-40:])
+
+
+class TestTheReadmeSaysTheListSorts(unittest.TestCase):
+    """4.545: the README's *Every player this season* section says how it sorts."""
+
+    def test_it_says_so_and_that_it_is_still_no_ranking(self):
+        text = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("The list opens in name order, A to Z. Select a column heading "
+                      "to sort it by that column, a figure highest first and the "
+                      "names A to Z, and select the same heading again to turn the "
+                      "order round. Players level on a figure stay in name order. "
+                      "However it is sorted, it is not a ranking:", text)
 
 
 if __name__ == "__main__":

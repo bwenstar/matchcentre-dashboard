@@ -10,6 +10,20 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-03
+
+### Added
+
+- **The page of every player sorts by any column.** *Players this season*
+  (`careers.html`), and *Careers across seasons* in multi-season mode, list
+  everyone by name as before, and each heading of the list is now a button that
+  sorts it by that column, as a dashboard's Players table does: a figure highest
+  first and the names A to Z, the same heading again to turn the order round,
+  players level on a figure in name order, and a win rate of no decided set 
+  below every figure. With scripts off the list stays in name order. However it
+  is sorted, the page still says, it is no ranking. README section: *Every
+  player this season, on one page*.
+
 ## [0.3.0] — 2026-10-29
 
 ### Added

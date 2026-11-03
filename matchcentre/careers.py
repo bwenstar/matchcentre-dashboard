@@ -118,8 +118,8 @@ _INTRO = (
     "club's settings tell them apart. Every row names its team and grade. Only "
     "the seasons on the front page are counted.",
     "Listed by name. A season in one grade and a season in another are not the "
-    "same tennis, so this is a record of how much somebody played, not a "
-    "ranking.",
+    "same tennis, so however the list is sorted, it is a record of how much "
+    "somebody played, not a ranking.",
 )
 _ONE_SEASON = ("Only one season has results so far, so every total below is that "
                "season's. They start adding up when a second season's cards are "
@@ -131,7 +131,10 @@ _INDEX_INTRO = (
     "every season opens the page its row was copied from. This page lists the "
     "names only.",
 )
-_INDEX_CAPTION = "Everyone named in the seasons built so far, by name"
+# The list's caption, which says no order: the list opens by name, and its
+# headings sort it by any figure (4.545). A split index's list of names alone is
+# not sorted, and says ", by name" after it (:func:`_index_html`).
+_INDEX_CAPTION = "Everyone named in the seasons built so far"
 
 HEADING = "Careers across seasons"
 
@@ -154,8 +157,8 @@ _SINGLE_INTRO = (
     "club's settings tell them apart. Every row names its competition and team. "
     "Only the competitions on the front page are counted.",
     "Listed by name. Matches in one competition and matches in another are not "
-    "the same tennis, so this is a record of how much somebody played, not a "
-    "ranking.",
+    "the same tennis, so however the list is sorted, it is a record of how much "
+    "somebody played, not a ranking.",
 )
 _ONE_COMPETITION = ("Only one competition has results so far, so every total "
                     "below is that competition's. They start adding up when a "
@@ -225,7 +228,7 @@ _WORDS = {
     False: _Words(heading=SINGLE_HEADING, intro=_SINGLE_INTRO, one=_ONE_COMPETITION,
                   none=_NO_COMPETITION, index_intro=_SINGLE_INDEX_INTRO,
                   split=_SINGLE_SPLIT, named_in="this season's competitions",
-                  listed="Everyone named in this season's competitions, by name",
+                  listed="Everyone named in this season's competitions",
                   columns=SINGLE_INDEX_COLUMNS, by="competition by competition",
                   part="competition", total="All competitions",
                   initials="Players by initial"),
@@ -541,11 +544,17 @@ def _index_html(careers: Sequence[Career], *, caption: str | None = None,
     of its initial, and its row carries the career's anchor, so a link made for
     the one page lands on the name. And the name alone: its figures are on the
     page it links, and in every row they made the index the split's largest page.
+
+    A list with figures is marked ``data-sortable``, which the page's script makes
+    each heading of a button that sorts the list by its column (4.545). With
+    scripts off it stays in the order given, by name. A list of names alone is
+    not sortable, and its caption says it is by name.
     """
     words = _WORDS[multi]
     columns = words.columns if page is None else ()
-    caption = caption or words.listed
-    lines = ['<div class="table-wrap"><table>',
+    caption = caption or (words.listed + ("" if columns else ", by name"))
+    table = "<table data-sortable>" if columns else "<table>"
+    lines = [f'<div class="table-wrap">{table}',
              f"  {_caption(_e(caption), columns)}",
              '  <thead><tr><th scope="col">Player</th>'
              + _head_cells(columns) + "</tr></thead>",
@@ -669,7 +678,7 @@ def initial_html(key: str, careers: Sequence[Career], *,
         return "\n".join(lines)
     lines += _index_html(mine, multi=multi,
                          caption=f"Everyone named in {named_in} whose name "
-                                 f"starts with {starts}, by name")
+                                 f"starts with {starts}")
     for career in mine:
         lines += _career_html(career, href, multi=multi)
     return "\n".join(lines)

@@ -37,11 +37,14 @@
     CAREERS        the page body, rendered by matchcentre/careers.py.
     FOOTER         the front page's footer line.
 
-  No script but the theme reader below, and no data island: the figures are in the
-  markup, so the page works with JavaScript off and opens by double-click. A split
-  index adds one more at its foot, which takes a season page's link to a career
-  on from the name's row to the initial's page; with scripts off the row is where
-  the link lands, one click from the career.
+  No data island: the figures are in the markup, so the page works with
+  JavaScript off and opens by double-click. Two scripts, the theme reader below
+  and, at the foot, the one that makes each heading of the list of players a
+  button that sorts it by that column (4.545). Neither writes a figure: with
+  scripts off the list stays in name order, as the markup has it. A split index
+  adds one more, which takes a season page's link to a career on from the name's
+  row to the initial's page; with scripts off the row is where the link lands,
+  one click from the career.
 -->
 <title><!--HEADING--> · <!--TITLE--></title>
 <link rel="stylesheet" href="styles.css">
@@ -66,5 +69,76 @@
 <!--CAREERS-->
 </main>
 <footer class="meta"><!--FOOTER--></footer>
+<script>
+/* The list of players sorted by any of its columns (4.545), as a dashboard's
+ * Players table is (app.js renderPlayers): each heading a button, a figure sorted
+ * highest first and the name A to Z, the same heading again turning the order
+ * round, and a tie kept in name order. A dash, a win rate of no decided set,
+ * sorts below every figure. The list opens in the markup's order, by name, which
+ * is the order with scripts off too. Only a list careers.py marks data-sortable,
+ * one with figures, is sorted: a split index lists names alone. */
+(function () {
+  var table = document.querySelector('table[data-sortable]');
+  if (!table || !table.tHead || !table.tBodies.length) return;
+  var heads = table.tHead.rows[0].cells;
+  var body = table.tBodies[0];
+  var items = [];
+  var rows = body.rows;
+  for (var r = 0; r < rows.length; r++) items.push({ row: rows[r], at: r });
+  var state = { col: 0, dir: 1 };
+
+  // The name's place in the list as the markup has it, or the figure in the cell.
+  function key(item, col) {
+    if (col === 0) return item.at;
+    var figure = parseFloat(item.row.cells[col].textContent);
+    return isNaN(figure) ? -1 : figure;
+  }
+
+  function draw() {
+    var col = state.col, dir = state.dir;
+    items.sort(function (a, b) {
+      var cmp = key(a, col) - key(b, col);
+      return cmp === 0 ? a.at - b.at : cmp * dir;
+    });
+    for (var i = 0; i < items.length; i++) body.appendChild(items[i].row);
+    for (var c = 0; c < heads.length; c++) {
+      var on = c === col;
+      heads[c].setAttribute('aria-sort', on ? (dir === 1 ? 'ascending' : 'descending')
+                                            : 'none');
+      heads[c].getElementsByTagName('span')[1].textContent =
+        on ? (dir === 1 ? '\u25B2' : '\u25BC') : '';
+    }
+  }
+
+  function sortable(th, col) {
+    var button = document.createElement('button');
+    var label = document.createElement('span');
+    var arrow = document.createElement('span');
+    button.type = 'button';
+    label.textContent = th.textContent;
+    arrow.className = 'arrow';
+    button.appendChild(label);
+    button.appendChild(arrow);
+    th.textContent = '';
+    th.appendChild(button);
+    th.className = th.className ? th.className + ' sortable' : 'sortable';
+    button.addEventListener('click', function () {
+      if (state.col === col) state.dir = -state.dir;
+      else state = { col: col, dir: col === 0 ? 1 : -1 };
+      draw();
+    });
+  }
+
+  for (var h = 0; h < heads.length; h++) sortable(heads[h], h);
+  var lead = document.querySelector('.view-head');
+  if (lead) {
+    var said = document.createElement('p');
+    said.textContent = 'Select a column heading to sort the list by it, and ' +
+      'again to turn the order round.';
+    lead.appendChild(said);
+  }
+  draw();
+}());
+</script>
 </body>
 </html>
