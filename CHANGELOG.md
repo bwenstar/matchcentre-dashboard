@@ -10,6 +10,8 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-04
+
 ### Added
 
 - **The Season tab: every match of a competition on one page.** Each match is a
