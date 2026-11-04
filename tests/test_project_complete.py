@@ -2243,6 +2243,19 @@ class TestTheReadmeSaysWhereTheDataComesFrom(unittest.TestCase):
         self.assertEqual(missing, [], f"the README embeds image(s) that are not in "
                                       f"the repository: {missing}")
 
+    def test_every_picture_of_the_dashboard_is_one_the_screenshot_tool_takes(self):
+        # 4.546: a picture added to the README by hand goes stale at the next change
+        # to the page, which tools/screenshots.py retakes and that one it does not.
+        # Read off the tool's VIEWS, the files it writes, and not imported, as the
+        # tool is a script.
+        tool = (ROOT / "tools" / "screenshots.py").read_text(encoding="utf-8")
+        taken = set(re.findall(r'^\s+\("([\w-]+\.png)", "#/', tool, flags=re.M))
+        shown = set(re.findall(r"\]\(docs/screenshots/([\w-]+\.png)\)", self.readme()))
+        self.assertTrue(shown, "the README shows no screenshot")
+        self.assertEqual(sorted(shown - taken), [], "the README shows pictures the "
+                                                    "screenshot tool does not take")
+        self.assertIn("season.png", shown)
+
     def test_every_workflow_the_readme_names_is_a_workflow_that_exists(self):
         # A status badge is a URL built out of a workflow's filename. Rename the
         # file and the badge does not break loudly: it renders as a grey "no

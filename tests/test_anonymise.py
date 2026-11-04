@@ -302,7 +302,7 @@ NIGHT_AWAY = ("Delta Dunmore", "Echo Elmsworth", "Foxtrot Fenwick")
 # Printed under a squad and read as a heading, so on no roster and in no document
 # but the card's note, which quotes it: a player's name, for all anybody can tell.
 # One for each way the reader takes a line for one, so each is found on its own.
-HEADING = "Robin Quaife"
+HEADING = "Rowan Quaife"
 BRACKETED = "Juniper Oakhanger"
 
 
@@ -923,7 +923,7 @@ class TestTheBuildWritesNothingWhenALineTheSquadsWereEndedAtSurvives(
     """A team named after the line: the guard finds it as it finds a player's name.
 
     Measured before on this module's cards with ``[team_names] example-bravos =
-    "Robin Quaife Shield"``: ``--players numbered`` exited 0, said ``no player's full
+    "Rowan Quaife Shield"``: ``--players numbered`` exited 0, said ``no player's full
     name is in any`` document, and wrote the name into ``season.json`` and
     ``season-data.js``, in the team's name and in the note. Rejected: withholding
     the note alone, which leaves the team's name, a label the club gave and the
@@ -961,7 +961,7 @@ class TestTheBuildWritesNothingWhenALineTheSquadsWereEndedAtSurvives(
                           f"as a heading and may be a player's name.", said)
             self.assertIn("Rename it in config.toml: a team under [team_names]", said)
             section = done.out[done.out.index("== players: no dashboard written"):]
-            self.assertNotRegex(fold(section), r"robin|quaife|juniper|oakhanger")
+            self.assertNotRegex(fold(section), r"rowan|quaife|juniper|oakhanger")
 
     def test_it_exits_2_and_writes_nothing(self):
         self.refused(f"{HEADING} Shield", "<2 words, 12 chars>", "data/Round1/r1.pdf")
@@ -2355,8 +2355,8 @@ class TestTheGuardSearchesEachStringItReadsOnceARun(unittest.TestCase):
         after the front page's id was. The searches of a refusal are made only
         where a name survives, which no build of the demo does.
         """
-        config = ('[team_names]\nexample-bravos = "Robin Quaife Shield"\n\n'
-                  '[competitions.tuesday-division-c]\nlabel = "Robin Quaife Cup"\n'
+        config = ('[team_names]\nexample-bravos = "Rowan Quaife Shield"\n\n'
+                  '[competitions.tuesday-division-c]\nlabel = "Rowan Quaife Cup"\n'
                   'day = "Tuesday"\ndivision = "C"\n')
         with tempfile.TemporaryDirectory() as tmp:
             write_heading_cards(Path(tmp) / "data")

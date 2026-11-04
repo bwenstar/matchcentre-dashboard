@@ -7100,7 +7100,7 @@ class TestAPageBesideADocumentOfAnotherFormatDrawsNoViewOfIt(WebAssetCase):
     """
 
     VIEWS = ("renderTeam", "renderPlayer", "renderMatch", "renderMatches",
-             "renderPlayers", "renderOverview")
+             "renderPlayers", "renderOverview", "renderSeason")
 
     def test_the_views_are_withheld_under_the_notes_own_condition(self):
         self.assertEqual(self.guard_for("render", "renderWithheld(main)",
@@ -9838,7 +9838,8 @@ class TestEverySheetOfAPrintoutNamesTheClubAndTheSeason(WebAssetCase):
     NAMER = "setPageName"
     PARTS = ("m.label", "m.club", "m.season_label")
     VIEWS = {"renderTeam": "t.name", "renderPlayer": "p.name",
-             "renderMatches": "'Matches'", "renderPlayers": "'Players'"}
+             "renderMatches": "'Matches'", "renderPlayers": "'Players'",
+             "renderSeason": "'Season'"}
 
     def namer(self) -> str:
         """The source of the one function that composes the repeated name."""
@@ -11478,7 +11479,8 @@ class TestEachKindOfBlockThatEndedOnAWordOrTwoIsWrappedAsItWasMeasured(WebAssetC
 
     # Every function that writes a view's head into #view.
     VIEWS = ("renderOverview", "renderTeam", "renderPlayer", "renderMatches",
-             "renderMatch", "renderPlayers", "renderMissing", "showLoadFailure")
+             "renderMatch", "renderPlayers", "renderMissing", "showLoadFailure",
+             "renderSeason")
 
     # What each kind is, the selector the sheet reaches it through and the wrap it
     # gives it there, the element index.html holds it in, the elements the script
@@ -13395,6 +13397,152 @@ class TestThePlacingsAreDrawnAsPythonDecidedThem(WebAssetCase):
         self.assertIn("var teen = place % 100 >= 11 && place % 100 <= 13;", code)
         self.assertIn("var suffix = { 1: 'st', 2: 'nd', 3: 'rd' }[place % 10];", code)
         self.assertIn("return place + (teen || !suffix ? 'th' : suffix);", code)
+
+
+class TestTheSeasonViewShowsEveryMatchOnOnePage(WebAssetCase):
+    """4.546: every match of the season on one page, a tile each, then the finals.
+
+    The owner asked (2026-11-04) for a view of a competition's matches on one
+    graphic, the double round robin and then the finals, each match opening its
+    details, and kept the trial. Measured before: the dashboard had three views,
+    Overview, Matches and Players, and no page showed the season at once. Measured
+    after in headless Chrome on the owner's season (/tmp/mc55326/out-season,
+    screenshots in /tmp/mc55326/season-shots2): each grade's two round robins as
+    two stages of five rounds, a washed-out round said as one, the placing
+    matches with the places they gave, a team picked out marked with W, L or D
+    on each of its tiles; at 390 wide the rounds wrap two across and nothing
+    scrolls sideways. Read as text here, as the suite runs no JavaScript.
+    Rejected: a team-against-team grid, which shows each pair once and loses
+    the order the season was played in; and the tiles faded by opacity, which
+    takes their words below AA.
+    """
+
+    def code(self, name: str) -> str:
+        return jslint.without_comments(self.body(name))
+
+    def test_its_tab_and_its_route_name_it(self):
+        self.assertIn('<a href="#/season">Season</a>', self.assets()["index.html"])
+        self.assertIn("if (parts[0] === 'season') return { view: 'season' };",
+                      self.code("parseRoute"))
+        self.assertIn("else if (route.view === 'season') renderSeason(main);",
+                      self.code("render"))
+        self.assertIn("season: '#/season'", self.code("markTabs"))
+
+    def test_each_round_lists_its_fixtures_as_the_matches_page_does(self):
+        code = self.code("seasonRound")
+        for needed in ("var fixtures = fixturesOf(r);", "var cards = cardsOf(f.keys);",
+                       "if (!cards.length) column.appendChild(fixtureTile(f));",
+                       "cards.forEach(function (m) { column.appendChild(matchTile(m)); });",
+                       "(r.byes || []).forEach(function (slug) {"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, code)
+        self.assertIn("f.washed_out ? 'washed out' : (f.card_missing ? 'no card yet' "
+                      ": 'to play')", self.code("fixtureTile"))
+
+    def test_a_tile_opens_its_match_by_the_id_its_card_prints(self):
+        code = self.code("matchTile")
+        self.assertIn("var link = m.id ? '#/match/' + encodeURIComponent(m.id) : null;",
+                      code)
+        self.assertIn("el(link ? 'a' : 'div', { class: 'season-match', href: link,", code)
+
+    def test_its_games_show_only_where_the_night_counts(self):
+        code = self.code("matchTile")
+        self.assertIn("var played = countsAsPlayed(m);", code)
+        self.assertIn("played ? num(m.home_games) : ''", code)
+        self.assertIn("var uncounted = uncountedWords(m);", self.code("tileWords"))
+
+    def test_a_double_round_robin_is_a_stage_for_each_round_robin(self):
+        code = self.code("roundRobins")
+        self.assertIn("var size = teams % 2 ? teams : teams - 1;", code)
+        self.assertIn("if (met[pair]) return false;", code)
+        self.assertIn("if (!clean) return [{ title: 'Regular season', rounds: regular }];",
+                      code)
+
+    def test_the_finals_are_the_placing_matches_python_decided(self):
+        code = self.code("placingStage")
+        for needed in ("var p = S.placings;", "(p.matches || []).forEach(",
+                       "if (p.unpaired) {", "(p.strays || []).forEach("):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, code)
+        tile = self.code("placingTile")
+        self.assertIn("ordinal(x.places[0]) + ' v ' + ordinal(x.places[1])", tile)
+        self.assertIn("PLACING_WORDS[x.outcome]", tile)
+
+    def test_a_team_picked_out_is_marked_with_its_result_in_each_tile(self):
+        code = self.code("markTile")
+        self.assertIn("if (slug) tile.classList.add(mine ? 'mine' : 'faded');", code)
+        self.assertIn("RESULT_MARKS[result === 'draw' ? 'draw' : (result === side ? "
+                      "'win' : 'loss')]", code)
+        self.assertIn("key.hidden = !slug;", self.code("seasonPicker"))
+        self.assertIn("b.setAttribute('aria-pressed', b.getAttribute('data-team') === "
+                      "slug ? 'true' : 'false');", self.code("seasonPicker"))
+
+    def test_a_stage_is_headed_with_the_rounds_it_spans(self):
+        code = self.code("seasonStage")
+        self.assertIn("'Rounds ' + first + ' to ' + last", code)
+        self.assertIn("el('h2', { class: 'section', text: title }),", code)
+        names = self.code("roundRobins")
+        self.assertIn("var names = ['First', 'Second', 'Third', 'Fourth', 'Fifth', "
+                      "'Sixth'];", names)
+        self.assertIn("(names[i] || ordinal(i + 1)) + ' round robin'", names)
+
+    def test_its_rests_and_a_round_washed_out_whole_are_said(self):
+        code = self.code("seasonRound")
+        self.assertIn("text: teamShort(slug) + ' rests' }));", code)
+        self.assertIn("r.washed_out ? 'The whole round was washed out.' : "
+                      "'No fixtures listed.'", code)
+
+    def test_a_tile_says_what_a_card_is_when_it_is_no_result(self):
+        code = self.code("tileWords")
+        self.assertIn("if (uncounted) return uncounted;", code)
+        self.assertIn("if (m.not_counted === 'level') return 'level, and this "
+                      "competition has no draws';", code)
+        self.assertIn("if (m.result === 'draw') return 'drawn';", code)
+        self.assertIn("var tiebreak = tiebreakWords(m);\n  if (tiebreak) return tiebreak;",
+                      code)
+        self.assertIn("return m.status !== 'played' ? m.status : '';", code)
+
+    def test_the_winner_is_in_bold(self):
+        self.assertIn("m.result === 'home'));", self.code("matchTile"))
+        self.assertIn("m.result === 'away'));", self.code("matchTile"))
+        self.assertIn("class: won ? 'season-side won' : 'season-side'",
+                      self.code("tileSide"))
+        styles = self.assets()["styles.css"]
+        self.assertIn(".season-side.won { color: var(--text-primary); font-weight: "
+                      "600; }", styles)
+
+    def test_a_placing_tile_says_the_place_each_team_took(self):
+        code = self.code("placingTile")
+        self.assertIn("ordinal(x.first === slug ? x.places[0] : x.places[1])", code)
+        self.assertIn("if (x.outcome !== 'won') {", code)
+        self.assertIn("tileSide(slug, games, x.outcome === 'won' && x.first === slug)",
+                      code)
+        self.assertIn("'no match: keeps ' + ordinal(p.unpaired.place)",
+                      self.code("placingStage"))
+
+    def test_the_marks_are_the_ladders_letters_in_its_words(self):
+        source = self.assets()["app.js"]
+        self.assertIn("var RESULT_MARKS = { win: COL.matchesWon, loss: COL.matchesLost, "
+                      "draw: COL.matchesDrawn };", source)
+        self.assertIn("text: columnKey([RESULT_MARKS.win, RESULT_MARKS.loss, "
+                      "RESULT_MARKS.draw]) });", self.code("seasonPicker"))
+
+    def test_the_rounds_wrap_to_the_width_and_quieten_by_colour(self):
+        styles = self.assets()["styles.css"]
+        self.assertIn(".season-rounds { display: grid; grid-template-columns: "
+                      "repeat(auto-fit, minmax(176px, 1fr)); gap: 10px; }", styles)
+        self.assertIn(".season-rounds--one { grid-template-columns: minmax(176px, "
+                      "280px); }", styles)
+        start = styles.index("/* ------------------------------------------------------------ season view -- */")
+        end = styles.index("/* ------------------------------------------------------------- match list -- */")
+        rules = styles[start:end]
+        self.assertNotIn("opacity", re.sub(r"/\*.*?\*/", "", rules, flags=re.S))
+        self.assertIn(".season-note.faded { color: var(--text-muted); }", rules)
+
+    def test_the_readme_says_what_it_shows(self):
+        text = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+        self.assertIn("### The whole season on one page", text)
+        self.assertIn("The **Season** tab shows every match", text)
 
 
 if __name__ == "__main__":

@@ -4233,6 +4233,297 @@ function teamPlacing(slug) {
     ', and the higher place goes to the team placed higher on the ladder.';
 }
 
+/* ========================================================== view: season == */
+
+/* Every match of the season on one page, round by round and then the finals: a tile
+ * each, which opens the match's own page (4.546, the owner's idea, tried and kept on
+ * 2026-11-04). Each round lists every fixture it has, as the Matches page does: a
+ * card's games and its winner, or what a fixture with no card is, to play, washed out
+ * or a card missing; and its rests. A double round robin, every pair of teams meeting
+ * once and then again, is a stage per round robin (roundRobins). Under finals =
+ * "placings" the finals are the placing matches Python decided, each with the places
+ * it gave; otherwise the finals rounds. A team picked out has its matches marked, each
+ * with its result, over the rest. */
+function renderSeason(main) {
+  setPageName('Season');
+  main.appendChild(el('div', { class: 'view-head' }, [
+    el('h1', { text: 'Season' }),
+    el('p', { text: 'Every match of the season on one page, round by round and then ' +
+      'the finals. Select a match to open it, or pick out a team to mark its ' +
+      'matches.' })
+  ]));
+  var rounds = (S.rounds || []).slice().sort(function (a, b) {
+    return compareRounds(a.number, b.number);
+  });
+  if (!rounds.length) {
+    main.appendChild(el('p', { class: 'empty-note', text: 'No rounds recorded yet.' }));
+    return;
+  }
+  var board = el('div', { class: 'season-board' });
+  main.appendChild(seasonPicker(board));
+  var regular = rounds.filter(function (r) { return !r.is_finals; });
+  var finals = rounds.filter(function (r) { return r.is_finals; });
+  roundRobins(regular).forEach(function (stage) {
+    board.appendChild(seasonStage(stage.title, stage.rounds.map(seasonRound)));
+  });
+  if (S.placings) board.appendChild(placingStage(finals));
+  else if (finals.length) board.appendChild(seasonStage('Finals', finals.map(seasonRound)));
+  main.appendChild(board);
+}
+
+/* The regular rounds as the round robins they are: a round robin is as many rounds as
+ * every team needs to meet every other once, one fewer than the teams or, with a rest
+ * each round, as many. Where the rounds make more than one and no pair of teams meets
+ * twice inside one, each is a stage; otherwise all of them are one, the regular
+ * season. A washout with no draw typed adds a round and no fixture, so it is a round
+ * of its round robin and a pair it lacks is no pair met twice. */
+function roundRobins(regular) {
+  var teams = (S.teams || []).length;
+  var size = teams % 2 ? teams : teams - 1;
+  var stages = [];
+  for (var at = 0; size > 0 && regular.length > size && at < regular.length; at += size) {
+    stages.push(regular.slice(at, at + size));
+  }
+  var clean = stages.length > 1 && stages.every(function (rounds) {
+    var met = {};
+    return rounds.every(function (r) {
+      return fixturesOf(r).every(function (f) {
+        var pair = [f.home, f.away].sort().join(' ');
+        if (met[pair]) return false;
+        met[pair] = true;
+        return true;
+      });
+    });
+  });
+  if (!clean) return [{ title: 'Regular season', rounds: regular }];
+  var names = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth'];
+  return stages.map(function (rounds, i) {
+    return { title: (names[i] || ordinal(i + 1)) + ' round robin', rounds: rounds };
+  });
+}
+
+function fixturesOf(r) {
+  return (S.fixtures || []).filter(function (f) { return f.round === r.number; });
+}
+
+/* A stage of the season, headed with its name and the rounds it spans. */
+function seasonStage(title, columns) {
+  var first = columns.length ? columns[0].getAttribute('data-round') : '';
+  var last = columns.length ? columns[columns.length - 1].getAttribute('data-round') : '';
+  var span = first === last ? roundTitle(first)
+    : (isNumericRound(first) && isNumericRound(last) ? 'Rounds ' + first + ' to ' + last
+      : roundTitle(first) + ' to ' + roundTitle(last));
+  return el('section', { class: 'season-stage', 'aria-label': title }, [
+    el('h2', { class: 'section', text: title }),
+    el('p', { class: 'season-sub', text: span }),
+    el('div', { class: 'season-rounds' }, columns)
+  ]);
+}
+
+function dayMonth(iso) {
+  return longDate(iso).replace(/ \d{4}$/, '');
+}
+
+/* One round: its fixtures as tiles, a card each or the fixture's state, then its rests. */
+function seasonRound(r) {
+  var column = el('section', { class: 'season-round', 'data-round': r.number,
+    'aria-label': dotted([roundTitle(r.number), longDate(r.date)]) });
+  column.appendChild(el('h3', {}, [
+    el('span', { text: roundTitle(r.number) }),
+    el('span', { class: 'date', text: dayMonth(r.date) })
+  ]));
+  var fixtures = fixturesOf(r);
+  fixtures.forEach(function (f) {
+    var cards = cardsOf(f.keys);
+    if (!cards.length) column.appendChild(fixtureTile(f));
+    cards.forEach(function (m) { column.appendChild(matchTile(m)); });
+  });
+  if (!fixtures.length) {
+    column.appendChild(el('p', { class: 'season-note',
+      text: r.washed_out ? 'The whole round was washed out.' : 'No fixtures listed.' }));
+  }
+  (r.byes || []).forEach(function (slug) {
+    column.appendChild(el('p', { class: 'season-note', 'data-home': slug,
+      text: teamShort(slug) + ' rests' }));
+  });
+  return column;
+}
+
+/* A card's tile: both sides, the games where the night counts, the winner in bold, and
+ * under them what else the card is, in the match card's words. It opens the match's
+ * page, by the id its card prints; a card with no id is addressed by nothing. */
+function matchTile(m) {
+  var link = m.id ? '#/match/' + encodeURIComponent(m.id) : null;
+  var tile = el(link ? 'a' : 'div', { class: 'season-match', href: link,
+    'data-home': m.home, 'data-away': m.away, 'data-result': m.result });
+  var played = countsAsPlayed(m);
+  tile.appendChild(tileSide(m.home, played ? num(m.home_games) : '', m.result === 'home'));
+  tile.appendChild(tileSide(m.away, played ? num(m.away_games) : '', m.result === 'away'));
+  var said = tileWords(m);
+  if (said) tile.appendChild(el('span', { class: 'season-foot', text: said }));
+  return tile;
+}
+
+/* What else a card is, under its two sides, in the match card's words: counted for
+ * nothing, level where the grade has no draws, drawn, decided on sets where the games
+ * are level, a forfeit or a disputed card. */
+function tileWords(m) {
+  var uncounted = uncountedWords(m);
+  if (uncounted) return uncounted;
+  if (m.not_counted === 'level') return 'level, and this competition has no draws';
+  if (m.result === 'draw') return 'drawn';
+  var tiebreak = tiebreakWords(m);
+  if (tiebreak) return tiebreak;
+  return m.status !== 'played' ? m.status : '';
+}
+
+/* A side of a tile: the team's key, its name, a mark for its result when it is picked
+ * out, and its games. */
+function tileSide(slug, games, won) {
+  return el('span', { class: won ? 'season-side won' : 'season-side' }, [
+    el('span', { class: 'chip', style: keyStyle(teamColor(slug), teamDash(slug)),
+      'aria-hidden': 'true' }),
+    el('span', { class: 'name', text: teamShort(slug) }),
+    el('span', { class: 'season-badge', 'aria-hidden': 'true' }),
+    el('span', { class: 'score', text: games })
+  ]);
+}
+
+/* A fixture with no card: its two teams, and what it is. */
+function fixtureTile(f) {
+  var tile = el('div', { class: 'season-match', 'data-home': f.home, 'data-away': f.away });
+  tile.appendChild(tileSide(f.home, '', false));
+  tile.appendChild(tileSide(f.away, '', false));
+  tile.appendChild(el('span', { class: 'season-foot',
+    text: f.washed_out ? 'washed out' : (f.card_missing ? 'no card yet' : 'to play') }));
+  return tile;
+}
+
+/* The placing matches under finals = "placings", as Python decided them: the places of
+ * each, the two teams with the games on its card and the place each took, and how it
+ * was decided; the team an odd number leaves without a match at its place; and a
+ * finals card that is no placing match, as a card. Before the pairs are set, what they
+ * wait on. */
+function placingStage(finals) {
+  var p = S.placings;
+  var column = el('section', { class: 'season-round season-finals', 'data-round':
+    finals.length ? finals[0].number : '', 'aria-label': 'Placing matches' });
+  column.appendChild(el('h3', {}, [
+    el('span', { text: 'Placing matches' }),
+    el('span', { class: 'date', text: finals.length ? dayMonth(finals[0].date) : '' })
+  ]));
+  if (!p.set) {
+    column.appendChild(el('p', { class: 'season-note', text: 'Pairings are set by ' +
+      'ladder position once the regular rounds are in.' +
+      (p.waiting ? ' Not yet: ' + p.waiting + '.' : '') }));
+  } else {
+    (p.matches || []).forEach(function (x) { column.appendChild(placingTile(x)); });
+    if (p.unpaired) {
+      var alone = el('div', { class: 'season-match', 'data-home': p.unpaired.slug });
+      alone.appendChild(el('span', { class: 'season-places',
+        text: ordinal(p.unpaired.place) }));
+      alone.appendChild(tileSide(p.unpaired.slug, '', false));
+      alone.appendChild(el('span', { class: 'season-foot',
+        text: 'no match: keeps ' + ordinal(p.unpaired.place) }));
+      column.appendChild(alone);
+    }
+    (p.strays || []).forEach(function (i) {
+      if (S.matches[i]) column.appendChild(matchTile(S.matches[i]));
+    });
+  }
+  var stage = el('section', { class: 'season-stage', 'aria-label': 'Finals' }, [
+    el('h2', { class: 'section', text: 'Finals' }),
+    el('p', { class: 'season-sub', text: p.by === 'cards'
+      ? 'As the placing week\u2019s cards number them'
+      : (p.set ? 'By the final ladder' : 'Once the regular season is over') }),
+    el('div', { class: 'season-rounds season-rounds--one' }, [column])
+  ]);
+  return stage;
+}
+
+function placingTile(x) {
+  var card = x.key ? IDX.matchByKey[x.key] : null;
+  var link = card && card.id ? '#/match/' + encodeURIComponent(card.id) : null;
+  var played = !!card && countsAsPlayed(card);
+  var tile = el(link ? 'a' : 'div', { class: 'season-match season-placing', href: link,
+    'data-home': x.higher, 'data-away': x.lower });
+  tile.appendChild(el('span', { class: 'season-places',
+    text: ordinal(x.places[0]) + ' v ' + ordinal(x.places[1]) }));
+  [x.higher, x.lower].forEach(function (slug) {
+    var games = played ? num(card.home === slug ? card.home_games : card.away_games) : '';
+    var side = tileSide(slug, games, x.outcome === 'won' && x.first === slug);
+    if (x.first) {
+      side.insertBefore(el('span', { class: 'season-placed',
+        text: ordinal(x.first === slug ? x.places[0] : x.places[1]) }), side.lastChild);
+    }
+    tile.appendChild(side);
+  });
+  if (x.outcome !== 'won') {
+    tile.appendChild(el('span', { class: 'season-foot',
+      text: PLACING_WORDS[x.outcome] || x.outcome }));
+  }
+  return tile;
+}
+
+/* The row of teams a reader picks one out from, in ladder order, and All. A team
+ * picked out marks every tile and rest of its own, with its result in each, and quietens
+ * the rest; All marks nothing. One button pressed at a time, which says which. */
+function seasonPicker(board) {
+  var group = el('div', { class: 'season-picker', role: 'group',
+    'aria-label': 'Pick out a team' });
+  group.appendChild(el('span', { class: 'muted', text: 'Pick out a team:' }));
+  var buttons = [];
+  var key = el('p', { class: 'season-key', hidden: true,
+    text: columnKey([RESULT_MARKS.win, RESULT_MARKS.loss, RESULT_MARKS.draw]) });
+  function pick(slug) {
+    buttons.forEach(function (b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-team') === slug ? 'true' : 'false');
+    });
+    Array.prototype.forEach.call(board.querySelectorAll('[data-home]'), function (tile) {
+      markTile(tile, slug);
+    });
+    key.hidden = !slug;
+  }
+  [''].concat(IDX.ladder.map(function (t) { return t.slug; })).forEach(function (slug) {
+    var button = el('button', { type: 'button', class: 'btn', 'data-team': slug,
+      'aria-pressed': slug ? 'false' : 'true' }, slug ? [
+        el('span', { class: 'chip', style: keyStyle(teamColor(slug), teamDash(slug)),
+          'aria-hidden': 'true' }),
+        el('span', { text: teamShort(slug) })
+      ] : [el('span', { text: 'All' })]);
+    button.addEventListener('click', function () { pick(slug); });
+    buttons.push(button);
+    group.appendChild(button);
+  });
+  group.appendChild(key);
+  return group;
+}
+
+/* The mark a team picked out has on each of its tiles, and its words, which the line
+ * under the row of teams prints while one is picked (seasonPicker): a letter is
+ * explained where it is shown, as every abbreviated heading is, and in the words the
+ * ladder heads the same letters with, from the one list of them. */
+var RESULT_MARKS = { win: COL.matchesWon, loss: COL.matchesLost, draw: COL.matchesDrawn };
+
+/* A tile or rest marked for *slug*, or for nobody: its own, with its result there,
+ * or quietened beside it. */
+function markTile(tile, slug) {
+  var home = tile.getAttribute('data-home');
+  var away = tile.getAttribute('data-away');
+  var mine = !!slug && (home === slug || away === slug);
+  tile.classList.remove('mine');
+  tile.classList.remove('faded');
+  if (slug) tile.classList.add(mine ? 'mine' : 'faded');
+  var result = tile.getAttribute('data-result');
+  var side = home === slug ? 'home' : 'away';
+  var mark = !mine || !result || result === 'none' ? null
+    : RESULT_MARKS[result === 'draw' ? 'draw' : (result === side ? 'win' : 'loss')];
+  Array.prototype.forEach.call(tile.querySelectorAll('.season-side'), function (s, i) {
+    var badge = s.querySelector('.season-badge');
+    if (badge) badge.textContent = mark && (i === 0 ? home : away) === slug ? mark.label : '';
+  });
+}
+
 /* =========================================================== view: match == */
 
 /* One night, at an address a club can send somebody.
@@ -4915,12 +5206,14 @@ function parseRoute() {
   if (parts[0] === 'player') return { view: 'player', slug: decodeOr(parts[1] || '') };
   if (parts[0] === 'match') return { view: 'match', id: decodeOr(parts[1] || '') };
   if (parts[0] === 'matches') return { view: 'matches' };
+  if (parts[0] === 'season') return { view: 'season' };
   if (parts[0] === 'players') return { view: 'players' };
   return { view: 'overview' };
 }
 
 function markTabs(route) {
-  var map = { overview: '#/', matches: '#/matches', players: '#/players' };
+  var map = { overview: '#/', season: '#/season', matches: '#/matches',
+              players: '#/players' };
   var want = map[route.view] || '';
   Array.prototype.forEach.call(document.querySelectorAll('.tabs a'), function (a) {
     if (a.getAttribute('href') === want) a.setAttribute('aria-current', 'page');
@@ -4975,6 +5268,7 @@ function render() {
   else if (route.view === 'player') renderPlayer(main, route.slug);
   else if (route.view === 'match') renderMatch(main, route.id);
   else if (route.view === 'matches') renderMatches(main);
+  else if (route.view === 'season') renderSeason(main);
   else if (route.view === 'players') renderPlayers(main);
   else renderOverview(main);
   markTabs(route);

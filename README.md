@@ -113,6 +113,9 @@ Each competition's dashboard is built from that competition's own cards and show
   through the season, and which matches they filled in for another team;
 - **every match** — the full set scores, who played in each rubber, the court, the
   date, and any forfeit, retirement, cancellation or dispute the card recorded;
+- **the whole season on one page** — every match as a tile, round by round and
+  then the finals (see [The whole season on one
+  page](#the-whole-season-on-one-page));
 - **the rules in force** — which scoring scheme, which set length and which match
   shape produced these numbers, stated on the page rather than buried in a file;
 - **anything the tool had to guess**, marked as a guess;
@@ -171,6 +174,29 @@ like `#/match/4200003`, which means it still points at the same night after you
 add next week's round and rebuild. That page names both teams and links their
 seasons, says which round and which id it is, and leads back to the matches list.
 
+### The whole season on one page
+
+The **Season** tab shows every match of the competition on one page, round by
+round and then the finals:
+
+- Each match is a tile in its round's column, with both teams and their games,
+  and the winner in bold. A card that is no result says what it is instead: a
+  forfeit, a match called off, a blank card, or a fixture washed out, still to
+  play or with no card yet. Each round lists the team that rests in it.
+- A season where every team meets every other once and then again, a double
+  round robin, is two blocks of rounds: **First round robin** and **Second round
+  robin**. Any other shape of season is one block, **Regular season**.
+- The **Finals** come last. Under `finals = "placings"` each placing match shows
+  the places it gave, and in a grade of an odd number of teams the team with no
+  match keeps its place.
+- Select a tile to open that match's own page, with its set scores.
+- Select a team in the row above the rounds to pick it out. Its tiles get a
+  border and **W**, **L** or **D**, which a line under the row spells out. **All**
+  shows every team again.
+
+The rounds wrap to the width of the screen, so on a phone they sit two across and
+nothing scrolls sideways.
+
 ### Every player this season, on one page
 
 Each dashboard's Players view lists one competition's players. To see the whole
@@ -227,6 +253,11 @@ is on this page. Yours will look like this with your club's names in it.
 **Every match, with its set scores and anything unusual the card recorded.**
 
 ![The matches page, listing each round's matches and the set scores of every rubber](docs/screenshots/matches.png)
+
+**The whole season on one page: every match as a tile in its round, then the
+finals, and any team picked out.**
+
+![The Season tab, every match of the season as a tile in its round's column](docs/screenshots/season.png)
 
 **One team: its home and away split, its recent form, its record in each rubber,
 and its head-to-head against every other side.**

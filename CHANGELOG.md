@@ -10,9 +10,19 @@ figures is spelled out in `README.md`, under *Versions and upgrading*.
 
 ## [Unreleased]
 
-## [0.4.0] — 2026-11-03
-
 ### Added
+
+- **The Season tab: every match of a competition on one page.** Each match is a
+  tile in its round's column, with both teams, their games and the winner in
+  bold, or what the card or the fixture is instead (a forfeit, a match called
+  off, a blank card, washed out, to play); each round lists its rests. A double
+  round robin is two blocks, *First round robin* and *Second round robin*, and
+  the finals come last, under `finals = "placings"` each placing match with the
+  place each team took. A tile opens its match's own page. Pick out a team to
+  border its matches and mark each W, L or D. The rounds wrap to the screen, two
+  across on a phone. README section: *The whole season on one page*.
+
+## [0.4.0] — 2026-11-03
 
 - **The page of every player sorts by any column.** *Players this season*
   (`careers.html`), and *Careers across seasons* in multi-season mode, list

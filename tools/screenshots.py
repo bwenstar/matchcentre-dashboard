@@ -80,6 +80,7 @@ BROWSERS = ("google-chrome", "google-chrome-stable", "chromium",
 # retuning, which is why both live in this one file.
 VIEWS: tuple[tuple[str, str, int, str], ...] = (
     ("ladder.png", "#/", 1710, "the ladder, with the rules that produced it"),
+    ("season.png", "#/season", 820, "every match of the season on one page"),
     ("matches.png", "#/matches", 1140, "every match, with its set scores"),
     ("players.png", "#/players", 1880, "every player's record"),
     ("team.png", "#/team/{team}", 2170, "one team: form, split and rubbers"),

@@ -869,6 +869,61 @@ th.sortable .arrow { color: var(--text-muted); font-size: 10px; }
 }
 tr.clickable { cursor: pointer; }
 
+/* ------------------------------------------------------------ season view -- */
+/* Every match of the season as a tile, round by round and then the finals (4.546).
+ * The rounds wrap to the width there is, so a phone has them two or one across and
+ * nothing scrolls sideways. A team picked out is marked by a border in the text colour
+ * and a result letter, and the rest are quietened in the muted grey every footnote is
+ * set in, which clears AA, rather than faded by opacity, which does not. */
+.season-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 16px; }
+.season-picker .btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 8px; }
+.season-picker .chip { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.season-key { flex-basis: 100%; margin: 0; color: var(--text-muted); font-size: 12px; }
+.season-stage { margin: 0 0 20px; }
+.season-stage .section { margin-bottom: 2px; }
+.season-sub { margin: 0 0 8px; color: var(--text-muted); font-size: 12px; }
+.season-rounds { display: grid; grid-template-columns: repeat(auto-fit, minmax(176px, 1fr)); gap: 10px; }
+.season-rounds--one { grid-template-columns: minmax(176px, 280px); }
+.season-round {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.season-round h3 { display: flex; justify-content: space-between; gap: 6px; margin: 0 0 2px; font-size: 12px; font-weight: 600; }
+.season-round h3 .date { color: var(--text-muted); font-weight: 400; }
+.season-match {
+  display: block;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+a.season-match:hover { color: var(--text-primary); border-color: var(--axis); }
+a.season-match:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.season-side { display: flex; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1.55; }
+.season-side .chip { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.season-side .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.season-side .score { font-variant-numeric: tabular-nums; }
+.season-side.won { color: var(--text-primary); font-weight: 600; }
+.season-badge { font-size: 11px; font-weight: 700; }
+.season-placed { color: var(--text-muted); font-size: 11px; }
+.season-places { display: block; margin-bottom: 2px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.season-foot { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.season-note { margin: 0; color: var(--text-muted); font-size: 11.5px; }
+.season-match.mine { border-color: var(--text-primary); box-shadow: inset 0 0 0 1px var(--text-primary); }
+.season-match.mine .season-badge { color: var(--text-primary); }
+.season-match.faded,
+.season-match.faded .season-side.won,
+.season-note.faded { color: var(--text-muted); }
+.season-note.mine { color: var(--text-primary); font-weight: 600; }
+
 /* ------------------------------------------------------------- match list -- */
 .round-head {
   display: flex;
